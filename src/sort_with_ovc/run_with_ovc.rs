@@ -24,7 +24,6 @@ pub struct RunWithOVC {
     total_bytes: usize,
     sparse_index: Vec<IndexEntry>,
     sampling_interval: usize,
-    entries_seen: usize,
 }
 
 impl RunWithOVC {
@@ -48,7 +47,6 @@ impl RunWithOVC {
             total_bytes: 0,
             sparse_index: Vec::new(),
             sampling_interval,
-            entries_seen: 0,
         })
     }
 
@@ -103,7 +101,7 @@ impl RunWithOVC {
             .expect("RunWithOVC is not initialized with a writer");
 
         // Use sampling interval for sparse index
-        if self.entries_seen % self.sampling_interval == 0 {
+        if self.total_entries % self.sampling_interval == 0 {
             let index_entry = IndexEntry {
                 key: key.clone(),
                 file_offset: self.total_bytes,
@@ -111,7 +109,6 @@ impl RunWithOVC {
             };
             self.sparse_index.push(index_entry);
         }
-        self.entries_seen += 1;
 
         let key_len = key.len() as u32;
         let value_len = value.len() as u32;
