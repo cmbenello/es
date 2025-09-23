@@ -28,6 +28,10 @@ impl SortBuffer {
         let entry_size = key.len() + value.len() + std::mem::size_of::<u32>() * 2; // key and value lengths
 
         if self.memory_used + entry_size > self.memory_limit {
+            println!(
+                "SortBuffer: Not enough space to append entry. Used: {}, Entry size: {}, Limit: {}",
+                self.memory_used, entry_size, self.memory_limit
+            );
             return false;
         }
 

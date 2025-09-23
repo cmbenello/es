@@ -23,17 +23,17 @@ pub struct RunWithOVC {
     start_bytes: usize,
     total_bytes: usize,
     sparse_index: Vec<IndexEntry>,
-    sampling_interval: usize,
+    indexing_interval: usize,
 }
 
 impl RunWithOVC {
     pub fn from_writer(writer: AlignedWriter) -> Result<Self, String> {
-        Self::from_writer_with_sampling_interval(writer, 1000)
+        Self::from_writer_with_indexing_interval(writer, 1000)
     }
 
-    pub fn from_writer_with_sampling_interval(
+    pub fn from_writer_with_indexing_interval(
         writer: AlignedWriter,
-        sampling_interval: usize,
+        indexing_interval: usize,
     ) -> Result<Self, String> {
         // Get current position in the file
         let start_bytes = writer.position() as usize;
@@ -46,14 +46,11 @@ impl RunWithOVC {
             start_bytes,
             total_bytes: 0,
             sparse_index: Vec::new(),
-            sampling_interval,
+            indexing_interval,
         })
     }
 
     pub fn finalize_write(&mut self) -> AlignedWriter {
-        // Sort sparse index by file offset before finalizing
-        self.sparse_index
-            .sort_unstable_by_key(|entry| entry.file_offset);
         self.writer.take().unwrap()
     }
 
@@ -101,7 +98,7 @@ impl RunWithOVC {
             .expect("RunWithOVC is not initialized with a writer");
 
         // Use sampling interval for sparse index
-        if self.total_entries % self.sampling_interval == 0 {
+        if self.total_entries % self.indexing_interval == 0 {
             let index_entry = IndexEntry {
                 key: key.clone(),
                 file_offset: self.total_bytes,
@@ -427,7 +424,7 @@ mod tests {
         let writer = AlignedWriter::from_fd(fd.clone()).unwrap();
 
         let mut run = RunWithOVC::from_writer(writer).unwrap();
-        run.sampling_interval = 5; // Small sampling interval for testing
+        run.indexing_interval = 5; // Small sampling interval for testing
 
         // Add more entries than reservoir size
         for i in 0..20 {
@@ -440,7 +437,7 @@ mod tests {
 
         // Sparse index should have entries based on sampling interval
         // With interval 5 and 20 entries (0-19), we sample at: 0, 5, 10, 15
-        let expected_entries = (0..20).filter(|&i| i % run.sampling_interval == 0).count();
+        let expected_entries = (0..20).filter(|&i| i % run.indexing_interval == 0).count();
         assert_eq!(run.sparse_index.len(), expected_entries);
 
         // Sparse index should be sorted by file offset

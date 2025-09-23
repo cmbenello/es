@@ -66,6 +66,9 @@ pub struct ExternalSorter {
     run_gen_threads: usize,
     merge_threads: usize,
     max_memory: usize,
+    sketch_size: usize,
+    sketch_sampling_interval: usize,
+    run_indexing_interval: usize,
     temp_dir_info: Arc<TempDirInfo>,
 }
 
@@ -110,6 +113,9 @@ impl ExternalSorter {
             run_gen_threads,
             merge_threads,
             max_memory,
+            sketch_size: 200,
+            sketch_sampling_interval: 1000,
+            run_indexing_interval: 1000,
             temp_dir_info: Arc::new(TempDirInfo {
                 path: temp_dir,
                 should_delete: true,
@@ -121,6 +127,9 @@ impl ExternalSorter {
         sort_input: Box<dyn SortInput>,
         num_threads: usize,
         per_thread_mem: usize,
+        sketch_size: usize,
+        sketch_sampling_interval: usize,
+        run_indexing_interval: usize,
         dir: impl AsRef<Path>,
     ) -> Result<(Vec<RunImpl>, Sketch<Vec<u8>>, RunGenerationStats), String> {
         // Start timing for run generation
@@ -137,9 +146,6 @@ impl ExternalSorter {
             "Starting sort with {} parallel scanners for run generation",
             scanners.len()
         );
-
-        let sketch_size = 200;
-        let sample_step_size = 1000;
 
         if scanners.is_empty() {
             return Ok((
@@ -179,15 +185,17 @@ impl ExternalSorter {
 
                 for (key, value) in scanner {
                     if !sort_buffer.has_space(&key, &value) {
-                        let mut output_run = RunImpl::from_writer(run_writer.take().unwrap())
-                            .expect("Failed to create run");
+                        let mut output_run = RunImpl::from_writer_with_indexing_interval(
+                            run_writer.take().unwrap(),
+                            run_indexing_interval,
+                        )
+                        .expect("Failed to create run");
 
                         for (k, v) in sort_buffer.sorted_iter() {
-                            cnt += 1;
-                            if cnt >= sample_step_size {
+                            if cnt % sketch_sampling_interval == 0 {
                                 sketch.update(k.clone());
-                                cnt = 0;
                             }
+                            cnt += 1;
                             output_run.append(k, v);
                         }
 
@@ -208,14 +216,15 @@ impl ExternalSorter {
 
                 // Final buffer
                 if !sort_buffer.is_empty() {
-                    let mut output_run = RunImpl::from_writer(run_writer.take().unwrap())
-                        .expect("Failed to create run");
+                    let mut output_run = RunImpl::from_writer_with_indexing_interval(
+                        run_writer.take().unwrap(),
+                        run_indexing_interval,
+                    )
+                    .expect("Failed to create run");
 
                     for (k, v) in sort_buffer.sorted_iter() {
-                        cnt += 1;
-                        if cnt >= sample_step_size {
+                        if cnt >= sketch_sampling_interval {
                             sketch.update(k.clone());
-                            cnt = 0;
                         }
                         output_run.append(k, v);
                     }
@@ -433,6 +442,9 @@ impl Sorter for ExternalSorter {
             sort_input,
             self.run_gen_threads,
             self.max_memory / self.run_gen_threads,
+            self.sketch_size,
+            self.sketch_sampling_interval,
+            self.run_indexing_interval,
             self.temp_dir_info.as_ref(),
         )?;
 

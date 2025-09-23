@@ -22,17 +22,17 @@ pub struct RunImpl {
     start_bytes: usize,
     total_bytes: usize,
     sparse_index: Vec<IndexEntry>,
-    sampling_interval: usize,
+    indexing_interval: usize,
 }
 
 impl RunImpl {
     pub fn from_writer(writer: AlignedWriter) -> Result<Self, String> {
-        Self::from_writer_with_sampling_interval(writer, 1000)
+        Self::from_writer_with_indexing_interval(writer, 1000)
     }
 
-    pub fn from_writer_with_sampling_interval(
+    pub fn from_writer_with_indexing_interval(
         writer: AlignedWriter,
-        sampling_interval: usize,
+        indexing_interval: usize,
     ) -> Result<Self, String> {
         // Get current position in the file
         let start_bytes = writer.position() as usize;
@@ -45,14 +45,11 @@ impl RunImpl {
             start_bytes,
             total_bytes: 0,
             sparse_index: Vec::new(),
-            sampling_interval,
+            indexing_interval,
         })
     }
 
     pub fn finalize_write(&mut self) -> AlignedWriter {
-        // Sort sparse index by file offset before finalizing
-        self.sparse_index
-            .sort_unstable_by_key(|entry| entry.file_offset);
         self.writer.take().unwrap()
     }
 
@@ -100,7 +97,7 @@ impl RunImpl {
             .expect("RunImpl is not initialized with a writer");
 
         // Use sampling interval for sparse index
-        if self.total_entries % self.sampling_interval == 0 {
+        if self.total_entries % self.indexing_interval == 0 {
             let index_entry = IndexEntry {
                 key: key.clone(),
                 file_offset: self.total_bytes,
@@ -827,9 +824,9 @@ mod tests {
     }
 
     #[test]
-    fn test_sampling_interval_sparse_index() {
-        let writer = get_test_writer("sampling_interval");
-        let mut run = RunImpl::from_writer_with_sampling_interval(writer, 500).unwrap();
+    fn test_indexing_interval_sparse_index() {
+        let writer = get_test_writer("indexing_interval");
+        let mut run = RunImpl::from_writer_with_indexing_interval(writer, 500).unwrap();
 
         // Add many entries to test sampling interval
         // Should sample every 500th entry

@@ -311,6 +311,7 @@ impl AsRef<Path> for TempDirInfo {
 }
 
 // Implementations
+pub mod benchmark;
 pub mod diskio;
 pub mod input_reader;
 pub mod kll;
