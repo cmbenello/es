@@ -4,8 +4,6 @@ use crate::diskio::constants::{PAGE_SIZE, align_down};
 use crate::diskio::file::SharedFd;
 use crate::diskio::io_stats::IoStatsTracker;
 use crate::ovc::offset_value_coding_u64::OVCU64;
-use crate::rand::small_thread_rng;
-use rand::Rng;
 use std::io::{Read, Write};
 use std::sync::Arc;
 
@@ -25,12 +23,19 @@ pub struct RunWithOVC {
     start_bytes: usize,
     total_bytes: usize,
     sparse_index: Vec<IndexEntry>,
-    reservoir_size: usize,
-    entries_seen: usize, // For reservoir sampling
+    sampling_interval: usize,
+    entries_seen: usize,
 }
 
 impl RunWithOVC {
     pub fn from_writer(writer: AlignedWriter) -> Result<Self, String> {
+        Self::from_writer_with_sampling_interval(writer, 1000)
+    }
+
+    pub fn from_writer_with_sampling_interval(
+        writer: AlignedWriter,
+        sampling_interval: usize,
+    ) -> Result<Self, String> {
         // Get current position in the file
         let start_bytes = writer.position() as usize;
         let fd = writer.get_fd();
@@ -42,7 +47,7 @@ impl RunWithOVC {
             start_bytes,
             total_bytes: 0,
             sparse_index: Vec::new(),
-            reservoir_size: 100, // Maximum sparse index size
+            sampling_interval,
             entries_seen: 0,
         })
     }
@@ -97,23 +102,14 @@ impl RunWithOVC {
             .as_mut()
             .expect("RunWithOVC is not initialized with a writer");
 
-        // Use reservoir sampling for sparse index
-        let index_entry = IndexEntry {
-            key: key.clone(),
-            file_offset: self.total_bytes,
-            entry_number: self.total_entries,
-        };
-
-        if self.entries_seen < self.reservoir_size {
-            // Fill the reservoir first
+        // Use sampling interval for sparse index
+        if self.entries_seen % self.sampling_interval == 0 {
+            let index_entry = IndexEntry {
+                key: key.clone(),
+                file_offset: self.total_bytes,
+                entry_number: self.total_entries,
+            };
             self.sparse_index.push(index_entry);
-        } else {
-            // Reservoir is full, use random replacement
-            let mut rng = small_thread_rng();
-            let j = rng.random_range(0..=self.entries_seen);
-            if j < self.reservoir_size {
-                self.sparse_index[j] = index_entry;
-            }
         }
         self.entries_seen += 1;
 
@@ -434,7 +430,7 @@ mod tests {
         let writer = AlignedWriter::from_fd(fd.clone()).unwrap();
 
         let mut run = RunWithOVC::from_writer(writer).unwrap();
-        run.reservoir_size = 5; // Small reservoir for testing
+        run.sampling_interval = 5; // Small sampling interval for testing
 
         // Add more entries than reservoir size
         for i in 0..20 {
@@ -445,8 +441,10 @@ mod tests {
         let writer = run.finalize_write();
         drop(writer); // Close writer to flush data
 
-        // Sparse index should be limited to reservoir size
-        assert!(run.sparse_index.len() <= run.reservoir_size);
+        // Sparse index should have entries based on sampling interval
+        // With interval 5 and 20 entries (0-19), we sample at: 0, 5, 10, 15
+        let expected_entries = (0..20).filter(|&i| i % run.sampling_interval == 0).count();
+        assert_eq!(run.sparse_index.len(), expected_entries);
 
         // Sparse index should be sorted by file offset
         for i in 1..run.sparse_index.len() {

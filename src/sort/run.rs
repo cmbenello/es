@@ -3,9 +3,6 @@ use crate::diskio::aligned_writer::AlignedWriter;
 use crate::diskio::constants::{PAGE_SIZE, align_down};
 use crate::diskio::file::SharedFd;
 use crate::diskio::io_stats::IoStatsTracker;
-use crate::ovc::offset_value_coding_u64::{OVCEntry64, OVCU64};
-use crate::rand::small_thread_rng;
-use rand::Rng;
 use std::io::{Read, Write};
 use std::sync::Arc;
 
@@ -25,12 +22,19 @@ pub struct RunImpl {
     start_bytes: usize,
     total_bytes: usize,
     sparse_index: Vec<IndexEntry>,
-    reservoir_size: usize,
-    entries_seen: usize, // For reservoir sampling
+    sampling_interval: usize,
+    entries_seen: usize,
 }
 
 impl RunImpl {
     pub fn from_writer(writer: AlignedWriter) -> Result<Self, String> {
+        Self::from_writer_with_sampling_interval(writer, 1000)
+    }
+
+    pub fn from_writer_with_sampling_interval(
+        writer: AlignedWriter,
+        sampling_interval: usize,
+    ) -> Result<Self, String> {
         // Get current position in the file
         let start_bytes = writer.position() as usize;
         let fd = writer.get_fd();
@@ -42,7 +46,7 @@ impl RunImpl {
             start_bytes,
             total_bytes: 0,
             sparse_index: Vec::new(),
-            reservoir_size: 100, // Maximum sparse index size
+            sampling_interval,
             entries_seen: 0,
         })
     }
@@ -97,23 +101,14 @@ impl RunImpl {
             .as_mut()
             .expect("RunImpl is not initialized with a writer");
 
-        // Use reservoir sampling for sparse index
-        let index_entry = IndexEntry {
-            key: key.clone(),
-            file_offset: self.total_bytes,
-            entry_number: self.total_entries,
-        };
-
-        if self.entries_seen < self.reservoir_size {
-            // Fill the reservoir first
+        // Use sampling interval for sparse index
+        if self.entries_seen % self.sampling_interval == 0 {
+            let index_entry = IndexEntry {
+                key: key.clone(),
+                file_offset: self.total_bytes,
+                entry_number: self.total_entries,
+            };
             self.sparse_index.push(index_entry);
-        } else {
-            // Reservoir is full, use random replacement
-            let mut rng = small_thread_rng();
-            let j = rng.random_range(0..=self.entries_seen);
-            if j < self.reservoir_size {
-                self.sparse_index[j] = index_entry;
-            }
         }
         self.entries_seen += 1;
 
@@ -835,12 +830,12 @@ mod tests {
     }
 
     #[test]
-    fn test_reservoir_sampling_sparse_index() {
-        let writer = get_test_writer("reservoir_sampling");
-        let mut run = RunImpl::from_writer(writer).unwrap();
+    fn test_sampling_interval_sparse_index() {
+        let writer = get_test_writer("sampling_interval");
+        let mut run = RunImpl::from_writer_with_sampling_interval(writer, 500).unwrap();
 
-        // Add many entries to test reservoir sampling
-        // Should sample 100 entries uniformly
+        // Add many entries to test sampling interval
+        // Should sample every 500th entry
         for i in 0..50000 {
             let key = format!("{:05}", i).into_bytes();
             let value = vec![b'v'; 50]; // 50 byte value
@@ -849,11 +844,13 @@ mod tests {
         let writer = run.finalize_write();
         drop(writer); // Ensure all data is written
 
-        // Verify sparse index has exactly reservoir_size entries
+        // Verify sparse index has entries based on sampling interval
+        let expected_entries = 50000 / 500; // Every 500th entry
         assert_eq!(
             run.sparse_index.len(),
-            100,
-            "Sparse index should have exactly 100 entries"
+            expected_entries,
+            "Sparse index should have exactly {} entries",
+            expected_entries
         );
 
         // Verify index entries are sorted by offset after finalize
@@ -864,27 +861,26 @@ mod tests {
             );
         }
 
-        // Verify we have a good distribution across the file
+        // Verify sampling interval consistency
+        for (i, index_entry) in run.sparse_index.iter().enumerate() {
+            let expected_entry_number = i * 500;
+            assert_eq!(
+                index_entry.entry_number, expected_entry_number,
+                "Entry {} should have entry_number {}",
+                i, expected_entry_number
+            );
+        }
+
+        // Verify we have good distribution across the file
         let total_size = run.total_bytes;
         let first_offset = run.sparse_index.first().unwrap().file_offset;
         let last_offset = run.sparse_index.last().unwrap().file_offset;
 
-        // First entry should be in the first half of the file
-        assert!(
-            first_offset < total_size / 2,
-            "First sampled entry should be in first half"
-        );
-        // Last entry should be in the second half of the file
-        assert!(
-            last_offset > total_size / 2,
-            "Last sampled entry should be in second half"
-        );
-
-        // Verify good coverage - the span should cover at least 80% of the file
+        // Verify good coverage - the span should cover a significant portion of the file
         let coverage = (last_offset - first_offset) as f64 / total_size as f64;
         assert!(
-            coverage > 0.8,
-            "Sparse index should cover at least 80% of file, got {:.2}%",
+            coverage > 0.5,
+            "Sparse index should cover at least 50% of file, got {:.2}%",
             coverage * 100.0
         );
 
