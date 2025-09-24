@@ -65,27 +65,30 @@ impl RunImpl {
         self.total_bytes
     }
 
-    fn find_start_position(&self, lower_bound: &[u8]) -> Option<usize> {
-        if self.sparse_index.is_empty() || lower_bound.is_empty() {
+    fn find_start_position(&self, lower_bound: &[u8]) -> Option<(usize, Vec<u8>)> {
+        if self.sparse_index.is_empty() {
             return None;
+        }
+        let mut best_entry = &self.sparse_index[0];
+        if lower_bound.is_empty() {
+            return Some((best_entry.file_offset, best_entry.key.clone()));
         }
 
         // Binary search to find the last entry with key < lower_bound
         let mut left = 0;
         let mut right = self.sparse_index.len();
-        let mut best_pos = None;
 
         while left < right {
             let mid = left + (right - left) / 2;
             if &self.sparse_index[mid].key[..] < lower_bound {
-                best_pos = Some(self.sparse_index[mid].file_offset);
+                best_entry = &self.sparse_index[mid];
                 left = mid + 1;
             } else {
                 right = mid;
             }
         }
 
-        best_pos
+        Some((best_entry.file_offset, best_entry.key.clone()))
     }
 }
 
@@ -148,7 +151,7 @@ impl RunImpl {
         // Use sparse index to seek to a good starting position
         // Since runs contain sorted data, we can safely skip ahead
         let mut start_offset = self.start_bytes;
-        if let Some(offset) = self.find_start_position(lower_inc) {
+        if let Some((offset, _start_key)) = self.find_start_position(lower_inc) {
             // Use the offset from sparse index if we have a lower bound
             // offset is relative to start_bytes
             start_offset = self.start_bytes + offset;

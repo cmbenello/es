@@ -330,7 +330,7 @@ mod tests {
         writer.flush().unwrap();
         let (ops, bytes) = tracker.get_write_stats();
         assert!(ops > 0);
-        assert_eq!(bytes as usize, 10_000);
+        assert_eq!(bytes as usize, align_up(10_000, DIRECT_IO_ALIGNMENT));
 
         // Write more data
         writer.write_all(&data).unwrap();
@@ -339,6 +339,6 @@ mod tests {
         // Check updated stats
         let (ops2, bytes2) = tracker.get_write_stats();
         assert!(ops2 > ops);
-        assert_eq!(bytes2 as usize, 20_000);
+        assert_eq!(bytes2 as usize, align_up(20_000, DIRECT_IO_ALIGNMENT));
     }
 }
