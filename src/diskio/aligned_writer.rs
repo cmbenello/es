@@ -83,7 +83,7 @@ impl AlignedWriter {
 
         // Update I/O statistics if tracker is present
         if let Some(ref tracker) = self.io_tracker {
-            tracker.add_write(1, self.buffer_pos as u64);
+            tracker.add_write(1, written as u64);
         }
 
         self.logical_pos += self.buffer_pos as u64;

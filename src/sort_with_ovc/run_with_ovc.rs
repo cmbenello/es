@@ -3,6 +3,7 @@ use crate::diskio::aligned_writer::AlignedWriter;
 use crate::diskio::constants::{PAGE_SIZE, align_down};
 use crate::diskio::file::SharedFd;
 use crate::diskio::io_stats::IoStatsTracker;
+use crate::ovc::offset_value_coding::OVCFlag;
 use crate::ovc::offset_value_coding_u64::OVCU64;
 use std::io::{Read, Write};
 use std::sync::Arc;
@@ -66,27 +67,30 @@ impl RunWithOVC {
         self.total_bytes
     }
 
-    fn find_start_position(&self, lower_bound: &[u8]) -> Option<usize> {
-        if self.sparse_index.is_empty() || lower_bound.is_empty() {
+    fn find_start_position(&self, lower_bound: &[u8]) -> Option<(usize, Vec<u8>)> {
+        if self.sparse_index.is_empty() {
             return None;
+        }
+        let mut best_entry = &self.sparse_index[0];
+        if lower_bound.is_empty() {
+            return Some((best_entry.file_offset, best_entry.key.clone()));
         }
 
         // Binary search to find the last entry with key < lower_bound
         let mut left = 0;
         let mut right = self.sparse_index.len();
-        let mut best_pos = None;
 
         while left < right {
             let mid = left + (right - left) / 2;
             if &self.sparse_index[mid].key[..] < lower_bound {
-                best_pos = Some(self.sparse_index[mid].file_offset);
+                best_entry = &self.sparse_index[mid];
                 left = mid + 1;
             } else {
                 right = mid;
             }
         }
 
-        best_pos
+        Some((best_entry.file_offset, best_entry.key.clone()))
     }
 }
 
@@ -107,17 +111,26 @@ impl RunWithOVC {
             self.sparse_index.push(index_entry);
         }
 
-        let key_len = key.len() as u32;
         let value_len = value.len() as u32;
 
         // Write entry directly to DirectFileWriter (it handles buffering)
+        let offset = match ovc.flag() {
+            OVCFlag::EarlyFence | OVCFlag::LateFence => {
+                panic!("EarlyFence and LateFence OVC flags are not supported in RunWithOVC");
+            }
+            OVCFlag::InitialValue => 0,
+            OVCFlag::DuplicateValue => key.len(),
+            OVCFlag::NormalValue => ovc.offset(),
+        };
+        let truncated_key = &key[offset..];
+        let truncated_key_len = truncated_key.len() as u32;
         writer.write_all(&ovc.to_le_bytes()).unwrap();
-        writer.write_all(&key_len.to_le_bytes()).unwrap();
+        writer.write_all(&truncated_key_len.to_le_bytes()).unwrap();
         writer.write_all(&value_len.to_le_bytes()).unwrap();
-        writer.write_all(&key).unwrap();
+        writer.write_all(&truncated_key).unwrap();
         writer.write_all(&value).unwrap();
 
-        self.total_bytes += 8 + 8 + key.len() + value.len();
+        self.total_bytes += 8 + 8 + truncated_key.len() + value.len();
         self.total_entries += 1;
     }
 
@@ -147,14 +160,12 @@ impl RunWithOVC {
             AlignedReader::from_fd(self.fd.clone()).unwrap()
         };
 
-        // Use sparse index to seek to a good starting position
-        // Since runs contain sorted data, we can safely skip ahead
-        let mut start_offset = self.start_bytes;
-        if let Some(offset) = self.find_start_position(lower_inc) {
-            // Use the offset from sparse index if we have a lower bound
-            // offset is relative to start_bytes
-            start_offset = self.start_bytes + offset;
-        }
+        // Use sparse index to seek to a good starting position.
+        // find_start_position will return None iff total_entries == 0
+        // That case is handled above.
+        // If there is at least one entry, the first entry in sparse index is always at offset 0.
+        let (offset, start_key) = self.find_start_position(lower_inc).unwrap();
+        let start_offset = self.start_bytes + offset;
 
         // Seek to the start position if needed
         if start_offset > 0 {
@@ -170,6 +181,7 @@ impl RunWithOVC {
             // We'll need to skip the first few bytes after seeking
             return Box::new(RunIteratorWithOVC {
                 reader,
+                prev_key: start_key,
                 lower_bound: lower_inc.to_vec(),
                 upper_bound: upper_exc.to_vec(),
                 bytes_read: aligned_offset,
@@ -181,6 +193,7 @@ impl RunWithOVC {
 
         Box::new(RunIteratorWithOVC {
             reader,
+            prev_key: start_key,
             lower_bound: lower_inc.to_vec(),
             upper_bound: upper_exc.to_vec(),
             bytes_read: self.start_bytes, // Start from the beginning of this run
@@ -193,6 +206,7 @@ impl RunWithOVC {
 
 struct RunIteratorWithOVC {
     reader: AlignedReader,
+    prev_key: Vec<u8>,
     lower_bound: Vec<u8>,
     upper_bound: Vec<u8>,
     bytes_read: usize,
@@ -242,7 +256,7 @@ impl Iterator for RunIteratorWithOVC {
             self.reader
                 .read_exact(&mut key_len_bytes)
                 .expect("Failed to read key length");
-            let key_len = u32::from_le_bytes(key_len_bytes) as usize;
+            let truncated_key_len = u32::from_le_bytes(key_len_bytes) as usize;
 
             // Read value length
             let mut value_len_bytes = [0u8; 4];
@@ -251,11 +265,23 @@ impl Iterator for RunIteratorWithOVC {
                 .expect("Failed to read value length");
             let value_len = u32::from_le_bytes(value_len_bytes) as usize;
 
+            let offset = match ovc.flag() {
+                OVCFlag::EarlyFence | OVCFlag::LateFence => {
+                    panic!("EarlyFence and LateFence OVC flags are not supported in RunWithOVC");
+                }
+                OVCFlag::InitialValue => 0,
+                OVCFlag::DuplicateValue => self.prev_key.len(),
+                OVCFlag::NormalValue => ovc.offset(),
+            };
+            let mut key = vec![0u8; offset + truncated_key_len];
+            key[..offset].copy_from_slice(&self.prev_key[..offset]);
+
             // Read key
-            let mut key = vec![0u8; key_len];
             self.reader
-                .read_exact(&mut key)
+                .read_exact(&mut key[offset..])
                 .expect("Failed to read key");
+            self.prev_key.resize(key.len(), 0);
+            self.prev_key.copy_from_slice(&key);
 
             // Read value
             let mut value = vec![0u8; value_len];
@@ -264,13 +290,7 @@ impl Iterator for RunIteratorWithOVC {
                 .expect("Failed to read value");
 
             // Update bytes read
-            let entry_size = 8 + 8 + key.len() + value.len();
-            self.bytes_read += entry_size;
-
-            // Check if this entry belongs to our run
-            if self.bytes_read - entry_size < self.actual_start {
-                continue; // This entry is before our run
-            }
+            self.bytes_read += 8 + 8 + truncated_key_len + value_len;
 
             // Check if key is in range [lower_inc, upper_exc)
             if !self.lower_bound.is_empty() && key < self.lower_bound {
@@ -291,6 +311,8 @@ mod tests {
     use super::*;
     use crate::diskio::aligned_writer::AlignedWriter;
     use crate::diskio::file::SharedFd;
+    use crate::sort::sort_buffer::SortBuffer;
+    use crate::sort_with_ovc::sort_buffer_with_ovc::SortBufferOVC;
     use std::fs;
     use std::path::PathBuf;
 
@@ -372,10 +394,13 @@ mod tests {
         let results: Vec<_> = run.scan_range(&[], &[]).collect();
 
         assert_eq!(results.len(), 3);
+        assert_eq!(results[0].0, OVCU64::initial_value());
         assert_eq!(results[0].1, b"a");
         assert_eq!(results[0].2, b"1");
+        assert_eq!(results[1].0, OVCU64::initial_value());
         assert_eq!(results[1].1, b"b");
         assert_eq!(results[1].2, b"2");
+        assert_eq!(results[2].0, OVCU64::initial_value());
         assert_eq!(results[2].1, b"c");
         assert_eq!(results[2].2, b"3");
     }
@@ -401,8 +426,12 @@ mod tests {
         let results: Vec<_> = run.scan_range(b"b", b"d").collect();
 
         assert_eq!(results.len(), 2);
+        assert_eq!(results[0].0, OVCU64::initial_value());
         assert_eq!(results[0].1, b"b");
+        assert_eq!(results[0].2, b"2");
+        assert_eq!(results[1].0, OVCU64::initial_value());
         assert_eq!(results[1].1, b"c");
+        assert_eq!(results[1].2, b"3");
     }
 
     #[test]
@@ -411,7 +440,8 @@ mod tests {
         let writer = AlignedWriter::from_fd(fd.clone()).unwrap();
 
         let mut run = RunWithOVC::from_writer(writer).unwrap();
-        let _writer = run.finalize_write();
+        let mut writer = run.finalize_write();
+        writer.flush().unwrap();
 
         // Scanning empty run should return empty iterator
         let results: Vec<_> = run.scan_range(&[], &[]).collect();
@@ -456,7 +486,7 @@ mod tests {
         // Manually create sparse index for testing
         run.sparse_index = vec![
             IndexEntry {
-                key: b"a".to_vec(),
+                key: b"b".to_vec(),
                 file_offset: 0,
                 entry_number: 0,
             },
@@ -473,10 +503,10 @@ mod tests {
         ];
 
         // Test finding start position
-        assert_eq!(run.find_start_position(b"b"), Some(0));
-        assert_eq!(run.find_start_position(b"d"), Some(100));
-        assert_eq!(run.find_start_position(b"f"), Some(200));
-        assert_eq!(run.find_start_position(b"a"), None);
+        assert_eq!(run.find_start_position(b"a"), Some((0, b"b".to_vec()))); // The first entry will be always returned
+        assert_eq!(run.find_start_position(b"b"), Some((0, b"b".to_vec())));
+        assert_eq!(run.find_start_position(b"d"), Some((100, b"c".to_vec())));
+        assert_eq!(run.find_start_position(b"f"), Some((200, b"e".to_vec())));
     }
 
     #[test]
@@ -565,5 +595,72 @@ mod tests {
         assert_eq!(results[0].0, OVCU64::normal_value(&[10], 0));
         assert_eq!(results[1].0, OVCU64::normal_value(&[20], 0));
         assert_eq!(results[2].0, OVCU64::normal_value(&[30], 0));
+    }
+
+    #[test]
+    fn test_ovc_data_read_ok() {
+        let fd = create_test_file("test_ovc_data_read.dat");
+        let mut buffer = SortBufferOVC::new(1024 * 1024);
+
+        let n = 1000;
+        for i in 0..n {
+            let key = format!("key_{:08}", n - i);
+            let value = format!("value_{:08}", n - i);
+            buffer.append(key.into_bytes(), value.into_bytes());
+        }
+
+        // Write the results of the sorted buffer to a run
+        let writer = AlignedWriter::from_fd(fd.clone()).unwrap();
+        let mut run = RunWithOVC::from_writer(writer).unwrap();
+        for (ovc, key, value) in buffer.sorted_iter() {
+            run.append(ovc, key, value);
+        }
+        let writer = run.finalize_write();
+        drop(writer); // Close writer to flush data
+
+        let results: Vec<_> = run.scan_range(&[], &[]).collect();
+        assert_eq!(results.len(), n);
+        // Verify sorted order
+        for i in 0..n {
+            let expected_key = format!("key_{:08}", i + 1);
+            let expected_value = format!("value_{:08}", i + 1);
+            let results = &results[i];
+            println!("OVC: {:?}", results.0);
+            println!(
+                "Result {}: key={:?}, value={:?}",
+                i,
+                String::from_utf8_lossy(&results.1),
+                String::from_utf8_lossy(&results.2)
+            );
+            println!(
+                "Expected {}: key={:?}, value={:?}",
+                i, expected_key, expected_value
+            );
+            assert_eq!(results.1, expected_key.as_bytes());
+            assert_eq!(results.2, expected_value.as_bytes());
+        }
+
+        let results = run
+            .scan_range(b"key_00000050", b"key_00000060")
+            .collect::<Vec<_>>();
+        assert_eq!(results.len(), 10);
+        for i in 0..10 {
+            let expected_key = format!("key_{:08}", i + 50);
+            let expected_value = format!("value_{:08}", i + 50);
+            let results = &results[i];
+            println!("OVC: {:?}", results.0);
+            println!(
+                "Result {}: key={:?}, value={:?}",
+                i,
+                String::from_utf8_lossy(&results.1),
+                String::from_utf8_lossy(&results.2)
+            );
+            println!(
+                "Expected {}: key={:?}, value={:?}",
+                i, expected_key, expected_value
+            );
+            assert_eq!(results.1, expected_key.as_bytes());
+            assert_eq!(results.2, expected_value.as_bytes());
+        }
     }
 }
