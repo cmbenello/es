@@ -362,6 +362,44 @@ impl ExternalSorter {
                     vec![]
                 };
 
+                // TEMPORARY: Track individual run IO stats for debugging
+                // println!("=== INDIVIDUAL RUN IO TRACKING (Thread {}) ===", thread_id);
+                // let mut individual_trackers = Vec::new();
+                // let mut total_records_per_run = Vec::new();
+
+                // for (run_idx, run) in runs.iter().enumerate() {
+                //     let individual_tracker = IoStatsTracker::new();
+                //     let iter = run.scan_range_with_io_tracker(
+                //         &lower_bound,
+                //         &upper_bound,
+                //         Some(individual_tracker.clone()),
+                //     );
+                //     let records: Vec<_> = iter.collect();
+                //     let (read_ops, read_bytes) = individual_tracker.get_read_stats();
+
+                //     // Calculate actual logical bytes from the records
+                //     let logical_bytes: usize = records.iter()
+                //         .map(|(key, value)| 8 + key.len() + value.len())
+                //         .sum();
+
+                //     println!("Run {}: {} records, {} ops, {} io_bytes, {} logical_bytes, ratio: {:.2}x",
+                //              run_idx, records.len(), read_ops, read_bytes, logical_bytes,
+                //              if logical_bytes > 0 { read_bytes as f64 / logical_bytes as f64 } else { 0.0 });
+
+                //     individual_trackers.push(individual_tracker);
+                //     total_records_per_run.push(records.len());
+                // }
+
+                // let total_individual_ops: u64 = individual_trackers.iter()
+                //     .map(|t| t.get_read_stats().0).sum();
+                // let total_individual_bytes: u64 = individual_trackers.iter()
+                //     .map(|t| t.get_read_stats().1).sum();
+                // let total_records: usize = total_records_per_run.iter().sum();
+
+                // println!("Individual tracking totals: {} records, {} ops, {} bytes",
+                //          total_records, total_individual_ops, total_individual_bytes);
+                // println!("==========================================");
+
                 // Create iterators for this key range from all runs
                 let iterators: Vec<_> = runs
                     .iter()

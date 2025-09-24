@@ -148,14 +148,12 @@ impl RunImpl {
             AlignedReader::from_fd(self.fd.clone()).unwrap()
         };
 
-        // Use sparse index to seek to a good starting position
-        // Since runs contain sorted data, we can safely skip ahead
-        let mut start_offset = self.start_bytes;
-        if let Some((offset, _start_key)) = self.find_start_position(lower_inc) {
-            // Use the offset from sparse index if we have a lower bound
-            // offset is relative to start_bytes
-            start_offset = self.start_bytes + offset;
-        }
+        // Use sparse index to seek to a good starting position.
+        // find_start_position will return None iff total_entries == 0
+        // That case is handled above.
+        // If there is at least one entry, the first entry in sparse index is always at offset 0.
+        let (offset, _start_key) = self.find_start_position(lower_inc).unwrap();
+        let start_offset = self.start_bytes + offset;
 
         // Seek to the start position if needed
         if start_offset > 0 {
@@ -824,6 +822,310 @@ mod tests {
         assert_eq!(all[1], (b"key".to_vec(), b"value2".to_vec()));
         assert_eq!(all[2], (b"key".to_vec(), b"value3".to_vec()));
         assert_eq!(all[3], (b"other".to_vec(), b"value".to_vec()));
+    }
+
+    #[test]
+    fn test_io_tracking_write_operations() {
+        let path = get_test_path("io_write_tracking");
+        let fd = Arc::new(
+            SharedFd::new_from_path(&path).expect("Failed to open test file with Direct I/O"),
+        );
+
+        // Create writer with IO tracker
+        let io_tracker = IoStatsTracker::new();
+        let writer = AlignedWriter::from_fd_with_tracker(fd, Some(io_tracker.clone())).unwrap();
+        let mut run = RunImpl::from_writer(writer).unwrap();
+
+        // Get baseline stats before writing
+        let (initial_write_ops, initial_write_bytes) = io_tracker.get_write_stats();
+
+        // Write N records with known sizes
+        let num_records = 10000;
+        let mut expected_logical_bytes = 0;
+
+        for i in 0..num_records {
+            let key = format!("key_{:08}", i).into_bytes();
+            let value = format!("value_data_{:08}", i).into_bytes();
+            expected_logical_bytes += 8 + key.len() + value.len(); // 4 bytes key_len + 4 bytes value_len + key + value
+            run.append(key, value);
+        }
+
+        // Finalize to ensure all data is written and flush to disk
+        let mut writer = run.finalize_write();
+        writer.flush().expect("Failed to flush data to disk");
+
+        // Get final stats after writing
+        let (final_write_ops, final_write_bytes) = io_tracker.get_write_stats();
+
+        let write_ops = final_write_ops - initial_write_ops;
+        let write_bytes = final_write_bytes - initial_write_bytes;
+
+        println!("=== WRITE IO STATS ===");
+        println!("Records written: {}", num_records);
+        println!("Expected logical bytes: {}", expected_logical_bytes);
+        println!("Actual IO write operations: {}", write_ops);
+        println!("Actual IO write bytes: {}", write_bytes);
+        println!(
+            "IO overhead ratio: {:.2}x",
+            write_bytes as f64 / expected_logical_bytes as f64
+        );
+
+        // Verify that some writes occurred
+        assert!(write_ops > 0, "No write operations were tracked");
+        assert!(
+            write_bytes >= expected_logical_bytes as u64,
+            "IO bytes ({}) should be >= logical bytes ({})",
+            write_bytes,
+            expected_logical_bytes
+        );
+    }
+
+    #[test]
+    fn test_io_tracking_scan_operations() {
+        let path = get_test_path("io_scan_tracking");
+        let fd = Arc::new(
+            SharedFd::new_from_path(&path).expect("Failed to open test file with Direct I/O"),
+        );
+
+        // First, write some data (without tracking writes for this test)
+        let writer = AlignedWriter::from_fd(fd.clone()).unwrap();
+        let mut run = RunImpl::from_writer(writer).unwrap();
+
+        let num_records = 100000;
+        let mut expected_logical_bytes = 0;
+
+        for i in 0..num_records {
+            let key = format!("key_{:08}", i).into_bytes();
+            let value = format!("value_data_{:08}", i).into_bytes();
+            expected_logical_bytes += 8 + key.len() + value.len();
+            run.append(key, value);
+        }
+
+        // Finalize write without tracking and flush to ensure data is on disk
+        let mut writer = run.finalize_write();
+        writer.flush().expect("Failed to flush data to disk");
+
+        // Now test scanning with IO tracking
+        let read_tracker = IoStatsTracker::new();
+
+        // Get baseline stats
+        let (initial_read_ops, initial_read_bytes) = read_tracker.get_read_stats();
+
+        // Scan all records with IO tracking
+        let iter = run.scan_range_with_io_tracker(&[], &[], Some(read_tracker.clone()));
+        let scanned_records: Vec<_> = iter.collect();
+
+        // Get final stats after scanning
+        let (final_read_ops, final_read_bytes) = read_tracker.get_read_stats();
+
+        let read_ops = final_read_ops - initial_read_ops;
+        let read_bytes = final_read_bytes - initial_read_bytes;
+
+        println!("=== SCAN IO STATS ===");
+        println!("Records scanned: {}", scanned_records.len());
+        println!("Expected logical bytes: {}", expected_logical_bytes);
+        println!("Actual IO read operations: {}", read_ops);
+        println!("Actual IO read bytes: {}", read_bytes);
+        println!(
+            "IO overhead ratio: {:.2}x",
+            read_bytes as f64 / expected_logical_bytes as f64
+        );
+
+        // Verify scan results
+        assert_eq!(scanned_records.len(), num_records);
+
+        // Verify that some reads occurred
+        assert!(read_ops > 0, "No read operations were tracked");
+        assert!(
+            read_bytes >= expected_logical_bytes as u64,
+            "IO bytes ({}) should be >= logical bytes ({})",
+            read_bytes,
+            expected_logical_bytes
+        );
+
+        // Test partial scan to show different IO patterns
+        let partial_tracker = IoStatsTracker::new();
+        let iter = run.scan_range_with_io_tracker(
+            b"key_00000100",
+            b"key_00000150",
+            Some(partial_tracker.clone()),
+        );
+        let partial_results: Vec<_> = iter.collect();
+
+        let (partial_read_ops, partial_read_bytes) = partial_tracker.get_read_stats();
+
+        println!("=== PARTIAL SCAN IO STATS ===");
+        println!("Records in partial scan: {}", partial_results.len());
+        println!("Partial scan IO read operations: {}", partial_read_ops);
+        println!("Partial scan IO read bytes: {}", partial_read_bytes);
+
+        assert_eq!(partial_results.len(), 50); // records 100-149
+        assert!(
+            partial_read_ops > 0,
+            "Partial scan should have read operations"
+        );
+    }
+
+    #[test]
+    fn test_sparse_index_effectiveness() {
+        let path = get_test_path("sparse_effectiveness");
+        let fd = Arc::new(
+            SharedFd::new_from_path(&path).expect("Failed to open test file with Direct I/O"),
+        );
+
+        let writer = AlignedWriter::from_fd(fd.clone()).unwrap();
+        let mut run = RunImpl::from_writer(writer).unwrap();
+
+        // Write 10000 sequential records
+        let num_records = 10000;
+        for i in 0..num_records {
+            let key = format!("key_{:08}", i).into_bytes();
+            let value = format!("value_data_{:08}", i).into_bytes();
+            run.append(key, value);
+        }
+
+        let mut writer = run.finalize_write();
+        writer.flush().expect("Failed to flush data to disk");
+
+        println!("=== SPARSE INDEX ANALYSIS ===");
+        println!("Total records: {}", num_records);
+        println!("Sparse index size: {}", run.sparse_index.len());
+        println!("Indexing interval: {}", run.indexing_interval);
+
+        // Check sparse index distribution
+        if !run.sparse_index.is_empty() {
+            let first_offset = run.sparse_index[0].file_offset;
+            let last_offset = run.sparse_index[run.sparse_index.len() - 1].file_offset;
+            let total_bytes = run.total_bytes();
+
+            println!("First index offset: {}", first_offset);
+            println!("Last index offset: {}", last_offset);
+            println!("Total bytes: {}", total_bytes);
+            println!(
+                "Index coverage: {:.2}%",
+                (last_offset as f64 / total_bytes as f64) * 100.0
+            );
+
+            // Test seek effectiveness for different positions
+            let test_keys = [
+                b"key_00002500".to_vec(), // 25% through
+                b"key_00005000".to_vec(), // 50% through
+                b"key_00007500".to_vec(), // 75% through
+            ];
+
+            for test_key in &test_keys {
+                let io_tracker = IoStatsTracker::new();
+                let iter = run.scan_range_with_io_tracker(test_key, &[], Some(io_tracker.clone()));
+                let results: Vec<_> = iter.take(100).collect(); // Only take first 100 to avoid reading everything
+
+                let (read_ops, read_bytes) = io_tracker.get_read_stats();
+                println!(
+                    "Key {}: {} results, {} ops, {} bytes",
+                    String::from_utf8_lossy(test_key),
+                    results.len(),
+                    read_ops,
+                    read_bytes
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_merge_io_efficiency() {
+        // Create two runs with known data
+        let path1 = get_test_path("merge_io_1");
+        let path2 = get_test_path("merge_io_2");
+
+        let fd1 = Arc::new(SharedFd::new_from_path(&path1).unwrap());
+        let fd2 = Arc::new(SharedFd::new_from_path(&path2).unwrap());
+
+        // Create first run (even keys)
+        let writer1 = AlignedWriter::from_fd(fd1.clone()).unwrap();
+        let mut run1 = RunImpl::from_writer(writer1).unwrap();
+        let mut run1_logical_bytes = 0;
+
+        for i in (0..5000).step_by(2) {
+            let key = format!("key_{:08}", i).into_bytes();
+            let value = format!("value_data_{:08}", i).into_bytes();
+            run1_logical_bytes += 8 + key.len() + value.len();
+            run1.append(key, value);
+        }
+        let mut writer1 = run1.finalize_write();
+        writer1.flush().unwrap();
+
+        // Create second run (odd keys)
+        let writer2 = AlignedWriter::from_fd(fd2.clone()).unwrap();
+        let mut run2 = RunImpl::from_writer(writer2).unwrap();
+        let mut run2_logical_bytes = 0;
+
+        for i in (1..5000).step_by(2) {
+            let key = format!("key_{:08}", i).into_bytes();
+            let value = format!("value_data_{:08}", i).into_bytes();
+            run2_logical_bytes += 8 + key.len() + value.len();
+            run2.append(key, value);
+        }
+        let mut writer2 = run2.finalize_write();
+        writer2.flush().unwrap();
+
+        let total_logical_bytes = run1_logical_bytes + run2_logical_bytes;
+
+        println!("=== MERGE IO EFFICIENCY TEST ===");
+        println!("Run1 logical bytes: {}", run1_logical_bytes);
+        println!("Run1 sparse index size: {}", run1.sparse_index.len());
+        println!("Run2 logical bytes: {}", run2_logical_bytes);
+        println!("Run2 sparse index size: {}", run2.sparse_index.len());
+        println!("Total logical bytes: {}", total_logical_bytes);
+
+        // Test different merge patterns
+        let test_cases = [
+            ("Full scan both runs", &b""[..], &b""[..]),
+            ("Middle range", b"key_00002000", b"key_00003000"),
+            ("Early range", b"key_00000100", b"key_00000200"),
+            ("Late range", b"key_00004800", b"key_00004900"),
+        ];
+
+        for (test_name, lower, upper) in &test_cases {
+            let tracker1 = IoStatsTracker::new();
+            let tracker2 = IoStatsTracker::new();
+
+            let iter1 = run1.scan_range_with_io_tracker(lower, upper, Some(tracker1.clone()));
+            let iter2 = run2.scan_range_with_io_tracker(lower, upper, Some(tracker2.clone()));
+
+            let results1: Vec<_> = iter1.collect();
+            let results1_size = results1
+                .iter()
+                .map(|(k, v)| 8 + k.len() + v.len())
+                .sum::<usize>();
+            let results2: Vec<_> = iter2.collect();
+            let results2_size = results2
+                .iter()
+                .map(|(k, v)| 8 + k.len() + v.len())
+                .sum::<usize>();
+
+            let (ops1, bytes1) = tracker1.get_read_stats();
+            let (ops2, bytes2) = tracker2.get_read_stats();
+
+            println!("--- {} ---", test_name);
+            println!(
+                "Run1: {} results, {} ops, {} bytes",
+                results1.len(),
+                ops1,
+                bytes1
+            );
+            println!(
+                "Run2: {} results, {} ops, {} bytes",
+                results2.len(),
+                ops2,
+                bytes2
+            );
+            println!("Total IO: {} bytes", bytes1 + bytes2);
+            println!("Expected logical: ~{} bytes", results1_size + results2_size);
+            println!(
+                "IO ratio: {:.2}x",
+                (bytes1 + bytes2) as f64 / (results1_size + results2_size) as f64
+            );
+            println!();
+        }
     }
 
     #[test]
