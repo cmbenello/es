@@ -58,6 +58,7 @@ pub struct BenchmarkConfig {
     pub sketch_size: usize,
     pub sketch_sampling_interval: usize,
     pub run_indexing_interval: usize,
+    pub boundary_imbalance_factor: f64,
 }
 
 impl BenchmarkConfig {
@@ -73,6 +74,7 @@ impl BenchmarkConfig {
             sketch_size: 200,
             sketch_sampling_interval: 1000,
             run_indexing_interval: 1000,
+            boundary_imbalance_factor: 1.0
         }
     }
 }

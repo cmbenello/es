@@ -71,6 +71,7 @@ pub struct ExternalSorter {
     sketch_sampling_interval: usize,
     run_indexing_interval: usize,
     temp_dir_info: Arc<TempDirInfo>,
+    boundary_imbalance_factor: f64,
 }
 
 impl ExternalSorter {
@@ -121,6 +122,7 @@ impl ExternalSorter {
                 path: temp_dir,
                 should_delete: true,
             }),
+            boundary_imbalance_factor: 1.0,
         }
     }
 
@@ -293,7 +295,10 @@ impl ExternalSorter {
         num_threads: usize,
         sketch: Sketch<Vec<u8>>,
         dir: impl AsRef<Path>,
+        imbalance_factor: Option<f64>,
     ) -> Result<(Vec<RunImpl>, MergeStats), String> {
+        let imbalance_factor = imbalance_factor.unwrap_or(1.0);
+        println!("CDF boundary imbalance factor for merge: {:.4}", imbalance_factor);
         // If no runs or single run, return early
         if output_runs.is_empty() {
             let merge_stats = MergeStats {
@@ -342,6 +347,12 @@ impl ExternalSorter {
         // Create merge tasks
         let mut merge_handles = vec![];
 
+        // Create imbalance portions
+        let k = merge_threads as f64;
+        let r = if imbalance_factor <= 0.0 { 1.0 } else { imbalance_factor };
+        // each = portion size for all non-first threads
+        let each = 1.0 / (r + (k - 1.0));
+
         for thread_id in 0..merge_threads {
             let runs = Arc::clone(&runs_arc);
             let dir = dir.as_ref().to_path_buf();
@@ -349,15 +360,17 @@ impl ExternalSorter {
             let cdf = Arc::clone(&cdf);
 
             let handle = thread::spawn(move || {
+                let tid = thread_id as f64;
+
                 // Determine the key range for this thread
                 let lower_bound = if thread_id == 0 {
                     vec![]
                 } else {
-                    cdf.query(thread_id as f64 / merge_threads as f64)
+                    cdf.query((r + (tid - 1.0)) * each)
                 };
 
                 let upper_bound = if thread_id < merge_threads - 1 {
-                    cdf.query((thread_id + 1) as f64 / merge_threads as f64)
+                    cdf.query((r + tid) * each)
                 } else {
                     vec![]
                 };
@@ -493,6 +506,7 @@ impl Sorter for ExternalSorter {
             self.merge_threads,
             sketch,
             self.temp_dir_info.as_ref(),
+            Some(self.boundary_imbalance_factor),
         )?;
 
         // Combine stats

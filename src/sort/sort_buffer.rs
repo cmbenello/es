@@ -19,6 +19,10 @@ impl SortBuffer {
         self.data.is_empty()
     }
 
+    pub fn memory_used(&self) -> usize {
+        return self.memory_used;
+    }
+
     pub fn has_space(&self, key: &[u8], value: &[u8]) -> bool {
         let entry_size = key.len() + value.len() + std::mem::size_of::<u32>() * 2; // key and value lengths
         self.memory_used + entry_size <= self.memory_limit

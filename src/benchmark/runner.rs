@@ -138,7 +138,7 @@ impl BenchmarkRunner {
                 )?;
 
                 let (_merged_runs, merge_stats) =
-                    ExternalSorter::merge(runs, params.merge_threads as usize, sketch, &temp_dir)?;
+                    ExternalSorter::merge(runs, params.merge_threads as usize, sketch, &temp_dir, Some(self.config.boundary_imbalance_factor))?;
                 drop(_merged_runs);
 
                 (run_gen_stats, merge_stats)
@@ -323,7 +323,7 @@ impl BenchmarkRunner {
             )?;
 
             let (merged_runs, merge_stats) =
-                ExternalSorter::merge(runs, params.merge_threads as usize, sketch, temp_dir)?;
+                ExternalSorter::merge(runs, params.merge_threads as usize, sketch, temp_dir, Some(self.config.boundary_imbalance_factor))?;
 
             let stats = SortStats {
                 num_runs: run_gen_stats.num_runs,
@@ -344,12 +344,22 @@ impl BenchmarkRunner {
         Ok(output)
     }
 
+
     fn sync_filesystem(&self) -> Result<(), Box<dyn std::error::Error>> {
         unsafe {
             let dir_fd = File::open(&self.config.temp_dir).map_err(|e| {
                 format!("Failed to open directory {:?}: {}", self.config.temp_dir, e)
             })?;
-            libc::syncfs(dir_fd.as_raw_fd());
+    
+            #[cfg(target_os = "linux")]
+            {
+                libc::syncfs(dir_fd.as_raw_fd());
+            }
+    
+            #[cfg(any(target_os = "macos", target_os = "freebsd"))]
+            {
+                libc::fsync(dir_fd.as_raw_fd());
+            }
         }
         Ok(())
     }
