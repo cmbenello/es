@@ -4,6 +4,7 @@ use es::benchmark::{
     print_benchmark_summary,
 };
 use std::path::PathBuf;
+use std::fs::File;
 
 #[derive(Parser)]
 #[command(name = "lineitem_benchmark")]
@@ -68,6 +69,9 @@ struct Args {
     /// Number of warmup runs before benchmarking
     #[arg(long, default_value = "0")]
     warmup_runs: usize,
+
+    #[arg(long, default_value = "1.0")]
+    boundary_imbalance_factor: f64,
 }
 
 fn parse_columns(column_str: &str) -> Vec<usize> {
@@ -96,6 +100,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         sketch_size: args.sketch_size,
         sketch_sampling_interval: args.sketch_sampling_interval,
         run_indexing_interval: args.run_indexing_interval,
+        boundary_imbalance_factor: args.boundary_imbalance_factor
     };
 
     // Create input provider for CSV files

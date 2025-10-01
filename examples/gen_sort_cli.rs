@@ -3,6 +3,7 @@ use es::benchmark::{
     BenchmarkConfig, BenchmarkRunner, GenSortInputProvider, SimpleVerifier, print_benchmark_summary,
 };
 use std::path::PathBuf;
+use std::fs::File;
 
 #[derive(Parser)]
 struct SortArgs {
@@ -49,6 +50,9 @@ struct SortArgs {
     /// Number of warmup runs before benchmarking (not included in results)
     #[arg(long, default_value = "0")]
     warmup_runs: usize,
+
+    #[arg(long, default_value = "1.0")]
+    boundary_imbalance_factor: f64,
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -66,6 +70,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         sketch_size: args.sketch_size,
         sketch_sampling_interval: args.sketch_sampling_interval,
         run_indexing_interval: args.run_indexing_interval,
+        boundary_imbalance_factor: args.boundary_imbalance_factor
     };
 
     // Create input provider for GenSort files
