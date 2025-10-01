@@ -74,7 +74,7 @@ impl BenchmarkConfig {
             sketch_size: 200,
             sketch_sampling_interval: 1000,
             run_indexing_interval: 1000,
-            boundary_imbalance_factor: 1.0
+            boundary_imbalance_factor: 1.0,
         }
     }
 }

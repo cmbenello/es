@@ -1,7 +1,7 @@
 use super::input::BenchmarkInputProvider;
 use super::types::{BenchmarkConfig, BenchmarkResult, BenchmarkStats};
 use super::verification::OutputVerifier;
-use crate::sort_policy::{Policy, PolicyParameters, SortConfig, get_all_policies};
+use crate::sort_policy::{PolicyResult, SortConfig, SortPolicy, get_all_policies};
 use crate::{
     ExternalSorter, ExternalSorterWithOVC, RunsOutput, RunsOutputWithOVC, SortInput, SortOutput,
     SortStats,
@@ -34,12 +34,13 @@ impl BenchmarkRunner {
         let dataset_mb = self.input_provider.estimate_data_size_mb()?;
 
         // Get policies based on configuration
-        let policies = get_all_policies(SortConfig {
+        let policies = get_all_policies();
+        let config = SortConfig {
             memory_mb: self.config.memory_mb as f64,
             dataset_mb,
             page_size_kb: 64.0,
             max_threads: self.config.threads as f64,
-        });
+        };
 
         let mut all_results = Vec::new();
 
@@ -47,18 +48,19 @@ impl BenchmarkRunner {
         self.print_benchmark_header(dataset_mb)?;
 
         // Run benchmarks for each policy
-        for (policy, params) in policies {
+        for policy in policies {
             println!("Running benchmark for policy: {}", policy.name());
+            let params = policy.calculate(config.clone());
             println!("Parameters: {}", params);
             println!("{}", "=".repeat(80));
 
             // Perform warmup runs
             if self.config.warmup_runs > 0 {
-                self.run_warmup_runs(&policy, &params)?;
+                self.run_warmup_runs(&params)?;
             }
 
             // Run actual benchmark
-            let result = self.run_policy_benchmark(&policy, &params)?;
+            let result = self.run_policy_benchmark(&params)?;
             all_results.push(result);
         }
 
@@ -86,11 +88,7 @@ impl BenchmarkRunner {
         Ok(())
     }
 
-    fn run_warmup_runs(
-        &self,
-        _policy: &Policy,
-        params: &PolicyParameters,
-    ) -> Result<(), Box<dyn std::error::Error>> {
+    fn run_warmup_runs(&self, params: &PolicyResult) -> Result<(), Box<dyn std::error::Error>> {
         println!("  Performing {} warmup run(s)...", self.config.warmup_runs);
 
         for warmup in 1..=self.config.warmup_runs {
@@ -137,8 +135,13 @@ impl BenchmarkRunner {
                     &temp_dir,
                 )?;
 
-                let (_merged_runs, merge_stats) =
-                    ExternalSorter::merge(runs, params.merge_threads as usize, sketch, &temp_dir, Some(self.config.boundary_imbalance_factor))?;
+                let (_merged_runs, merge_stats) = ExternalSorter::merge(
+                    runs,
+                    params.merge_threads as usize,
+                    sketch,
+                    &temp_dir,
+                    Some(self.config.boundary_imbalance_factor),
+                )?;
                 drop(_merged_runs);
 
                 (run_gen_stats, merge_stats)
@@ -160,8 +163,7 @@ impl BenchmarkRunner {
 
     fn run_policy_benchmark(
         &self,
-        policy: &Policy,
-        params: &PolicyParameters,
+        params: &PolicyResult,
     ) -> Result<BenchmarkResult, Box<dyn std::error::Error>> {
         let mut accumulated_stats = BenchmarkStats::new();
         let mut valid_runs = 0;
@@ -261,7 +263,7 @@ impl BenchmarkRunner {
 
         // Convert accumulated stats to final result
         let result = accumulated_stats.to_benchmark_result(
-            policy.name(),
+            params.name.clone(),
             &self.config,
             params.run_size_mb,
             params.run_gen_threads as usize,
@@ -276,7 +278,7 @@ impl BenchmarkRunner {
     fn run_single_sort(
         &self,
         input: Box<dyn SortInput>,
-        params: &PolicyParameters,
+        params: &PolicyResult,
         temp_dir: &Path,
     ) -> Result<Box<dyn SortOutput>, Box<dyn std::error::Error>> {
         let output = if self.config.ovc {
@@ -322,8 +324,13 @@ impl BenchmarkRunner {
                 temp_dir,
             )?;
 
-            let (merged_runs, merge_stats) =
-                ExternalSorter::merge(runs, params.merge_threads as usize, sketch, temp_dir, Some(self.config.boundary_imbalance_factor))?;
+            let (merged_runs, merge_stats) = ExternalSorter::merge(
+                runs,
+                params.merge_threads as usize,
+                sketch,
+                temp_dir,
+                Some(self.config.boundary_imbalance_factor),
+            )?;
 
             let stats = SortStats {
                 num_runs: run_gen_stats.num_runs,
@@ -344,18 +351,17 @@ impl BenchmarkRunner {
         Ok(output)
     }
 
-
     fn sync_filesystem(&self) -> Result<(), Box<dyn std::error::Error>> {
         unsafe {
             let dir_fd = File::open(&self.config.temp_dir).map_err(|e| {
                 format!("Failed to open directory {:?}: {}", self.config.temp_dir, e)
             })?;
-    
+
             #[cfg(target_os = "linux")]
             {
                 libc::syncfs(dir_fd.as_raw_fd());
             }
-    
+
             #[cfg(any(target_os = "macos", target_os = "freebsd"))]
             {
                 libc::fsync(dir_fd.as_raw_fd());

@@ -320,7 +320,7 @@ pub mod ovc;
 pub mod rand;
 pub mod sort;
 pub mod sort_policy;
-pub mod sort_policy2;
+pub mod sort_policy_sub;
 pub mod sort_stats;
 pub mod sort_with_ovc;
 

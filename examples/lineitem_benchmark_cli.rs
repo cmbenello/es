@@ -3,8 +3,8 @@ use es::benchmark::{
     BenchmarkConfig, BenchmarkRunner, CsvInputProvider, DetailedCsvVerifier,
     print_benchmark_summary,
 };
-use std::path::PathBuf;
 use std::fs::File;
+use std::path::PathBuf;
 
 #[derive(Parser)]
 #[command(name = "lineitem_benchmark")]
@@ -100,7 +100,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         sketch_size: args.sketch_size,
         sketch_sampling_interval: args.sketch_sampling_interval,
         run_indexing_interval: args.run_indexing_interval,
-        boundary_imbalance_factor: args.boundary_imbalance_factor
+        boundary_imbalance_factor: args.boundary_imbalance_factor,
     };
 
     // Create input provider for CSV files

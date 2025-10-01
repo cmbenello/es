@@ -299,7 +299,10 @@ impl ExternalSorter {
         imbalance_factor: Option<f64>,
     ) -> Result<(Vec<RunImpl>, MergeStats), String> {
         let imbalance_factor = imbalance_factor.unwrap_or(1.0);
-        println!("CDF boundary imbalance factor for merge: {:.4}", imbalance_factor);
+        println!(
+            "CDF boundary imbalance factor for merge: {:.4}",
+            imbalance_factor
+        );
         // If no runs or single run, return early
         if output_runs.is_empty() {
             let merge_stats = MergeStats {
@@ -350,7 +353,11 @@ impl ExternalSorter {
 
         // Create imbalance portions
         let k = merge_threads as f64;
-        let r = if imbalance_factor <= 0.0 { 1.0 } else { imbalance_factor };
+        let r = if imbalance_factor <= 0.0 {
+            1.0
+        } else {
+            imbalance_factor
+        };
         // each = portion size for all non-first threads
         let each = 1.0 / (r + (k - 1.0));
 
