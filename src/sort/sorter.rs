@@ -224,9 +224,10 @@ impl ExternalSorter {
                     .expect("Failed to create run");
 
                     for (k, v) in sort_buffer.sorted_iter() {
-                        if cnt >= sketch_sampling_interval {
+                        if cnt % sketch_sampling_interval == 0 {
                             sketch.update(k.clone());
                         }
+                        cnt += 1;
                         output_run.append(k, v);
                     }
 
