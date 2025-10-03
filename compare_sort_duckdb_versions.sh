@@ -1,0 +1,1 @@
+scripts/compare_sort_duckdb_versions.sh
