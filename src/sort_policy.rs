@@ -79,12 +79,12 @@ pub fn is_configuration_feasible(config: SortConfig) -> bool {
     min_run <= max_run
 }
 
-/// Policy that uses 0% interpolation (minimum feasible run length)
-pub struct Policy0PercentRunLength;
+/// Policy that uses logarithmic interpolation with factor 0.0 (minimum feasible run length)
+pub struct PolicyLog0RunLength;
 
-impl SortPolicy for Policy0PercentRunLength {
+impl SortPolicy for PolicyLog0RunLength {
     fn name(&self) -> String {
-        "0%_RunLength".to_string()
+        "Log_0.0".to_string()
     }
 
     fn calculate(&self, config: SortConfig) -> PolicyResult {
@@ -105,12 +105,96 @@ impl SortPolicy for Policy0PercentRunLength {
     }
 }
 
-/// Policy that uses 100% interpolation (maximum feasible run length)
-pub struct Policy100PercentRunLength;
+/// Policy that uses logarithmic interpolation with factor 0.25
+pub struct PolicyLog025RunLength;
 
-impl SortPolicy for Policy100PercentRunLength {
+impl SortPolicy for PolicyLog025RunLength {
     fn name(&self) -> String {
-        "100%_RunLength".to_string()
+        "Log_0.25".to_string()
+    }
+
+    fn calculate(&self, config: SortConfig) -> PolicyResult {
+        let (min_run_size, max_run_size) = calculate_run_bounds(config);
+        // Logarithmic interpolation: min * (max/min)^0.25
+        let run_size = min_run_size * (max_run_size / min_run_size).powf(0.25);
+        let run_gen_threads = config.max_threads;
+        let merge_threads = config.max_threads;
+
+        PolicyResult {
+            name: self.name(),
+            run_size_mb: run_size,
+            run_gen_threads,
+            merge_threads,
+            run_gen_memory_mb: run_size * run_gen_threads,
+            merge_memory_mb: (config.dataset_mb / run_size)
+                * merge_threads
+                * (config.page_size_kb / 1024.0),
+        }
+    }
+}
+
+/// Policy that uses logarithmic interpolation with factor 0.5 (geometric mean)
+pub struct PolicyLog05RunLength;
+
+impl SortPolicy for PolicyLog05RunLength {
+    fn name(&self) -> String {
+        "Log_0.5".to_string()
+    }
+
+    fn calculate(&self, config: SortConfig) -> PolicyResult {
+        let (min_run_size, max_run_size) = calculate_run_bounds(config);
+        // Logarithmic interpolation: min * (max/min)^0.5 = sqrt(min * max)
+        let run_size = (min_run_size * max_run_size).sqrt();
+        let run_gen_threads = config.max_threads;
+        let merge_threads = config.max_threads;
+
+        PolicyResult {
+            name: self.name(),
+            run_size_mb: run_size,
+            run_gen_threads,
+            merge_threads,
+            run_gen_memory_mb: run_size * run_gen_threads,
+            merge_memory_mb: (config.dataset_mb / run_size)
+                * merge_threads
+                * (config.page_size_kb / 1024.0),
+        }
+    }
+}
+
+/// Policy that uses logarithmic interpolation with factor 0.75
+pub struct PolicyLog075RunLength;
+
+impl SortPolicy for PolicyLog075RunLength {
+    fn name(&self) -> String {
+        "Log_0.75".to_string()
+    }
+
+    fn calculate(&self, config: SortConfig) -> PolicyResult {
+        let (min_run_size, max_run_size) = calculate_run_bounds(config);
+        // Logarithmic interpolation: min * (max/min)^0.75
+        let run_size = min_run_size * (max_run_size / min_run_size).powf(0.75);
+        let run_gen_threads = config.max_threads;
+        let merge_threads = config.max_threads;
+
+        PolicyResult {
+            name: self.name(),
+            run_size_mb: run_size,
+            run_gen_threads,
+            merge_threads,
+            run_gen_memory_mb: run_size * run_gen_threads,
+            merge_memory_mb: (config.dataset_mb / run_size)
+                * merge_threads
+                * (config.page_size_kb / 1024.0),
+        }
+    }
+}
+
+/// Policy that uses logarithmic interpolation with factor 1.0 (maximum feasible run length)
+pub struct PolicyLog1RunLength;
+
+impl SortPolicy for PolicyLog1RunLength {
+    fn name(&self) -> String {
+        "Log_1.0".to_string()
     }
 
     fn calculate(&self, config: SortConfig) -> PolicyResult {
@@ -131,97 +215,14 @@ impl SortPolicy for Policy100PercentRunLength {
     }
 }
 
-/// Policy that uses 50% interpolation (arithmetic mean of the bounds)
-pub struct Policy50PercentRunLength;
-
-impl SortPolicy for Policy50PercentRunLength {
-    fn name(&self) -> String {
-        "50%_RunLength".to_string()
-    }
-
-    fn calculate(&self, config: SortConfig) -> PolicyResult {
-        let (min_run_size, max_run_size) = calculate_run_bounds(config);
-        let run_size = (min_run_size + max_run_size) / 2.0;
-        let run_gen_threads = config.max_threads;
-        let merge_threads = config.max_threads;
-
-        PolicyResult {
-            name: self.name(),
-            run_size_mb: run_size,
-            run_gen_threads,
-            merge_threads,
-            run_gen_memory_mb: run_size * run_gen_threads,
-            merge_memory_mb: (config.dataset_mb / run_size)
-                * merge_threads
-                * (config.page_size_kb / 1024.0),
-        }
-    }
-}
-
-/// Policy that uses 75% interpolation
-pub struct Policy75PercentRunLength;
-
-impl SortPolicy for Policy75PercentRunLength {
-    fn name(&self) -> String {
-        "75%_RunLength".to_string()
-    }
-
-    fn calculate(&self, config: SortConfig) -> PolicyResult {
-        let (min_run_size, max_run_size) = calculate_run_bounds(config);
-        // Use 75% towards max to reduce run gen memory pressure
-        let run_size = min_run_size + 0.75 * (max_run_size - min_run_size);
-        let run_gen_threads = config.max_threads;
-        let merge_threads = config.max_threads;
-
-        PolicyResult {
-            name: self.name(),
-            run_size_mb: run_size,
-            run_gen_threads,
-            merge_threads,
-            run_gen_memory_mb: run_size * run_gen_threads,
-            merge_memory_mb: (config.dataset_mb / run_size)
-                * merge_threads
-                * (config.page_size_kb / 1024.0),
-        }
-    }
-}
-
-/// Policy that uses 25% interpolation
-pub struct Policy25PercentRunLength;
-
-impl SortPolicy for Policy25PercentRunLength {
-    fn name(&self) -> String {
-        "25%_RunLength".to_string()
-    }
-
-    fn calculate(&self, config: SortConfig) -> PolicyResult {
-        let (min_run_size, max_run_size) = calculate_run_bounds(config);
-        // Use 25% towards max to reduce merge memory pressure
-        let run_size = min_run_size + 0.25 * (max_run_size - min_run_size);
-        let run_gen_threads = config.max_threads;
-        let merge_threads = config.max_threads;
-
-        PolicyResult {
-            name: self.name(),
-            run_size_mb: run_size,
-            run_gen_threads,
-            merge_threads,
-            run_gen_memory_mb: run_size * run_gen_threads,
-            merge_memory_mb: (config.dataset_mb / run_size)
-                * merge_threads
-                * (config.page_size_kb / 1024.0),
-        }
-    }
-}
-
 /// Get all available policies
 pub fn get_all_policies() -> Vec<Box<dyn SortPolicy>> {
     vec![
-        Box::new(Policy0PercentRunLength),
-        Box::new(Policy25PercentRunLength),
-        Box::new(Policy50PercentRunLength),
-        Box::new(Policy75PercentRunLength),
-        Box::new(Policy100PercentRunLength),
+        Box::new(PolicyLog0RunLength),
+        Box::new(PolicyLog025RunLength),
+        Box::new(PolicyLog05RunLength),
+        Box::new(PolicyLog075RunLength),
+        Box::new(PolicyLog1RunLength),
     ]
 }
 
@@ -345,7 +346,7 @@ mod tests {
             max_threads: 8.0,
         };
 
-        let policy = Policy0PercentRunLength;
+        let policy = PolicyLog0RunLength;
         let result = policy.calculate(config);
 
         let (min_run, _) = calculate_run_bounds(config);
@@ -363,7 +364,7 @@ mod tests {
             max_threads: 8.0,
         };
 
-        let policy = Policy100PercentRunLength;
+        let policy = PolicyLog1RunLength;
         let result = policy.calculate(config);
 
         let (_, max_run) = calculate_run_bounds(config);
@@ -407,7 +408,7 @@ mod tests {
             max_threads: 8.0,
         };
 
-        let policy = Policy50PercentRunLength;
+        let policy = PolicyLog05RunLength;
         let result = policy.calculate(config);
 
         // Verify run gen memory = run_size * threads
@@ -420,6 +421,40 @@ mod tests {
             * result.merge_threads
             * (config.page_size_kb / 1024.0);
         assert!((result.merge_memory_mb - expected_merge_memory).abs() < 0.01);
+    }
+
+    #[test]
+    fn test_logarithmic_interpolation() {
+        let config = SortConfig {
+            memory_mb: 1024.0,
+            dataset_mb: 4096.0,
+            page_size_kb: 64.0,
+            max_threads: 8.0,
+        };
+
+        let (min_run, max_run) = calculate_run_bounds(config);
+
+        // Test Log_0.5 gives geometric mean
+        let policy_05 = PolicyLog05RunLength;
+        let result_05 = policy_05.calculate(config);
+        let geometric_mean = (min_run * max_run).sqrt();
+        assert!((result_05.run_size_mb - geometric_mean).abs() < 0.01);
+
+        // Test that log policies are ordered
+        let policy_0 = PolicyLog0RunLength;
+        let policy_025 = PolicyLog025RunLength;
+        let policy_075 = PolicyLog075RunLength;
+        let policy_1 = PolicyLog1RunLength;
+
+        let result_0 = policy_0.calculate(config);
+        let result_025 = policy_025.calculate(config);
+        let result_075 = policy_075.calculate(config);
+        let result_1 = policy_1.calculate(config);
+
+        assert!(result_0.run_size_mb < result_025.run_size_mb);
+        assert!(result_025.run_size_mb < result_05.run_size_mb);
+        assert!(result_05.run_size_mb < result_075.run_size_mb);
+        assert!(result_075.run_size_mb < result_1.run_size_mb);
     }
 
     #[test]
