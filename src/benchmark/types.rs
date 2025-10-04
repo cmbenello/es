@@ -59,6 +59,7 @@ pub struct BenchmarkConfig {
     pub sketch_sampling_interval: usize,
     pub run_indexing_interval: usize,
     pub boundary_imbalance_factor: f64,
+    pub experiment_type: String,
 }
 
 impl BenchmarkConfig {
@@ -75,6 +76,7 @@ impl BenchmarkConfig {
             sketch_sampling_interval: 1000,
             run_indexing_interval: 1000,
             boundary_imbalance_factor: 1.0,
+            experiment_type: "run_length".to_string(),
         }
     }
 }

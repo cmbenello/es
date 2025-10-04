@@ -1,7 +1,8 @@
 use super::input::BenchmarkInputProvider;
 use super::types::{BenchmarkConfig, BenchmarkResult, BenchmarkStats};
 use super::verification::OutputVerifier;
-use crate::sort_policy::{PolicyResult, SortConfig, SortPolicy, get_all_policies};
+use crate::sort_policy_run_length::{PolicyResult, SortConfig, SortPolicy, get_all_policies};
+use crate::sort_policy_thread_count::get_all_thread_policies;
 use crate::{
     ExternalSorter, ExternalSorterWithOVC, RunsOutput, RunsOutputWithOVC, SortInput, SortOutput,
     SortStats,
@@ -33,13 +34,22 @@ impl BenchmarkRunner {
         // Get data size estimation for policy configuration
         let dataset_mb = self.input_provider.estimate_data_size_mb()?;
 
-        // Get policies based on configuration
-        let policies = get_all_policies();
-        let config = SortConfig {
+        // Get policies based on experiment type
+        let sort_config = SortConfig {
             memory_mb: self.config.memory_mb as f64,
             dataset_mb,
             page_size_kb: 64.0,
             max_threads: self.config.threads as f64,
+        };
+
+        let policies: Vec<Box<dyn SortPolicy>> = match self.config.experiment_type.as_str() {
+            "run_length" => get_all_policies(),
+            "thread_count" => get_all_thread_policies(sort_config),
+            _ => {
+                return Err(
+                    format!("Invalid experiment type: {}", self.config.experiment_type).into(),
+                );
+            }
         };
 
         let mut all_results = Vec::new();
@@ -50,7 +60,7 @@ impl BenchmarkRunner {
         // Run benchmarks for each policy
         for policy in policies {
             println!("Running benchmark for policy: {}", policy.name());
-            let params = policy.calculate(config.clone());
+            let params = policy.calculate(sort_config.clone());
             println!("Parameters: {}", params);
             println!("{}", "=".repeat(80));
 

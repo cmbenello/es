@@ -319,8 +319,9 @@ pub mod order_preserving_encoding;
 pub mod ovc;
 pub mod rand;
 pub mod sort;
-pub mod sort_policy;
+pub mod sort_policy_run_length;
 pub mod sort_policy_sub;
+pub mod sort_policy_thread_count;
 pub mod sort_stats;
 pub mod sort_with_ovc;
 

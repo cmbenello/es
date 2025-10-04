@@ -53,10 +53,21 @@ struct SortArgs {
 
     #[arg(long, default_value = "1.0")]
     boundary_imbalance_factor: f64,
+
+    /// Experiment type: "run_length" or "thread_count"
+    #[arg(long, default_value = "run_length")]
+    experiment_type: String,
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args = SortArgs::parse();
+
+    // Validate experiment type
+    let experiment_type = args.experiment_type.to_lowercase();
+    if experiment_type != "run_length" && experiment_type != "thread_count" {
+        eprintln!("Error: experiment_type must be either 'run_length' or 'thread_count'");
+        std::process::exit(1);
+    }
 
     // Create benchmark configuration
     let config = BenchmarkConfig {
@@ -71,6 +82,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         sketch_sampling_interval: args.sketch_sampling_interval,
         run_indexing_interval: args.run_indexing_interval,
         boundary_imbalance_factor: args.boundary_imbalance_factor,
+        experiment_type,
     };
 
     // Create input provider for GenSort files
