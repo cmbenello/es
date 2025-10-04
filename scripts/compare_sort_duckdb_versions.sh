@@ -21,6 +21,7 @@ set -euo pipefail
 #   -w, --warmup <n>      Number of warmup runs per version (default: 0)
 #   -r, --runs <n>        Number of measured runs per version (default: 1)
 #       --db-path <path>  Use on-disk database file instead of :memory:
+#       --skip-13         Skip DuckDB 1.3 version testing
 #   -h, --help            Show this help and exit
 #
 # Notes:
@@ -44,6 +45,7 @@ Options:
   -w, --warmup <n>      Number of warmup runs per version (default: 0)
   -r, --runs <n>        Number of measured runs per version (default: 1)
       --db-path <path>  Use on-disk database file instead of :memory:
+      --skip-13         Skip DuckDB 1.3 version testing
   -h, --help            Show this help and exit
 
 Example:
@@ -80,6 +82,7 @@ VER14="1.4.0"
 WARMUP_RUNS=0
 MEASURE_RUNS=1
 DB_PATH=""
+SKIP_13=false
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -117,6 +120,8 @@ while [[ $# -gt 0 ]]; do
       MEASURE_RUNS="$2"; shift 2 ;;
     --runs=*)
       MEASURE_RUNS="${1#*=}"; shift ;;
+    --skip-13)
+      SKIP_13=true; shift ;;
     --)
       shift; break ;;
     -*)
@@ -134,8 +139,10 @@ fi
 DUCKDB13_BIN="${BIN_DIR}/duckdb-${VER13}"
 DUCKDB14_BIN="${BIN_DIR}/duckdb-${VER14}"
 
-if [ ! -x "$DUCKDB13_BIN" ]; then
-  echo "Error: DuckDB 1.3 binary not found at: $DUCKDB13_BIN"; echo "Run scripts/duckdb_setup.sh or pass --bin-dir"; exit 1
+if [ "$SKIP_13" = false ]; then
+  if [ ! -x "$DUCKDB13_BIN" ]; then
+    echo "Error: DuckDB 1.3 binary not found at: $DUCKDB13_BIN"; echo "Run scripts/duckdb_setup.sh or pass --bin-dir"; exit 1
+  fi
 fi
 if [ ! -x "$DUCKDB14_BIN" ]; then
   echo "Error: DuckDB 1.4 binary not found at: $DUCKDB14_BIN"; echo "Run scripts/duckdb_setup.sh or pass --bin-dir"; exit 1
@@ -216,66 +223,74 @@ EOF
 }
 
 # Test 1: DuckDB 1.3
-echo "======================================================================"  | tee -a "$LOG_FILE"
-echo "TEST 1: DuckDB ${VER13}"                                                | tee -a "$LOG_FILE"
-echo "======================================================================"  | tee -a "$LOG_FILE"
-DUCKDB_SQL_13="${OUTPUT_DIR}/duckdb_sort_13.sql"
+if [ "$SKIP_13" = false ]; then
+  echo "======================================================================"  | tee -a "$LOG_FILE"
+  echo "TEST 1: DuckDB ${VER13}"                                                | tee -a "$LOG_FILE"
+  echo "======================================================================"  | tee -a "$LOG_FILE"
+  DUCKDB_SQL_13="${OUTPUT_DIR}/duckdb_sort_13.sql"
 
-build_duckdb_sql "$DUCKDB_SQL_13"
+  build_duckdb_sql "$DUCKDB_SQL_13"
 
-DUCKDB_13_LOG="${OUTPUT_DIR}/duckdb_13_output.log"
-: > "$DUCKDB_13_LOG"
+  DUCKDB_13_LOG="${OUTPUT_DIR}/duckdb_13_output.log"
+  : > "$DUCKDB_13_LOG"
 
-# Warmups 1.3
-if [ "$WARMUP_RUNS" -gt 0 ]; then
-  echo "-- Warmup runs (${WARMUP_RUNS})"                                       | tee -a "$LOG_FILE"
-  for i in $(seq 1 "$WARMUP_RUNS"); do
-    echo "Warmup #$i (v${VER13})..."                                           | tee -a "$LOG_FILE"
-    # Clean database before each warmup
+  # Warmups 1.3
+  if [ "$WARMUP_RUNS" -gt 0 ]; then
+    echo "-- Warmup runs (${WARMUP_RUNS})"                                       | tee -a "$LOG_FILE"
+    for i in $(seq 1 "$WARMUP_RUNS"); do
+      echo "Warmup #$i (v${VER13})..."                                           | tee -a "$LOG_FILE"
+      # Clean database before each warmup
+      rm -f "$DB_PATH_13" "${DB_PATH_13}.wal"
+      rm -rf "${DB_PATH_13}.tmp"
+      sync
+      "$DUCKDB13_BIN" "$DB_PATH_13" < "$DUCKDB_SQL_13" 2>&1 | tee -a "$DUCKDB_13_LOG" >/dev/null
+    done
+  fi
+
+  # Measured runs 1.3
+  echo "-- Measured runs (${MEASURE_RUNS})"                                     | tee -a "$LOG_FILE"
+  DUCKDB_13_SUM=0
+  DUCKDB_13_MIN=
+  DUCKDB_13_MAX=
+  for i in $(seq 1 "$MEASURE_RUNS"); do
+    # Clean database files and sync disk before each run
     rm -f "$DB_PATH_13" "${DB_PATH_13}.wal"
     rm -rf "${DB_PATH_13}.tmp"
     sync
-    "$DUCKDB13_BIN" "$DB_PATH_13" < "$DUCKDB_SQL_13" 2>&1 | tee -a "$DUCKDB_13_LOG" >/dev/null
-  done
-fi
+    sleep 1
 
-# Measured runs 1.3
-echo "-- Measured runs (${MEASURE_RUNS})"                                     | tee -a "$LOG_FILE"
-DUCKDB_13_SUM=0
-DUCKDB_13_MIN=
-DUCKDB_13_MAX=
-for i in $(seq 1 "$MEASURE_RUNS"); do
-  # Clean database files and sync disk before each run
+    RUN_LOG="${OUTPUT_DIR}/duckdb_13_run${i}.log"
+    "$DUCKDB13_BIN" "$DB_PATH_13" < "$DUCKDB_SQL_13" 2>&1 | tee "$RUN_LOG" >> "$DUCKDB_13_LOG"
+
+    # Extract CREATE TABLE and CHECKPOINT times (skip EXPLAIN)
+    # Line 1: EXPLAIN, Line 2: CREATE TABLE, Line 3: CHECKPOINT
+    CREATE_TIME=$(grep "^Run Time" "$RUN_LOG" | sed -n '2p' | grep -oP 'real \K[0-9.]+' || echo "0")
+    CHECKPOINT_TIME=$(grep "^Run Time" "$RUN_LOG" | sed -n '3p' | grep -oP 'real \K[0-9.]+' || echo "0")
+    DUCKDB_13_DURATION=$(echo "$CREATE_TIME + $CHECKPOINT_TIME" | bc)
+
+    echo "Run #$i time (v${VER13}): $(printf '%.2f' "$DUCKDB_13_DURATION") s (CREATE: ${CREATE_TIME}s, CHECKPOINT: ${CHECKPOINT_TIME}s)" | tee -a "$LOG_FILE"
+    DUCKDB_13_SUM=$(echo "$DUCKDB_13_SUM + $DUCKDB_13_DURATION" | bc)
+    if [ -z "$DUCKDB_13_MIN" ] || (( $(echo "$DUCKDB_13_DURATION < $DUCKDB_13_MIN" | bc -l) )); then DUCKDB_13_MIN="$DUCKDB_13_DURATION"; fi
+    if [ -z "$DUCKDB_13_MAX" ] || (( $(echo "$DUCKDB_13_DURATION > $DUCKDB_13_MAX" | bc -l) )); then DUCKDB_13_MAX="$DUCKDB_13_DURATION"; fi
+  done
+  DUCKDB_13_AVG=$(echo "scale=6; $DUCKDB_13_SUM / $MEASURE_RUNS" | bc)
+  echo "DuckDB ${VER13} avg time: $(printf '%.2f' "$DUCKDB_13_AVG") seconds"   | tee -a "$LOG_FILE"
+  echo ""                                                                        | tee -a "$LOG_FILE"
+
+  # Clean up 1.3 database and sync disk before next experiment
+  echo "Cleaning up and syncing disk..."                                        | tee -a "$LOG_FILE"
   rm -f "$DB_PATH_13" "${DB_PATH_13}.wal"
   rm -rf "${DB_PATH_13}.tmp"
   sync
-  sleep 1
-
-  RUN_LOG="${OUTPUT_DIR}/duckdb_13_run${i}.log"
-  "$DUCKDB13_BIN" "$DB_PATH_13" < "$DUCKDB_SQL_13" 2>&1 | tee "$RUN_LOG" >> "$DUCKDB_13_LOG"
-
-  # Extract CREATE TABLE and CHECKPOINT times (skip EXPLAIN)
-  # Line 1: EXPLAIN, Line 2: CREATE TABLE, Line 3: CHECKPOINT
-  CREATE_TIME=$(grep "^Run Time" "$RUN_LOG" | sed -n '2p' | grep -oP 'real \K[0-9.]+' || echo "0")
-  CHECKPOINT_TIME=$(grep "^Run Time" "$RUN_LOG" | sed -n '3p' | grep -oP 'real \K[0-9.]+' || echo "0")
-  DUCKDB_13_DURATION=$(echo "$CREATE_TIME + $CHECKPOINT_TIME" | bc)
-
-  echo "Run #$i time (v${VER13}): $(printf '%.2f' "$DUCKDB_13_DURATION") s (CREATE: ${CREATE_TIME}s, CHECKPOINT: ${CHECKPOINT_TIME}s)" | tee -a "$LOG_FILE"
-  DUCKDB_13_SUM=$(echo "$DUCKDB_13_SUM + $DUCKDB_13_DURATION" | bc)
-  if [ -z "$DUCKDB_13_MIN" ] || (( $(echo "$DUCKDB_13_DURATION < $DUCKDB_13_MIN" | bc -l) )); then DUCKDB_13_MIN="$DUCKDB_13_DURATION"; fi
-  if [ -z "$DUCKDB_13_MAX" ] || (( $(echo "$DUCKDB_13_DURATION > $DUCKDB_13_MAX" | bc -l) )); then DUCKDB_13_MAX="$DUCKDB_13_DURATION"; fi
-done
-DUCKDB_13_AVG=$(echo "scale=6; $DUCKDB_13_SUM / $MEASURE_RUNS" | bc)
-echo "DuckDB ${VER13} avg time: $(printf '%.2f' "$DUCKDB_13_AVG") seconds"   | tee -a "$LOG_FILE"
-echo ""                                                                        | tee -a "$LOG_FILE"
-
-# Clean up 1.3 database and sync disk before next experiment
-echo "Cleaning up and syncing disk..."                                        | tee -a "$LOG_FILE"
-rm -f "$DB_PATH_13" "${DB_PATH_13}.wal"
-rm -rf "${DB_PATH_13}.tmp"
-sync
-sleep 2
-echo ""                                                                        | tee -a "$LOG_FILE"
+  sleep 2
+  echo ""                                                                        | tee -a "$LOG_FILE"
+else
+  echo "======================================================================"  | tee -a "$LOG_FILE"
+  echo "TEST 1: DuckDB ${VER13} - SKIPPED"                                      | tee -a "$LOG_FILE"
+  echo "======================================================================"  | tee -a "$LOG_FILE"
+  echo ""                                                                        | tee -a "$LOG_FILE"
+  DUCKDB_13_AVG=0
+fi
 
 # Test 2: DuckDB 1.4
 echo "======================================================================"  | tee -a "$LOG_FILE"
@@ -335,20 +350,26 @@ echo ""                                                                        |
 echo "======================================================================"  | tee -a "$LOG_FILE"
 echo "SUMMARY"                                                                | tee -a "$LOG_FILE"
 echo "======================================================================"  | tee -a "$LOG_FILE"
-echo "DuckDB ${VER13} avg time (${MEASURE_RUNS} runs): $(printf "%.2f" "$DUCKDB_13_AVG") seconds" | tee -a "$LOG_FILE"
+if [ "$SKIP_13" = false ]; then
+  echo "DuckDB ${VER13} avg time (${MEASURE_RUNS} runs): $(printf "%.2f" "$DUCKDB_13_AVG") seconds" | tee -a "$LOG_FILE"
+fi
 echo "DuckDB ${VER14} avg time (${MEASURE_RUNS} runs): $(printf "%.2f" "$DUCKDB_14_AVG") seconds" | tee -a "$LOG_FILE"
 
-if (( $(echo "$DUCKDB_13_AVG > 0" | bc -l) )); then
+if [ "$SKIP_13" = false ] && (( $(echo "$DUCKDB_13_AVG > 0" | bc -l) )); then
   REL=$(echo "scale=2; $DUCKDB_13_AVG / $DUCKDB_14_AVG" | bc)
   echo "Relative (1.3 / 1.4) avg: ${REL}x"                                    | tee -a "$LOG_FILE"
 fi
 
 echo ""                                                                        | tee -a "$LOG_FILE"
 echo "Output files:"                                                          | tee -a "$LOG_FILE"
-echo "  - DuckDB ${VER13} log: ${OUTPUT_DIR}/duckdb_13_output.log"            | tee -a "$LOG_FILE"
+if [ "$SKIP_13" = false ]; then
+  echo "  - DuckDB ${VER13} log: ${OUTPUT_DIR}/duckdb_13_output.log"            | tee -a "$LOG_FILE"
+fi
 echo "  - DuckDB ${VER14} log: ${OUTPUT_DIR}/duckdb_14_output.log"            | tee -a "$LOG_FILE"
 echo ""                                                                        | tee -a "$LOG_FILE"
 echo "SQL scripts:"                                                            | tee -a "$LOG_FILE"
-echo "  - ${OUTPUT_DIR}/duckdb_sort_13.sql"                                    | tee -a "$LOG_FILE"
+if [ "$SKIP_13" = false ]; then
+  echo "  - ${OUTPUT_DIR}/duckdb_sort_13.sql"                                    | tee -a "$LOG_FILE"
+fi
 echo "  - ${OUTPUT_DIR}/duckdb_sort_14.sql"                                    | tee -a "$LOG_FILE"
 echo "======================================================================"  | tee -a "$LOG_FILE"
