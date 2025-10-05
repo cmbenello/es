@@ -20,7 +20,7 @@ set -euo pipefail
 #       --version-14 <v>  DuckDB 1.4.x version (default: 1.4.0)
 #   -w, --warmup <n>      Number of warmup runs per version (default: 0)
 #   -r, --runs <n>        Number of measured runs per version (default: 1)
-#       --db-path <path>  Use on-disk database file instead of :memory:
+#       --db-path <path>  Base path for on-disk DB files (per-run unique suffix)
 #       --skip-13         Skip DuckDB 1.3 version testing
 #   -h, --help            Show this help and exit
 #
@@ -44,7 +44,7 @@ Options:
       --version-14 <v>  DuckDB 1.4.x version (default: 1.4.0)
   -w, --warmup <n>      Number of warmup runs per version (default: 0)
   -r, --runs <n>        Number of measured runs per version (default: 1)
-      --db-path <path>  Use on-disk database file instead of :memory:
+      --db-path <path>  Base path for on-disk DB files (per-run unique suffix)
       --skip-13         Skip DuckDB 1.3 version testing
   -h, --help            Show this help and exit
 
@@ -157,17 +157,18 @@ LOG_FILE="${OUTPUT_DIR}/comparison_results.txt"
 DB_PATH_13="${OUTPUT_DIR}/benchmark_13.duckdb"
 DB_PATH_14="${OUTPUT_DIR}/benchmark_14.duckdb"
 
-# Handle user-provided --db-path
-if [ -n "$DB_PATH" ] && [ "$DB_PATH" != ":memory:" ]; then
+# Handle user-provided --db-path (files only; in-memory disabled)
+if [ -n "$DB_PATH" ]; then
+  if [ "$DB_PATH" = ":memory:" ]; then
+    echo "Error: In-memory mode is disabled. Please provide a file path for --db-path or omit it." >&2
+    exit 1
+  fi
   # If user provided a path, use it as base and add version suffix
   DB_DIR=$(dirname "$DB_PATH")
   DB_BASE=$(basename "$DB_PATH" .duckdb)
   DB_PATH_13="${DB_DIR}/${DB_BASE}_13.duckdb"
   DB_PATH_14="${DB_DIR}/${DB_BASE}_14.duckdb"
   mkdir -p "$DB_DIR"
-elif [ "$DB_PATH" = ":memory:" ]; then
-  DB_PATH_13=":memory:"
-  DB_PATH_14=":memory:"
 fi
 
 # Basic validations
@@ -190,8 +191,9 @@ echo "Threads: $THREADS"                                                       |
 echo "Memory: $MEMORY"                                                         | tee -a "$LOG_FILE"
 echo "DuckDB 1.3 bin: $DUCKDB13_BIN"                                          | tee -a "$LOG_FILE"
 echo "DuckDB 1.4 bin: $DUCKDB14_BIN"                                          | tee -a "$LOG_FILE"
-echo "Database 1.3: ${DB_PATH_13}"                                            | tee -a "$LOG_FILE"
-echo "Database 1.4: ${DB_PATH_14}"                                            | tee -a "$LOG_FILE"
+echo "Database base 1.3: ${DB_PATH_13}"                                       | tee -a "$LOG_FILE"
+echo "Database base 1.4: ${DB_PATH_14}"                                       | tee -a "$LOG_FILE"
+echo "DB mode: unique per-run on-disk files (deleted after each run)"         | tee -a "$LOG_FILE"
 echo "Warmup runs: $WARMUP_RUNS"                                              | tee -a "$LOG_FILE"
 echo "Measured runs: $MEASURE_RUNS"                                           | tee -a "$LOG_FILE"
 echo ""                                                                        | tee -a "$LOG_FILE"
@@ -238,14 +240,17 @@ if [ "$SKIP_13" = false ]; then
     echo "-- Warmup runs (${WARMUP_RUNS})"                                       | tee -a "$LOG_FILE"
     for i in $(seq 1 "$WARMUP_RUNS"); do
       echo "Warmup #$i (v${VER13})..."                                           | tee -a "$LOG_FILE"
-      # Clean database before each warmup
-      rm -f "$DB_PATH_13" "${DB_PATH_13}.wal"
-      rm -rf "${DB_PATH_13}.tmp"
+      # Use unique per-run DB path and ensure it's clean
+      RUN_DB="${DB_PATH_13%.duckdb}_warmup${i}.duckdb"
+      rm -f "$RUN_DB" "${RUN_DB}.wal" && rm -rf "${RUN_DB}.tmp" || true
       sync
       set +e
-      "$DUCKDB13_BIN" "$DB_PATH_13" < "$DUCKDB_SQL_13" 2>&1 | tee -a "$DUCKDB_13_LOG" >/dev/null
+      "$DUCKDB13_BIN" "$RUN_DB" < "$DUCKDB_SQL_13" 2>&1 | tee -a "$DUCKDB_13_LOG" >/dev/null
       cmd_status=${PIPESTATUS[0]}
       set -e
+      # Always delete the per-run DB after the warmup to free space
+      rm -f "$RUN_DB" "${RUN_DB}.wal" && rm -rf "${RUN_DB}.tmp" || true
+      sync
       if [ $cmd_status -ne 0 ]; then
         # Decode common signals
         if [ $cmd_status -ge 128 ]; then
@@ -273,17 +278,20 @@ if [ "$SKIP_13" = false ]; then
     DUCKDB_13_MAX=
     DUCKDB_13_COMPLETED=0
     for i in $(seq 1 "$MEASURE_RUNS"); do
-      # Clean database files and sync disk before each run
-      rm -f "$DB_PATH_13" "${DB_PATH_13}.wal"
-      rm -rf "${DB_PATH_13}.tmp"
+      # Use unique per-run DB path and ensure it's clean
+      RUN_DB="${DB_PATH_13%.duckdb}_run${i}.duckdb"
+      rm -f "$RUN_DB" "${RUN_DB}.wal" && rm -rf "${RUN_DB}.tmp" || true
       sync
       sleep 1
 
       RUN_LOG="${OUTPUT_DIR}/duckdb_13_run${i}.log"
       set +e
-      "$DUCKDB13_BIN" "$DB_PATH_13" < "$DUCKDB_SQL_13" 2>&1 | tee "$RUN_LOG" >> "$DUCKDB_13_LOG"
+      "$DUCKDB13_BIN" "$RUN_DB" < "$DUCKDB_SQL_13" 2>&1 | tee "$RUN_LOG" >> "$DUCKDB_13_LOG"
       cmd_status=${PIPESTATUS[0]}
       set -e
+      # Always delete the per-run DB after the run to free space
+      rm -f "$RUN_DB" "${RUN_DB}.wal" && rm -rf "${RUN_DB}.tmp" || true
+      sync
       if [ $cmd_status -ne 0 ]; then
         if [ $cmd_status -ge 128 ]; then
           sig=$((cmd_status-128))
@@ -354,14 +362,17 @@ if [ "$WARMUP_RUNS" -gt 0 ]; then
   echo "-- Warmup runs (${WARMUP_RUNS})"                                       | tee -a "$LOG_FILE"
   for i in $(seq 1 "$WARMUP_RUNS"); do
     echo "Warmup #$i (v${VER14})..."                                           | tee -a "$LOG_FILE"
-    # Clean database before each warmup
-    rm -f "$DB_PATH_14" "${DB_PATH_14}.wal"
-    rm -rf "${DB_PATH_14}.tmp"
+    # Use unique per-run DB path and ensure it's clean
+    RUN_DB="${DB_PATH_14%.duckdb}_warmup${i}.duckdb"
+    rm -f "$RUN_DB" "${RUN_DB}.wal" && rm -rf "${RUN_DB}.tmp" || true
     sync
     set +e
-    "$DUCKDB14_BIN" "$DB_PATH_14" < "$DUCKDB_SQL_14" 2>&1 | tee -a "$DUCKDB_14_LOG" >/dev/null
+    "$DUCKDB14_BIN" "$RUN_DB" < "$DUCKDB_SQL_14" 2>&1 | tee -a "$DUCKDB_14_LOG" >/dev/null
     cmd_status=${PIPESTATUS[0]}
     set -e
+    # Always delete the per-run DB after the warmup to free space
+    rm -f "$RUN_DB" "${RUN_DB}.wal" && rm -rf "${RUN_DB}.tmp" || true
+    sync
     if [ $cmd_status -ne 0 ]; then
       if [ $cmd_status -ge 128 ]; then
         sig=$((cmd_status-128))
@@ -388,17 +399,20 @@ if [ "$DUCKDB_14_CRASHED" = false ]; then
   DUCKDB_14_MAX=
   DUCKDB_14_COMPLETED=0
   for i in $(seq 1 "$MEASURE_RUNS"); do
-    # Clean database files and sync disk before each run
-    rm -f "$DB_PATH_14" "${DB_PATH_14}.wal"
-    rm -rf "${DB_PATH_14}.tmp"
+    # Use unique per-run DB path and ensure it's clean
+    RUN_DB="${DB_PATH_14%.duckdb}_run${i}.duckdb"
+    rm -f "$RUN_DB" "${RUN_DB}.wal" && rm -rf "${RUN_DB}.tmp" || true
     sync
     sleep 1
 
     RUN_LOG="${OUTPUT_DIR}/duckdb_14_run${i}.log"
     set +e
-    "$DUCKDB14_BIN" "$DB_PATH_14" < "$DUCKDB_SQL_14" 2>&1 | tee "$RUN_LOG" >> "$DUCKDB_14_LOG"
+    "$DUCKDB14_BIN" "$RUN_DB" < "$DUCKDB_SQL_14" 2>&1 | tee "$RUN_LOG" >> "$DUCKDB_14_LOG"
     cmd_status=${PIPESTATUS[0]}
     set -e
+    # Always delete the per-run DB after the run to free space
+    rm -f "$RUN_DB" "${RUN_DB}.wal" && rm -rf "${RUN_DB}.tmp" || true
+    sync
     if [ $cmd_status -ne 0 ]; then
       if [ $cmd_status -ge 128 ]; then
         sig=$((cmd_status-128))
