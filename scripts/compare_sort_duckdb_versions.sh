@@ -345,12 +345,11 @@ if [ "$SKIP_13" = false ]; then
         break
       fi
 
-      # Extract CREATE TABLE time only (skip EXPLAIN)
-      # Line 1: EXPLAIN, Line 2: CREATE TABLE
-      CREATE_TIME=$(grep "^Run Time" "$RUN_LOG" | sed -n '2p' | grep -oP 'real \K[0-9.]+' || echo "0")
-      DUCKDB_13_DURATION="$CREATE_TIME"
+      # Extract Run Time
+      RUN_TIME=$(grep "^Run Time" "$RUN_LOG" | head -1 | grep -oP 'real \K[0-9.]+' || echo "0")
+      DUCKDB_13_DURATION="$RUN_TIME"
 
-      echo "Run #$i time (v${VER13}): $(printf '%.2f' "$DUCKDB_13_DURATION") s (CREATE: ${CREATE_TIME}s)" | tee -a "$LOG_FILE"
+      echo "Run #$i time (v${VER13}): $(printf '%.2f' "$DUCKDB_13_DURATION") s" | tee -a "$LOG_FILE"
       DUCKDB_13_SUM=$(echo "$DUCKDB_13_SUM + $DUCKDB_13_DURATION" | bc)
       if [ -z "$DUCKDB_13_MIN" ] || (( $(echo "$DUCKDB_13_DURATION < $DUCKDB_13_MIN" | bc -l) )); then DUCKDB_13_MIN="$DUCKDB_13_DURATION"; fi
       if [ -z "$DUCKDB_13_MAX" ] || (( $(echo "$DUCKDB_13_DURATION > $DUCKDB_13_MAX" | bc -l) )); then DUCKDB_13_MAX="$DUCKDB_13_DURATION"; fi
@@ -484,12 +483,11 @@ if [ "$DUCKDB_14_CRASHED" = false ]; then
       break
     fi
 
-    # Extract CREATE TABLE time only (skip EXPLAIN)
-    # Line 1: EXPLAIN, Line 2: CREATE TABLE
-    CREATE_TIME=$(grep "^Run Time" "$RUN_LOG" | sed -n '2p' | grep -oP 'real \K[0-9.]+' || echo "0")
-    DUCKDB_14_DURATION="$CREATE_TIME"
+    # Extract Run Time
+    RUN_TIME=$(grep "^Run Time" "$RUN_LOG" | head -1 | grep -oP 'real \K[0-9.]+' || echo "0")
+    DUCKDB_14_DURATION="$RUN_TIME"
 
-    echo "Run #$i time (v${VER14}): $(printf '%.2f' "$DUCKDB_14_DURATION") s (CREATE: ${CREATE_TIME}s)" | tee -a "$LOG_FILE"
+    echo "Run #$i time (v${VER14}): $(printf '%.2f' "$DUCKDB_14_DURATION") s" | tee -a "$LOG_FILE"
     DUCKDB_14_SUM=$(echo "$DUCKDB_14_SUM + $DUCKDB_14_DURATION" | bc)
     if [ -z "$DUCKDB_14_MIN" ] || (( $(echo "$DUCKDB_14_DURATION < $DUCKDB_14_MIN" | bc -l) )); then DUCKDB_14_MIN="$DUCKDB_14_DURATION"; fi
     if [ -z "$DUCKDB_14_MAX" ] || (( $(echo "$DUCKDB_14_DURATION > $DUCKDB_14_MAX" | bc -l) )); then DUCKDB_14_MAX="$DUCKDB_14_DURATION"; fi
