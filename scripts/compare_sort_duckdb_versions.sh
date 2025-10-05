@@ -209,14 +209,14 @@ DELIMITER=","  # CSV
 # Helper to build SQL file for DuckDB run
 build_duckdb_sql() {
   local sql_path="$1"
+  local output_parquet="$2"
   cat > "$sql_path" << 'EOF'
 SET threads=${THREADS};
 SET memory_limit='${MEMORY}';
 SET preserve_insertion_order = false;
 .timer on
 
-EXPLAIN
-SELECT l_returnflag, l_linestatus, l_shipinstruct, l_shipmode, l_comment, l_orderkey, l_linenumber
+COPY (SELECT l_returnflag, l_linestatus, l_shipinstruct, l_shipmode, l_comment, l_orderkey, l_linenumber
 FROM read_csv('${CSV_FILE}', header=true, delim=',', columns={
   'l_orderkey': 'BIGINT',
   'l_partkey': 'BIGINT',
@@ -235,32 +235,11 @@ FROM read_csv('${CSV_FILE}', header=true, delim=',', columns={
   'l_shipmode': 'VARCHAR',
   'l_comment': 'VARCHAR'
 })
-ORDER BY l_returnflag, l_linestatus, l_shipinstruct, l_shipmode, l_comment;
-
-CREATE TABLE __sorted_result AS
-SELECT l_returnflag, l_linestatus, l_shipinstruct, l_shipmode, l_comment, l_orderkey, l_linenumber
-FROM read_csv('${CSV_FILE}', header=true, delim=',', columns={
-  'l_orderkey': 'BIGINT',
-  'l_partkey': 'BIGINT',
-  'l_suppkey': 'BIGINT',
-  'l_linenumber': 'INTEGER',
-  'l_quantity': 'DOUBLE',
-  'l_extendedprice': 'DOUBLE',
-  'l_discount': 'DOUBLE',
-  'l_tax': 'DOUBLE',
-  'l_returnflag': 'VARCHAR',
-  'l_linestatus': 'VARCHAR',
-  'l_shipdate': 'DATE',
-  'l_commitdate': 'DATE',
-  'l_receiptdate': 'DATE',
-  'l_shipinstruct': 'VARCHAR',
-  'l_shipmode': 'VARCHAR',
-  'l_comment': 'VARCHAR'
-})
-ORDER BY l_returnflag, l_linestatus, l_shipinstruct, l_shipmode, l_comment;
+ORDER BY l_returnflag, l_linestatus, l_shipinstruct, l_shipmode, l_comment) TO '${OUTPUT_PARQUET}'
+  (FORMAT PARQUET, COMPRESSION SNAPPY, ROW_GROUP_SIZE 122880);
 EOF
   # Replace variables
-  sed -i "s|\${THREADS}|${THREADS}|g; s|\${MEMORY}|${MEMORY}|g; s|\${CSV_FILE}|${CSV_FILE}|g" "$sql_path"
+  sed -i "s|\${THREADS}|${THREADS}|g; s|\${MEMORY}|${MEMORY}|g; s|\${CSV_FILE}|${CSV_FILE}|g; s|\${OUTPUT_PARQUET}|${output_parquet}|g" "$sql_path"
 }
 
 # Test 1: DuckDB 1.3
@@ -269,8 +248,7 @@ if [ "$SKIP_13" = false ]; then
   echo "TEST 1: DuckDB ${VER13}"                                                | tee -a "$LOG_FILE"
   echo "======================================================================"  | tee -a "$LOG_FILE"
   DUCKDB_SQL_13="${OUTPUT_DIR}/duckdb_sort_13.sql"
-
-  build_duckdb_sql "$DUCKDB_SQL_13"
+  PARQUET_TEMPLATE_13="${OUTPUT_DIR}/sorted_13"
 
   DUCKDB_13_LOG="${OUTPUT_DIR}/duckdb_13_output.log"
   : > "$DUCKDB_13_LOG"
@@ -281,21 +259,25 @@ if [ "$SKIP_13" = false ]; then
     echo "-- Warmup runs (${WARMUP_RUNS})"                                       | tee -a "$LOG_FILE"
     for i in $(seq 1 "$WARMUP_RUNS"); do
       echo "Warmup #$i (v${VER13})..."                                           | tee -a "$LOG_FILE"
-      # Use unique per-run DB path and ensure it's clean
-      RUN_DB="${DB_PATH_13%.duckdb}_warmup${i}.duckdb"
-      rm -f "$RUN_DB" "${RUN_DB}.wal" && rm -rf "${RUN_DB}.tmp" || true
+      # Create unique temporary directory for this run
+      RUN_TMPDIR="${OUTPUT_DIR}/tmp_13_warmup${i}"
+      mkdir -p "$RUN_TMPDIR"
+      # Use unique per-run DB path in temp directory
+      RUN_DB="${RUN_TMPDIR}/benchmark_warmup${i}.duckdb"
+      RUN_PARQUET="${RUN_TMPDIR}/sorted_warmup${i}.parquet"
       sync
       # Evict CSV file from page cache
       "$VMTOUCH_BIN" -e "$CSV_FILE" > /dev/null 2>&1 || true
+      # Build SQL with unique parquet file
+      build_duckdb_sql "$DUCKDB_SQL_13" "$RUN_PARQUET"
       set +e
       "$DUCKDB13_BIN" "$RUN_DB" < "$DUCKDB_SQL_13" 2>&1 | tee -a "$DUCKDB_13_LOG" >/dev/null
       cmd_status=${PIPESTATUS[0]}
       set -e
-      # Always delete the per-run DB after the warmup to free space
-      # Evict DB files from page cache before deletion
-      "$VMTOUCH_BIN" -e "$RUN_DB" "${RUN_DB}.wal" > /dev/null 2>&1 || true
-      "$VMTOUCH_BIN" -e -r "${RUN_DB}.tmp" > /dev/null 2>&1 || true
-      rm -f "$RUN_DB" "${RUN_DB}.wal" && rm -rf "${RUN_DB}.tmp" || true
+      # Evict temp directory files from page cache before deletion
+      "$VMTOUCH_BIN" -e -r "$RUN_TMPDIR" > /dev/null 2>&1 || true
+      # Remove entire temporary directory
+      rm -rf "$RUN_TMPDIR" || true
       sync
       if [ $cmd_status -ne 0 ]; then
         # Decode common signals
@@ -324,24 +306,28 @@ if [ "$SKIP_13" = false ]; then
     DUCKDB_13_MAX=
     DUCKDB_13_COMPLETED=0
     for i in $(seq 1 "$MEASURE_RUNS"); do
-      # Use unique per-run DB path and ensure it's clean
-      RUN_DB="${DB_PATH_13%.duckdb}_run${i}.duckdb"
-      rm -f "$RUN_DB" "${RUN_DB}.wal" && rm -rf "${RUN_DB}.tmp" || true
+      # Create unique temporary directory for this run
+      RUN_TMPDIR="${OUTPUT_DIR}/tmp_13_run${i}"
+      mkdir -p "$RUN_TMPDIR"
+      # Use unique per-run DB path in temp directory
+      RUN_DB="${RUN_TMPDIR}/benchmark_run${i}.duckdb"
+      RUN_PARQUET="${RUN_TMPDIR}/sorted_run${i}.parquet"
       sync
       # Evict CSV file from page cache
       "$VMTOUCH_BIN" -e "$CSV_FILE" > /dev/null 2>&1 || true
       sleep 1
 
+      # Build SQL with unique parquet file
+      build_duckdb_sql "$DUCKDB_SQL_13" "$RUN_PARQUET"
       RUN_LOG="${OUTPUT_DIR}/duckdb_13_run${i}.log"
       set +e
       "$DUCKDB13_BIN" "$RUN_DB" < "$DUCKDB_SQL_13" 2>&1 | tee "$RUN_LOG" >> "$DUCKDB_13_LOG"
       cmd_status=${PIPESTATUS[0]}
       set -e
-      # Always delete the per-run DB after the run to free space
-      # Evict DB files from page cache before deletion
-      "$VMTOUCH_BIN" -e "$RUN_DB" "${RUN_DB}.wal" > /dev/null 2>&1 || true
-      "$VMTOUCH_BIN" -e -r "${RUN_DB}.tmp" > /dev/null 2>&1 || true
-      rm -f "$RUN_DB" "${RUN_DB}.wal" && rm -rf "${RUN_DB}.tmp" || true
+      # Evict temp directory files from page cache before deletion
+      "$VMTOUCH_BIN" -e -r "$RUN_TMPDIR" > /dev/null 2>&1 || true
+      # Remove entire temporary directory
+      rm -rf "$RUN_TMPDIR" || true
       sync
       if [ $cmd_status -ne 0 ]; then
         if [ $cmd_status -ge 128 ]; then
@@ -402,7 +388,7 @@ echo "======================================================================"  |
 echo "TEST 2: DuckDB ${VER14}"                                                | tee -a "$LOG_FILE"
 echo "======================================================================"  | tee -a "$LOG_FILE"
 DUCKDB_SQL_14="${OUTPUT_DIR}/duckdb_sort_14.sql"
-build_duckdb_sql "$DUCKDB_SQL_14"
+PARQUET_TEMPLATE_14="${OUTPUT_DIR}/sorted_14"
 
 DUCKDB_14_LOG="${OUTPUT_DIR}/duckdb_14_output.log"
 : > "$DUCKDB_14_LOG"
@@ -413,21 +399,25 @@ if [ "$WARMUP_RUNS" -gt 0 ]; then
   echo "-- Warmup runs (${WARMUP_RUNS})"                                       | tee -a "$LOG_FILE"
   for i in $(seq 1 "$WARMUP_RUNS"); do
     echo "Warmup #$i (v${VER14})..."                                           | tee -a "$LOG_FILE"
-    # Use unique per-run DB path and ensure it's clean
-    RUN_DB="${DB_PATH_14%.duckdb}_warmup${i}.duckdb"
-    rm -f "$RUN_DB" "${RUN_DB}.wal" && rm -rf "${RUN_DB}.tmp" || true
+    # Create unique temporary directory for this run
+    RUN_TMPDIR="${OUTPUT_DIR}/tmp_14_warmup${i}"
+    mkdir -p "$RUN_TMPDIR"
+    # Use unique per-run DB path in temp directory
+    RUN_DB="${RUN_TMPDIR}/benchmark_warmup${i}.duckdb"
+    RUN_PARQUET="${RUN_TMPDIR}/sorted_warmup${i}.parquet"
     sync
     # Evict CSV file from page cache
     "$VMTOUCH_BIN" -e "$CSV_FILE" > /dev/null 2>&1 || true
+    # Build SQL with unique parquet file
+    build_duckdb_sql "$DUCKDB_SQL_14" "$RUN_PARQUET"
     set +e
     "$DUCKDB14_BIN" "$RUN_DB" < "$DUCKDB_SQL_14" 2>&1 | tee -a "$DUCKDB_14_LOG" >/dev/null
     cmd_status=${PIPESTATUS[0]}
     set -e
-    # Always delete the per-run DB after the warmup to free space
-    # Evict DB files from page cache before deletion
-    "$VMTOUCH_BIN" -e "$RUN_DB" "${RUN_DB}.wal" > /dev/null 2>&1 || true
-    "$VMTOUCH_BIN" -e -r "${RUN_DB}.tmp" > /dev/null 2>&1 || true
-    rm -f "$RUN_DB" "${RUN_DB}.wal" && rm -rf "${RUN_DB}.tmp" || true
+    # Evict temp directory files from page cache before deletion
+    "$VMTOUCH_BIN" -e -r "$RUN_TMPDIR" > /dev/null 2>&1 || true
+    # Remove entire temporary directory
+    rm -rf "$RUN_TMPDIR" || true
     sync
     if [ $cmd_status -ne 0 ]; then
       if [ $cmd_status -ge 128 ]; then
@@ -455,24 +445,28 @@ if [ "$DUCKDB_14_CRASHED" = false ]; then
   DUCKDB_14_MAX=
   DUCKDB_14_COMPLETED=0
   for i in $(seq 1 "$MEASURE_RUNS"); do
-    # Use unique per-run DB path and ensure it's clean
-    RUN_DB="${DB_PATH_14%.duckdb}_run${i}.duckdb"
-    rm -f "$RUN_DB" "${RUN_DB}.wal" && rm -rf "${RUN_DB}.tmp" || true
+    # Create unique temporary directory for this run
+    RUN_TMPDIR="${OUTPUT_DIR}/tmp_14_run${i}"
+    mkdir -p "$RUN_TMPDIR"
+    # Use unique per-run DB path in temp directory
+    RUN_DB="${RUN_TMPDIR}/benchmark_run${i}.duckdb"
+    RUN_PARQUET="${RUN_TMPDIR}/sorted_run${i}.parquet"
     sync
     # Evict CSV file from page cache
     "$VMTOUCH_BIN" -e "$CSV_FILE" > /dev/null 2>&1 || true
     sleep 1
 
+    # Build SQL with unique parquet file
+    build_duckdb_sql "$DUCKDB_SQL_14" "$RUN_PARQUET"
     RUN_LOG="${OUTPUT_DIR}/duckdb_14_run${i}.log"
     set +e
     "$DUCKDB14_BIN" "$RUN_DB" < "$DUCKDB_SQL_14" 2>&1 | tee "$RUN_LOG" >> "$DUCKDB_14_LOG"
     cmd_status=${PIPESTATUS[0]}
     set -e
-    # Always delete the per-run DB after the run to free space
-    # Evict DB files from page cache before deletion
-    "$VMTOUCH_BIN" -e "$RUN_DB" "${RUN_DB}.wal" > /dev/null 2>&1 || true
-    "$VMTOUCH_BIN" -e -r "${RUN_DB}.tmp" > /dev/null 2>&1 || true
-    rm -f "$RUN_DB" "${RUN_DB}.wal" && rm -rf "${RUN_DB}.tmp" || true
+    # Evict temp directory files from page cache before deletion
+    "$VMTOUCH_BIN" -e -r "$RUN_TMPDIR" > /dev/null 2>&1 || true
+    # Remove entire temporary directory
+    rm -rf "$RUN_TMPDIR" || true
     sync
     if [ $cmd_status -ne 0 ]; then
       if [ $cmd_status -ge 128 ]; then
