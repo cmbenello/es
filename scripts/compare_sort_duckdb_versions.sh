@@ -83,6 +83,7 @@ WARMUP_RUNS=0
 MEASURE_RUNS=1
 DB_PATH=""
 SKIP_13=false
+VMTOUCH_BIN="${PWD}/vmtouch"
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -148,6 +149,11 @@ if [ ! -x "$DUCKDB14_BIN" ]; then
   echo "Error: DuckDB 1.4 binary not found at: $DUCKDB14_BIN"; echo "Run scripts/duckdb_setup.sh or pass --bin-dir"; exit 1
 fi
 
+# Check for vmtouch
+if [ ! -x "$VMTOUCH_BIN" ]; then
+  echo "Error: vmtouch not found at: $VMTOUCH_BIN"; exit 1
+fi
+
 TIMESTAMP=$(date +"%Y%m%d_%H%M%S")
 OUTPUT_DIR="comparison_duckdb_${TIMESTAMP}"
 mkdir -p "$OUTPUT_DIR"
@@ -206,16 +212,51 @@ build_duckdb_sql() {
   cat > "$sql_path" << 'EOF'
 SET threads=${THREADS};
 SET memory_limit='${MEMORY}';
+SET preserve_insertion_order = false;
 .timer on
 
 EXPLAIN
 SELECT l_returnflag, l_linestatus, l_shipinstruct, l_shipmode, l_comment, l_orderkey, l_linenumber
-FROM read_csv_auto('${CSV_FILE}', header=true, sample_size=1000)
+FROM read_csv('${CSV_FILE}', header=true, delim=',', columns={
+  'l_orderkey': 'BIGINT',
+  'l_partkey': 'BIGINT',
+  'l_suppkey': 'BIGINT',
+  'l_linenumber': 'INTEGER',
+  'l_quantity': 'DOUBLE',
+  'l_extendedprice': 'DOUBLE',
+  'l_discount': 'DOUBLE',
+  'l_tax': 'DOUBLE',
+  'l_returnflag': 'VARCHAR',
+  'l_linestatus': 'VARCHAR',
+  'l_shipdate': 'DATE',
+  'l_commitdate': 'DATE',
+  'l_receiptdate': 'DATE',
+  'l_shipinstruct': 'VARCHAR',
+  'l_shipmode': 'VARCHAR',
+  'l_comment': 'VARCHAR'
+})
 ORDER BY l_returnflag, l_linestatus, l_shipinstruct, l_shipmode, l_comment;
 
 CREATE TABLE __sorted_result AS
 SELECT l_returnflag, l_linestatus, l_shipinstruct, l_shipmode, l_comment, l_orderkey, l_linenumber
-FROM read_csv_auto('${CSV_FILE}', header=true, sample_size=1000)
+FROM read_csv('${CSV_FILE}', header=true, delim=',', columns={
+  'l_orderkey': 'BIGINT',
+  'l_partkey': 'BIGINT',
+  'l_suppkey': 'BIGINT',
+  'l_linenumber': 'INTEGER',
+  'l_quantity': 'DOUBLE',
+  'l_extendedprice': 'DOUBLE',
+  'l_discount': 'DOUBLE',
+  'l_tax': 'DOUBLE',
+  'l_returnflag': 'VARCHAR',
+  'l_linestatus': 'VARCHAR',
+  'l_shipdate': 'DATE',
+  'l_commitdate': 'DATE',
+  'l_receiptdate': 'DATE',
+  'l_shipinstruct': 'VARCHAR',
+  'l_shipmode': 'VARCHAR',
+  'l_comment': 'VARCHAR'
+})
 ORDER BY l_returnflag, l_linestatus, l_shipinstruct, l_shipmode, l_comment;
 EOF
   # Replace variables
@@ -244,11 +285,16 @@ if [ "$SKIP_13" = false ]; then
       RUN_DB="${DB_PATH_13%.duckdb}_warmup${i}.duckdb"
       rm -f "$RUN_DB" "${RUN_DB}.wal" && rm -rf "${RUN_DB}.tmp" || true
       sync
+      # Evict CSV file from page cache
+      "$VMTOUCH_BIN" -e "$CSV_FILE" > /dev/null 2>&1 || true
       set +e
       "$DUCKDB13_BIN" "$RUN_DB" < "$DUCKDB_SQL_13" 2>&1 | tee -a "$DUCKDB_13_LOG" >/dev/null
       cmd_status=${PIPESTATUS[0]}
       set -e
       # Always delete the per-run DB after the warmup to free space
+      # Evict DB files from page cache before deletion
+      "$VMTOUCH_BIN" -e "$RUN_DB" "${RUN_DB}.wal" > /dev/null 2>&1 || true
+      "$VMTOUCH_BIN" -e -r "${RUN_DB}.tmp" > /dev/null 2>&1 || true
       rm -f "$RUN_DB" "${RUN_DB}.wal" && rm -rf "${RUN_DB}.tmp" || true
       sync
       if [ $cmd_status -ne 0 ]; then
@@ -282,6 +328,8 @@ if [ "$SKIP_13" = false ]; then
       RUN_DB="${DB_PATH_13%.duckdb}_run${i}.duckdb"
       rm -f "$RUN_DB" "${RUN_DB}.wal" && rm -rf "${RUN_DB}.tmp" || true
       sync
+      # Evict CSV file from page cache
+      "$VMTOUCH_BIN" -e "$CSV_FILE" > /dev/null 2>&1 || true
       sleep 1
 
       RUN_LOG="${OUTPUT_DIR}/duckdb_13_run${i}.log"
@@ -290,6 +338,9 @@ if [ "$SKIP_13" = false ]; then
       cmd_status=${PIPESTATUS[0]}
       set -e
       # Always delete the per-run DB after the run to free space
+      # Evict DB files from page cache before deletion
+      "$VMTOUCH_BIN" -e "$RUN_DB" "${RUN_DB}.wal" > /dev/null 2>&1 || true
+      "$VMTOUCH_BIN" -e -r "${RUN_DB}.tmp" > /dev/null 2>&1 || true
       rm -f "$RUN_DB" "${RUN_DB}.wal" && rm -rf "${RUN_DB}.tmp" || true
       sync
       if [ $cmd_status -ne 0 ]; then
@@ -366,11 +417,16 @@ if [ "$WARMUP_RUNS" -gt 0 ]; then
     RUN_DB="${DB_PATH_14%.duckdb}_warmup${i}.duckdb"
     rm -f "$RUN_DB" "${RUN_DB}.wal" && rm -rf "${RUN_DB}.tmp" || true
     sync
+    # Evict CSV file from page cache
+    "$VMTOUCH_BIN" -e "$CSV_FILE" > /dev/null 2>&1 || true
     set +e
     "$DUCKDB14_BIN" "$RUN_DB" < "$DUCKDB_SQL_14" 2>&1 | tee -a "$DUCKDB_14_LOG" >/dev/null
     cmd_status=${PIPESTATUS[0]}
     set -e
     # Always delete the per-run DB after the warmup to free space
+    # Evict DB files from page cache before deletion
+    "$VMTOUCH_BIN" -e "$RUN_DB" "${RUN_DB}.wal" > /dev/null 2>&1 || true
+    "$VMTOUCH_BIN" -e -r "${RUN_DB}.tmp" > /dev/null 2>&1 || true
     rm -f "$RUN_DB" "${RUN_DB}.wal" && rm -rf "${RUN_DB}.tmp" || true
     sync
     if [ $cmd_status -ne 0 ]; then
@@ -403,6 +459,8 @@ if [ "$DUCKDB_14_CRASHED" = false ]; then
     RUN_DB="${DB_PATH_14%.duckdb}_run${i}.duckdb"
     rm -f "$RUN_DB" "${RUN_DB}.wal" && rm -rf "${RUN_DB}.tmp" || true
     sync
+    # Evict CSV file from page cache
+    "$VMTOUCH_BIN" -e "$CSV_FILE" > /dev/null 2>&1 || true
     sleep 1
 
     RUN_LOG="${OUTPUT_DIR}/duckdb_14_run${i}.log"
@@ -411,6 +469,9 @@ if [ "$DUCKDB_14_CRASHED" = false ]; then
     cmd_status=${PIPESTATUS[0]}
     set -e
     # Always delete the per-run DB after the run to free space
+    # Evict DB files from page cache before deletion
+    "$VMTOUCH_BIN" -e "$RUN_DB" "${RUN_DB}.wal" > /dev/null 2>&1 || true
+    "$VMTOUCH_BIN" -e -r "${RUN_DB}.tmp" > /dev/null 2>&1 || true
     rm -f "$RUN_DB" "${RUN_DB}.wal" && rm -rf "${RUN_DB}.tmp" || true
     sync
     if [ $cmd_status -ne 0 ]; then
