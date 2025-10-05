@@ -215,8 +215,6 @@ CREATE TABLE __sorted_result AS
 SELECT l_returnflag, l_linestatus, l_shipinstruct, l_shipmode, l_comment, l_orderkey, l_linenumber
 FROM read_csv_auto('${CSV_FILE}', header=true, sample_size=1000)
 ORDER BY l_returnflag, l_linestatus, l_shipinstruct, l_shipmode, l_comment;
-
-CHECKPOINT;
 EOF
   # Replace variables
   sed -i "s|\${THREADS}|${THREADS}|g; s|\${MEMORY}|${MEMORY}|g; s|\${CSV_FILE}|${CSV_FILE}|g" "$sql_path"
@@ -233,6 +231,7 @@ if [ "$SKIP_13" = false ]; then
 
   DUCKDB_13_LOG="${OUTPUT_DIR}/duckdb_13_output.log"
   : > "$DUCKDB_13_LOG"
+  DUCKDB_13_CRASHED=false
 
   # Warmups 1.3
   if [ "$WARMUP_RUNS" -gt 0 ]; then
@@ -243,39 +242,86 @@ if [ "$SKIP_13" = false ]; then
       rm -f "$DB_PATH_13" "${DB_PATH_13}.wal"
       rm -rf "${DB_PATH_13}.tmp"
       sync
+      set +e
       "$DUCKDB13_BIN" "$DB_PATH_13" < "$DUCKDB_SQL_13" 2>&1 | tee -a "$DUCKDB_13_LOG" >/dev/null
+      cmd_status=${PIPESTATUS[0]}
+      set -e
+      if [ $cmd_status -ne 0 ]; then
+        # Decode common signals
+        if [ $cmd_status -ge 128 ]; then
+          sig=$((cmd_status-128))
+          case $sig in
+            11) reason="Segmentation fault (signal 11)" ;;
+            9)  reason="Killed (signal 9)" ;;
+            *)  reason="Terminated by signal ${sig}" ;;
+          esac
+        else
+          reason="Exited with status ${cmd_status}"
+        fi
+        echo "DuckDB ${VER13} crashed during warmup: ${reason}. Skipping remaining runs for this version." | tee -a "$LOG_FILE"
+        DUCKDB_13_CRASHED=true
+        break
+      fi
     done
   fi
 
   # Measured runs 1.3
-  echo "-- Measured runs (${MEASURE_RUNS})"                                     | tee -a "$LOG_FILE"
-  DUCKDB_13_SUM=0
-  DUCKDB_13_MIN=
-  DUCKDB_13_MAX=
-  for i in $(seq 1 "$MEASURE_RUNS"); do
-    # Clean database files and sync disk before each run
-    rm -f "$DB_PATH_13" "${DB_PATH_13}.wal"
-    rm -rf "${DB_PATH_13}.tmp"
-    sync
-    sleep 1
+  if [ "$DUCKDB_13_CRASHED" = false ]; then
+    echo "-- Measured runs (${MEASURE_RUNS})"                                     | tee -a "$LOG_FILE"
+    DUCKDB_13_SUM=0
+    DUCKDB_13_MIN=
+    DUCKDB_13_MAX=
+    DUCKDB_13_COMPLETED=0
+    for i in $(seq 1 "$MEASURE_RUNS"); do
+      # Clean database files and sync disk before each run
+      rm -f "$DB_PATH_13" "${DB_PATH_13}.wal"
+      rm -rf "${DB_PATH_13}.tmp"
+      sync
+      sleep 1
 
-    RUN_LOG="${OUTPUT_DIR}/duckdb_13_run${i}.log"
-    "$DUCKDB13_BIN" "$DB_PATH_13" < "$DUCKDB_SQL_13" 2>&1 | tee "$RUN_LOG" >> "$DUCKDB_13_LOG"
+      RUN_LOG="${OUTPUT_DIR}/duckdb_13_run${i}.log"
+      set +e
+      "$DUCKDB13_BIN" "$DB_PATH_13" < "$DUCKDB_SQL_13" 2>&1 | tee "$RUN_LOG" >> "$DUCKDB_13_LOG"
+      cmd_status=${PIPESTATUS[0]}
+      set -e
+      if [ $cmd_status -ne 0 ]; then
+        if [ $cmd_status -ge 128 ]; then
+          sig=$((cmd_status-128))
+          case $sig in
+            11) reason="Segmentation fault (signal 11)" ;;
+            9)  reason="Killed (signal 9)" ;;
+            *)  reason="Terminated by signal ${sig}" ;;
+          esac
+        else
+          reason="Exited with status ${cmd_status}"
+        fi
+        echo "DuckDB ${VER13} crashed during measured run #$i: ${reason}. Skipping remaining runs for this version." | tee -a "$LOG_FILE"
+        DUCKDB_13_CRASHED=true
+        break
+      fi
 
-    # Extract CREATE TABLE and CHECKPOINT times (skip EXPLAIN)
-    # Line 1: EXPLAIN, Line 2: CREATE TABLE, Line 3: CHECKPOINT
-    CREATE_TIME=$(grep "^Run Time" "$RUN_LOG" | sed -n '2p' | grep -oP 'real \K[0-9.]+' || echo "0")
-    CHECKPOINT_TIME=$(grep "^Run Time" "$RUN_LOG" | sed -n '3p' | grep -oP 'real \K[0-9.]+' || echo "0")
-    DUCKDB_13_DURATION=$(echo "$CREATE_TIME + $CHECKPOINT_TIME" | bc)
+      # Extract CREATE TABLE time only (skip EXPLAIN)
+      # Line 1: EXPLAIN, Line 2: CREATE TABLE
+      CREATE_TIME=$(grep "^Run Time" "$RUN_LOG" | sed -n '2p' | grep -oP 'real \K[0-9.]+' || echo "0")
+      DUCKDB_13_DURATION="$CREATE_TIME"
 
-    echo "Run #$i time (v${VER13}): $(printf '%.2f' "$DUCKDB_13_DURATION") s (CREATE: ${CREATE_TIME}s, CHECKPOINT: ${CHECKPOINT_TIME}s)" | tee -a "$LOG_FILE"
-    DUCKDB_13_SUM=$(echo "$DUCKDB_13_SUM + $DUCKDB_13_DURATION" | bc)
-    if [ -z "$DUCKDB_13_MIN" ] || (( $(echo "$DUCKDB_13_DURATION < $DUCKDB_13_MIN" | bc -l) )); then DUCKDB_13_MIN="$DUCKDB_13_DURATION"; fi
-    if [ -z "$DUCKDB_13_MAX" ] || (( $(echo "$DUCKDB_13_DURATION > $DUCKDB_13_MAX" | bc -l) )); then DUCKDB_13_MAX="$DUCKDB_13_DURATION"; fi
-  done
-  DUCKDB_13_AVG=$(echo "scale=6; $DUCKDB_13_SUM / $MEASURE_RUNS" | bc)
-  echo "DuckDB ${VER13} avg time: $(printf '%.2f' "$DUCKDB_13_AVG") seconds"   | tee -a "$LOG_FILE"
-  echo ""                                                                        | tee -a "$LOG_FILE"
+      echo "Run #$i time (v${VER13}): $(printf '%.2f' "$DUCKDB_13_DURATION") s (CREATE: ${CREATE_TIME}s)" | tee -a "$LOG_FILE"
+      DUCKDB_13_SUM=$(echo "$DUCKDB_13_SUM + $DUCKDB_13_DURATION" | bc)
+      if [ -z "$DUCKDB_13_MIN" ] || (( $(echo "$DUCKDB_13_DURATION < $DUCKDB_13_MIN" | bc -l) )); then DUCKDB_13_MIN="$DUCKDB_13_DURATION"; fi
+      if [ -z "$DUCKDB_13_MAX" ] || (( $(echo "$DUCKDB_13_DURATION > $DUCKDB_13_MAX" | bc -l) )); then DUCKDB_13_MAX="$DUCKDB_13_DURATION"; fi
+      DUCKDB_13_COMPLETED=$((DUCKDB_13_COMPLETED + 1))
+    done
+    if [ "${DUCKDB_13_COMPLETED:-0}" -gt 0 ]; then
+      DUCKDB_13_AVG=$(echo "scale=6; $DUCKDB_13_SUM / $DUCKDB_13_COMPLETED" | bc)
+      echo "DuckDB ${VER13} avg time: $(printf '%.2f' "$DUCKDB_13_AVG") seconds"   | tee -a "$LOG_FILE"
+    else
+      DUCKDB_13_AVG=0
+      echo "DuckDB ${VER13} had no successful measured runs."                     | tee -a "$LOG_FILE"
+    fi
+    echo ""                                                                        | tee -a "$LOG_FILE"
+  else
+    DUCKDB_13_AVG=0
+  fi
 
   # Clean up 1.3 database and sync disk before next experiment
   echo "Cleaning up and syncing disk..."                                        | tee -a "$LOG_FILE"
@@ -301,6 +347,7 @@ build_duckdb_sql "$DUCKDB_SQL_14"
 
 DUCKDB_14_LOG="${OUTPUT_DIR}/duckdb_14_output.log"
 : > "$DUCKDB_14_LOG"
+DUCKDB_14_CRASHED=false
 
 # Warmups 1.4
 if [ "$WARMUP_RUNS" -gt 0 ]; then
@@ -311,39 +358,85 @@ if [ "$WARMUP_RUNS" -gt 0 ]; then
     rm -f "$DB_PATH_14" "${DB_PATH_14}.wal"
     rm -rf "${DB_PATH_14}.tmp"
     sync
+    set +e
     "$DUCKDB14_BIN" "$DB_PATH_14" < "$DUCKDB_SQL_14" 2>&1 | tee -a "$DUCKDB_14_LOG" >/dev/null
+    cmd_status=${PIPESTATUS[0]}
+    set -e
+    if [ $cmd_status -ne 0 ]; then
+      if [ $cmd_status -ge 128 ]; then
+        sig=$((cmd_status-128))
+        case $sig in
+          11) reason="Segmentation fault (signal 11)" ;;
+          9)  reason="Killed (signal 9)" ;;
+          *)  reason="Terminated by signal ${sig}" ;;
+        esac
+      else
+        reason="Exited with status ${cmd_status}"
+      fi
+      echo "DuckDB ${VER14} crashed during warmup: ${reason}. Skipping remaining runs for this version." | tee -a "$LOG_FILE"
+      DUCKDB_14_CRASHED=true
+      break
+    fi
   done
 fi
 
 # Measured runs 1.4
-echo "-- Measured runs (${MEASURE_RUNS})"                                     | tee -a "$LOG_FILE"
-DUCKDB_14_SUM=0
-DUCKDB_14_MIN=
-DUCKDB_14_MAX=
-for i in $(seq 1 "$MEASURE_RUNS"); do
-  # Clean database files and sync disk before each run
-  rm -f "$DB_PATH_14" "${DB_PATH_14}.wal"
-  rm -rf "${DB_PATH_14}.tmp"
-  sync
-  sleep 1
+if [ "$DUCKDB_14_CRASHED" = false ]; then
+  echo "-- Measured runs (${MEASURE_RUNS})"                                     | tee -a "$LOG_FILE"
+  DUCKDB_14_SUM=0
+  DUCKDB_14_MIN=
+  DUCKDB_14_MAX=
+  DUCKDB_14_COMPLETED=0
+  for i in $(seq 1 "$MEASURE_RUNS"); do
+    # Clean database files and sync disk before each run
+    rm -f "$DB_PATH_14" "${DB_PATH_14}.wal"
+    rm -rf "${DB_PATH_14}.tmp"
+    sync
+    sleep 1
 
-  RUN_LOG="${OUTPUT_DIR}/duckdb_14_run${i}.log"
-  "$DUCKDB14_BIN" "$DB_PATH_14" < "$DUCKDB_SQL_14" 2>&1 | tee "$RUN_LOG" >> "$DUCKDB_14_LOG"
+    RUN_LOG="${OUTPUT_DIR}/duckdb_14_run${i}.log"
+    set +e
+    "$DUCKDB14_BIN" "$DB_PATH_14" < "$DUCKDB_SQL_14" 2>&1 | tee "$RUN_LOG" >> "$DUCKDB_14_LOG"
+    cmd_status=${PIPESTATUS[0]}
+    set -e
+    if [ $cmd_status -ne 0 ]; then
+      if [ $cmd_status -ge 128 ]; then
+        sig=$((cmd_status-128))
+        case $sig in
+          11) reason="Segmentation fault (signal 11)" ;;
+          9)  reason="Killed (signal 9)" ;;
+          *)  reason="Terminated by signal ${sig}" ;;
+        esac
+      else
+        reason="Exited with status ${cmd_status}"
+      fi
+      echo "DuckDB ${VER14} crashed during measured run #$i: ${reason}. Skipping remaining runs for this version." | tee -a "$LOG_FILE"
+      DUCKDB_14_CRASHED=true
+      break
+    fi
 
-  # Extract CREATE TABLE and CHECKPOINT times (skip EXPLAIN)
-  # Line 1: EXPLAIN, Line 2: CREATE TABLE, Line 3: CHECKPOINT
-  CREATE_TIME=$(grep "^Run Time" "$RUN_LOG" | sed -n '2p' | grep -oP 'real \K[0-9.]+' || echo "0")
-  CHECKPOINT_TIME=$(grep "^Run Time" "$RUN_LOG" | sed -n '3p' | grep -oP 'real \K[0-9.]+' || echo "0")
-  DUCKDB_14_DURATION=$(echo "$CREATE_TIME + $CHECKPOINT_TIME" | bc)
+    # Extract CREATE TABLE time only (skip EXPLAIN)
+    # Line 1: EXPLAIN, Line 2: CREATE TABLE
+    CREATE_TIME=$(grep "^Run Time" "$RUN_LOG" | sed -n '2p' | grep -oP 'real \K[0-9.]+' || echo "0")
+    DUCKDB_14_DURATION="$CREATE_TIME"
 
-  echo "Run #$i time (v${VER14}): $(printf '%.2f' "$DUCKDB_14_DURATION") s (CREATE: ${CREATE_TIME}s, CHECKPOINT: ${CHECKPOINT_TIME}s)" | tee -a "$LOG_FILE"
-  DUCKDB_14_SUM=$(echo "$DUCKDB_14_SUM + $DUCKDB_14_DURATION" | bc)
-  if [ -z "$DUCKDB_14_MIN" ] || (( $(echo "$DUCKDB_14_DURATION < $DUCKDB_14_MIN" | bc -l) )); then DUCKDB_14_MIN="$DUCKDB_14_DURATION"; fi
-  if [ -z "$DUCKDB_14_MAX" ] || (( $(echo "$DUCKDB_14_DURATION > $DUCKDB_14_MAX" | bc -l) )); then DUCKDB_14_MAX="$DUCKDB_14_DURATION"; fi
-done
-DUCKDB_14_AVG=$(echo "scale=6; $DUCKDB_14_SUM / $MEASURE_RUNS" | bc)
-echo "DuckDB ${VER14} avg time: $(printf '%.2f' "$DUCKDB_14_AVG") seconds"   | tee -a "$LOG_FILE"
-echo ""                                                                        | tee -a "$LOG_FILE"
+    echo "Run #$i time (v${VER14}): $(printf '%.2f' "$DUCKDB_14_DURATION") s (CREATE: ${CREATE_TIME}s)" | tee -a "$LOG_FILE"
+    DUCKDB_14_SUM=$(echo "$DUCKDB_14_SUM + $DUCKDB_14_DURATION" | bc)
+    if [ -z "$DUCKDB_14_MIN" ] || (( $(echo "$DUCKDB_14_DURATION < $DUCKDB_14_MIN" | bc -l) )); then DUCKDB_14_MIN="$DUCKDB_14_DURATION"; fi
+    if [ -z "$DUCKDB_14_MAX" ] || (( $(echo "$DUCKDB_14_DURATION > $DUCKDB_14_MAX" | bc -l) )); then DUCKDB_14_MAX="$DUCKDB_14_DURATION"; fi
+    DUCKDB_14_COMPLETED=$((DUCKDB_14_COMPLETED + 1))
+  done
+  if [ "${DUCKDB_14_COMPLETED:-0}" -gt 0 ]; then
+    DUCKDB_14_AVG=$(echo "scale=6; $DUCKDB_14_SUM / $DUCKDB_14_COMPLETED" | bc)
+    echo "DuckDB ${VER14} avg time: $(printf '%.2f' "$DUCKDB_14_AVG") seconds"   | tee -a "$LOG_FILE"
+  else
+    DUCKDB_14_AVG=0
+    echo "DuckDB ${VER14} had no successful measured runs."                     | tee -a "$LOG_FILE"
+  fi
+  echo ""                                                                        | tee -a "$LOG_FILE"
+else
+  DUCKDB_14_AVG=0
+fi
 
 # Summary
 echo ""                                                                        | tee -a "$LOG_FILE"
@@ -351,11 +444,23 @@ echo "======================================================================"  |
 echo "SUMMARY"                                                                | tee -a "$LOG_FILE"
 echo "======================================================================"  | tee -a "$LOG_FILE"
 if [ "$SKIP_13" = false ]; then
-  echo "DuckDB ${VER13} avg time (${MEASURE_RUNS} runs): $(printf "%.2f" "$DUCKDB_13_AVG") seconds" | tee -a "$LOG_FILE"
+  if [ "${DUCKDB_13_COMPLETED:-0}" -gt 0 ]; then
+    echo "DuckDB ${VER13} avg time (${DUCKDB_13_COMPLETED}/${MEASURE_RUNS} runs): $(printf "%.2f" "$DUCKDB_13_AVG") seconds" | tee -a "$LOG_FILE"
+  elif [ "${DUCKDB_13_CRASHED:-false}" = true ]; then
+    echo "DuckDB ${VER13}: crashed; 0/${MEASURE_RUNS} runs completed"            | tee -a "$LOG_FILE"
+  else
+    echo "DuckDB ${VER13}: no measured runs executed"                             | tee -a "$LOG_FILE"
+  fi
 fi
-echo "DuckDB ${VER14} avg time (${MEASURE_RUNS} runs): $(printf "%.2f" "$DUCKDB_14_AVG") seconds" | tee -a "$LOG_FILE"
+if [ "${DUCKDB_14_COMPLETED:-0}" -gt 0 ]; then
+  echo "DuckDB ${VER14} avg time (${DUCKDB_14_COMPLETED}/${MEASURE_RUNS} runs): $(printf "%.2f" "$DUCKDB_14_AVG") seconds" | tee -a "$LOG_FILE"
+elif [ "${DUCKDB_14_CRASHED:-false}" = true ]; then
+  echo "DuckDB ${VER14}: crashed; 0/${MEASURE_RUNS} runs completed"            | tee -a "$LOG_FILE"
+else
+  echo "DuckDB ${VER14}: no measured runs executed"                             | tee -a "$LOG_FILE"
+fi
 
-if [ "$SKIP_13" = false ] && (( $(echo "$DUCKDB_13_AVG > 0" | bc -l) )); then
+if [ "$SKIP_13" = false ] && (( $(echo "${DUCKDB_13_AVG:-0} > 0" | bc -l) )) && (( $(echo "${DUCKDB_14_AVG:-0} > 0" | bc -l) )); then
   REL=$(echo "scale=2; $DUCKDB_13_AVG / $DUCKDB_14_AVG" | bc)
   echo "Relative (1.3 / 1.4) avg: ${REL}x"                                    | tee -a "$LOG_FILE"
 fi
