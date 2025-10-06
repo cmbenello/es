@@ -1,19 +1,142 @@
-use std::io::Write;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::Arc;
 use std::thread;
 use std::time::Instant;
 
 use crate::diskio::aligned_writer::AlignedWriter;
 use crate::diskio::file::SharedFd;
+use crate::diskio::io_stats::IoStatsTracker;
 use crate::kll::Sketch;
 use crate::sort::merge::MergeIterator;
 use crate::sort::run::RunImpl;
 use crate::sort::sort_buffer::SortBuffer;
 use crate::{
-    IoStats, IoStatsTracker, MergeStats, RunGenerationStats, RunInfo, SortInput, SortOutput,
-    SortStats, Sorter, TempDirInfo,
+    MergeStats, RunGenerationStats, RunInfo, SortInput, SortOutput, SortStats, Sorter, TempDirInfo,
 };
+
+// Abstraction for inputs to the merge function
+pub enum MergeableRun {
+    Single(RunImpl),
+    RangePartitioned(Vec<RunImpl>),
+}
+
+impl MergeableRun {
+    pub fn scan_range_with_io_tracker(
+        &self,
+        lower_bound: &[u8],
+        upper_bound: &[u8],
+        io_tracker: Option<IoStatsTracker>,
+    ) -> Box<dyn Iterator<Item = (Vec<u8>, Vec<u8>)> + Send> {
+        match self {
+            MergeableRun::Single(run) => {
+                run.scan_range_with_io_tracker(lower_bound, upper_bound, io_tracker)
+            }
+            MergeableRun::RangePartitioned(runs) => {
+                // [lower_bound, upper_bound) may span multiple partitions
+                // Filter out empty runs (those with no entries)
+                let non_empty_runs: Vec<&RunImpl> =
+                    runs.iter().filter(|r| r.start_key().is_some()).collect();
+
+                if non_empty_runs.is_empty() {
+                    return Box::new(std::iter::empty());
+                }
+
+                // Find the last partition whose start key < lower_bound
+                let start_partition = if lower_bound.is_empty() {
+                    0
+                } else {
+                    let mut ok = -1;
+                    let mut ng = non_empty_runs.len() as isize;
+                    while (ng - ok).abs() > 1 {
+                        let mid = (ok + ng) / 2;
+                        if non_empty_runs[mid as usize].start_key().unwrap() < lower_bound {
+                            ok = mid;
+                        } else {
+                            ng = mid;
+                        }
+                    }
+                    if ok == -1 { 0 } else { ok as usize }
+                };
+
+                // Find the first partition whose start key >= upper_bound
+                let end_partition = if upper_bound.is_empty() {
+                    non_empty_runs.len()
+                } else {
+                    let mut ok = non_empty_runs.len() as isize;
+                    let mut ng = -1;
+                    while (ng - ok).abs() > 1 {
+                        let mid = (ok + ng) / 2;
+                        if upper_bound <= non_empty_runs[mid as usize].start_key().unwrap() {
+                            ok = mid;
+                        } else {
+                            ng = mid;
+                        }
+                    }
+                    ok as usize
+                };
+
+                let mut iterators = Vec::with_capacity(end_partition - start_partition);
+                for i in start_partition..end_partition {
+                    let run = non_empty_runs[i];
+                    iterators.push(run.scan_range_with_io_tracker(
+                        lower_bound,
+                        upper_bound,
+                        io_tracker.clone(),
+                    ));
+                }
+
+                // Chain all iterators together
+                Box::new(ChainedRangeIterator::new(iterators))
+            }
+        }
+    }
+
+    pub fn total_entries(&self) -> usize {
+        match self {
+            MergeableRun::Single(run) => run.total_entries(),
+            MergeableRun::RangePartitioned(runs) => runs.iter().map(|r| r.total_entries()).sum(),
+        }
+    }
+
+    /// Convert MergeableRun into Vec<RunImpl>
+    /// - Single(run) becomes vec![run]
+    /// - RangePartitioned(runs) returns runs directly
+    pub fn into_runs(self) -> Vec<RunImpl> {
+        match self {
+            MergeableRun::Single(run) => vec![run],
+            MergeableRun::RangePartitioned(runs) => runs,
+        }
+    }
+}
+
+// Helper iterator that chains multiple iterators for range-partitioned runs
+struct ChainedRangeIterator {
+    iterators: Vec<Box<dyn Iterator<Item = (Vec<u8>, Vec<u8>)> + Send>>,
+    current: usize,
+}
+
+impl ChainedRangeIterator {
+    fn new(iterators: Vec<Box<dyn Iterator<Item = (Vec<u8>, Vec<u8>)> + Send>>) -> Self {
+        Self {
+            iterators,
+            current: 0,
+        }
+    }
+}
+
+impl Iterator for ChainedRangeIterator {
+    type Item = (Vec<u8>, Vec<u8>);
+
+    fn next(&mut self) -> Option<Self::Item> {
+        while self.current < self.iterators.len() {
+            if let Some(item) = self.iterators[self.current].next() {
+                return Some(item);
+            }
+            self.current += 1;
+        }
+        None
+    }
+}
 
 // Output implementation that chains run iterators without materializing
 pub struct RunsOutput {
@@ -292,12 +415,12 @@ impl ExternalSorter {
     }
 
     pub fn merge(
-        output_runs: Vec<RunImpl>,
+        output_runs: Vec<MergeableRun>,
         num_threads: usize,
         sketch: Sketch<Vec<u8>>,
         dir: impl AsRef<Path>,
         imbalance_factor: Option<f64>,
-    ) -> Result<(Vec<RunImpl>, MergeStats), String> {
+    ) -> Result<(MergeableRun, MergeStats), String> {
         let imbalance_factor = imbalance_factor.unwrap_or(1.0);
         println!(
             "CDF boundary imbalance factor for merge: {:.4}. One thread will handle {:.4} times the average load.",
@@ -311,17 +434,19 @@ impl ExternalSorter {
                 time_ms: 0,
                 io_stats: None,
             };
-            return Ok((vec![], merge_stats));
+            return Ok((MergeableRun::RangePartitioned(vec![]), merge_stats));
         }
 
         if output_runs.len() == 1 {
+            let entry_count = output_runs[0].total_entries();
             let merge_stats = MergeStats {
                 output_runs: 1,
-                merge_entry_num: vec![output_runs[0].total_entries() as u64],
+                merge_entry_num: vec![entry_count as u64],
                 time_ms: 0,
                 io_stats: None,
             };
-            return Ok((output_runs, merge_stats));
+            let run = output_runs.into_iter().next().unwrap();
+            return Ok((run, merge_stats));
         }
 
         // Start timing for merge phase
@@ -455,7 +580,7 @@ impl ExternalSorter {
             io_stats: merge_io_stats,
         };
 
-        Ok((output_runs, merge_stats))
+        Ok((MergeableRun::RangePartitioned(output_runs), merge_stats))
     }
 }
 
@@ -473,14 +598,22 @@ impl Sorter for ExternalSorter {
             self.temp_dir_info.as_ref(),
         )?;
 
-        // Merge phase
-        let (merged_runs, merge_stats) = ExternalSorter::merge(
-            runs,
+        // Merge phase - convert runs to MergeableRun::Single
+        let mergeable_runs: Vec<MergeableRun> = runs
+            .into_iter()
+            .map(|run| MergeableRun::Single(run))
+            .collect();
+
+        let (merged_run, merge_stats) = ExternalSorter::merge(
+            mergeable_runs,
             self.merge_threads,
             sketch,
             self.temp_dir_info.as_ref(),
             Some(self.boundary_imbalance_factor),
         )?;
+
+        // Convert MergeableRun back to Vec<RunImpl> for output
+        let final_runs = merged_run.into_runs();
 
         // Combine stats
         let sort_stats: SortStats = SortStats {
@@ -495,8 +628,104 @@ impl Sorter for ExternalSorter {
 
         // Create output
         Ok(Box::new(RunsOutput {
-            runs: merged_runs,
+            runs: final_runs,
             stats: sort_stats,
         }))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::diskio::aligned_writer::AlignedWriter;
+    use crate::diskio::file::SharedFd;
+    use tempfile::TempDir;
+
+    #[test]
+    fn test_range_partitioned_scan_with_io_tracker() {
+        // Create a temporary directory for test files
+        let temp_dir = TempDir::new().unwrap();
+
+        // Create 3 partitions with sorted, non-overlapping data
+        // Partition 0: keys [a00..a99]
+        let path0 = temp_dir.path().join("partition0.dat");
+        let fd0 = Arc::new(SharedFd::new_from_path(&path0).unwrap());
+        let writer0 = AlignedWriter::from_fd(fd0.clone()).unwrap();
+        let mut run0 = RunImpl::from_writer(writer0).unwrap();
+        for i in 0..100 {
+            let key = format!("a{:02}", i).into_bytes();
+            let value = format!("value_{}", i).into_bytes();
+            run0.append(key, value);
+        }
+        run0.finalize_write();
+
+        // Partition 1: keys [b00..b99]
+        let path1 = temp_dir.path().join("partition1.dat");
+        let fd1 = Arc::new(SharedFd::new_from_path(&path1).unwrap());
+        let writer1 = AlignedWriter::from_fd(fd1.clone()).unwrap();
+        let mut run1 = RunImpl::from_writer(writer1).unwrap();
+        for i in 0..100 {
+            let key = format!("b{:02}", i).into_bytes();
+            let value = format!("value_{}", i + 100).into_bytes();
+            run1.append(key, value);
+        }
+        run1.finalize_write();
+
+        // Partition 2: keys [c00..c99]
+        let path2 = temp_dir.path().join("partition2.dat");
+        let fd2 = Arc::new(SharedFd::new_from_path(&path2).unwrap());
+        let writer2 = AlignedWriter::from_fd(fd2.clone()).unwrap();
+        let mut run2 = RunImpl::from_writer(writer2).unwrap();
+        for i in 0..100 {
+            let key = format!("c{:02}", i).into_bytes();
+            let value = format!("value_{}", i + 200).into_bytes();
+            run2.append(key, value);
+        }
+        run2.finalize_write();
+
+        let mergeable_run = MergeableRun::RangePartitioned(vec![run0, run1, run2]);
+
+        // Test 1: Scan range within a single partition
+        let io_tracker1 = IoStatsTracker::new();
+        let iter1 =
+            mergeable_run.scan_range_with_io_tracker(b"a10", b"a20", Some(io_tracker1.clone()));
+        let results1: Vec<_> = iter1.collect();
+        assert_eq!(results1.len(), 10); // a10..a19
+        assert_eq!(results1[0].0, b"a10");
+        assert_eq!(results1[9].0, b"a19");
+        let (read_ops1, read_bytes1) = io_tracker1.get_read_stats();
+        assert!(read_ops1 > 0, "Should track IO operations");
+        assert!(read_bytes1 > 0, "Should track IO bytes");
+
+        // Test 2: Scan range across multiple partitions
+        let io_tracker2 = IoStatsTracker::new();
+        let iter2 =
+            mergeable_run.scan_range_with_io_tracker(b"a90", b"c10", Some(io_tracker2.clone()));
+        let results2: Vec<_> = iter2.collect();
+        // Should get: a90..a99 (10) + b00..b99 (100) + c00..c09 (10) = 120
+        assert_eq!(results2.len(), 120);
+        assert_eq!(results2[0].0, b"a90");
+        assert_eq!(results2[9].0, b"a99");
+        assert_eq!(results2[10].0, b"b00");
+        assert_eq!(results2[109].0, b"b99");
+        assert_eq!(results2[110].0, b"c00");
+        assert_eq!(results2[119].0, b"c09");
+        let (read_ops2, read_bytes2) = io_tracker2.get_read_stats();
+        assert!(read_ops2 > 0, "Should track IO operations");
+        assert!(read_bytes2 > 0, "Should track IO bytes");
+
+        // Test 3: Empty range
+        let iter3 = mergeable_run.scan_range_with_io_tracker(b"d00", b"d99", None);
+        let results3: Vec<_> = iter3.collect();
+        assert_eq!(results3.len(), 0);
+
+        // Test 4: Full scan (empty bounds)
+        let io_tracker4 = IoStatsTracker::new();
+        let iter4 = mergeable_run.scan_range_with_io_tracker(&[], &[], Some(io_tracker4.clone()));
+        let results4: Vec<_> = iter4.collect();
+        assert_eq!(results4.len(), 300); // All records
+        let (read_ops4, read_bytes4) = io_tracker4.get_read_stats();
+        assert!(read_ops4 > 0, "Should track IO operations");
+        assert!(read_bytes4 > 0, "Should track IO bytes");
     }
 }

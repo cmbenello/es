@@ -149,14 +149,19 @@ impl BenchmarkRunner {
                     &temp_dir,
                 )?;
 
-                let (_merged_runs, merge_stats) = ExternalSorter::merge(
-                    runs,
+                let mergeable_runs: Vec<crate::sort::sorter::MergeableRun> = runs
+                    .into_iter()
+                    .map(|run| crate::sort::sorter::MergeableRun::Single(run))
+                    .collect();
+
+                let (_merged_run, merge_stats) = ExternalSorter::merge(
+                    mergeable_runs,
                     params.merge_threads as usize,
                     sketch,
                     &temp_dir,
                     Some(params.imbalance_factor),
                 )?;
-                drop(_merged_runs);
+                drop(_merged_run);
 
                 (run_gen_stats, merge_stats)
             };
@@ -333,13 +338,20 @@ impl BenchmarkRunner {
                 temp_dir,
             )?;
 
-            let (merged_runs, merge_stats) = ExternalSorter::merge(
-                runs,
+            let mergeable_runs: Vec<crate::sort::sorter::MergeableRun> = runs
+                .into_iter()
+                .map(|run| crate::sort::sorter::MergeableRun::Single(run))
+                .collect();
+
+            let (merged_run, merge_stats) = ExternalSorter::merge(
+                mergeable_runs,
                 params.merge_threads as usize,
                 sketch,
                 temp_dir,
                 Some(params.imbalance_factor),
             )?;
+
+            let final_runs = merged_run.into_runs();
 
             let stats = SortStats {
                 num_runs: run_gen_stats.num_runs,
@@ -352,7 +364,7 @@ impl BenchmarkRunner {
             };
 
             Box::new(RunsOutput {
-                runs: merged_runs,
+                runs: final_runs,
                 stats: stats.clone(),
             }) as Box<dyn SortOutput>
         };

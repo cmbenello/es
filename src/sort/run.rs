@@ -65,6 +65,10 @@ impl RunImpl {
         self.total_bytes
     }
 
+    pub fn start_key(&self) -> Option<&[u8]> {
+        self.sparse_index.first().map(|entry| entry.key.as_slice())
+    }
+
     fn find_start_position(&self, lower_bound: &[u8]) -> Option<(usize, Vec<u8>)> {
         if self.sparse_index.is_empty() {
             return None;
