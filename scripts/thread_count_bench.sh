@@ -1,4 +1,5 @@
 #!/bin/bash
+cargo build --release --example lineitem_benchmark_cli
 mkdir -p logs
 TS=$(date +%F_%H-%M-%S)
 BASE="logs/lineitem_thread_count_${TS}_baseline.log"
