@@ -209,14 +209,15 @@ DELIMITER=","  # CSV
 # Helper to build SQL file for DuckDB run
 build_duckdb_sql() {
   local sql_path="$1"
-  local output_parquet="$2"
+  local table_name="$2"
   cat > "$sql_path" << 'EOF'
 SET threads=${THREADS};
 SET memory_limit='${MEMORY}';
 SET preserve_insertion_order = false;
 .timer on
 
-COPY (SELECT l_returnflag, l_linestatus, l_shipinstruct, l_shipmode, l_comment, l_orderkey, l_linenumber
+CREATE TABLE ${TABLE_NAME} AS
+SELECT l_returnflag, l_linestatus, l_shipinstruct, l_shipmode, l_comment, l_orderkey, l_linenumber
 FROM read_csv('${CSV_FILE}', header=true, delim=',', columns={
   'l_orderkey': 'BIGINT',
   'l_partkey': 'BIGINT',
@@ -235,11 +236,10 @@ FROM read_csv('${CSV_FILE}', header=true, delim=',', columns={
   'l_shipmode': 'VARCHAR',
   'l_comment': 'VARCHAR'
 })
-ORDER BY l_returnflag, l_linestatus, l_shipinstruct, l_shipmode, l_comment) TO '${OUTPUT_PARQUET}'
-  (FORMAT PARQUET, COMPRESSION SNAPPY, ROW_GROUP_SIZE 122880);
+ORDER BY l_returnflag, l_linestatus, l_shipinstruct, l_shipmode, l_comment;
 EOF
   # Replace variables
-  sed -i "s|\${THREADS}|${THREADS}|g; s|\${MEMORY}|${MEMORY}|g; s|\${CSV_FILE}|${CSV_FILE}|g; s|\${OUTPUT_PARQUET}|${output_parquet}|g" "$sql_path"
+  sed -i "s|\${THREADS}|${THREADS}|g; s|\${MEMORY}|${MEMORY}|g; s|\${CSV_FILE}|${CSV_FILE}|g; s|\${TABLE_NAME}|${table_name}|g" "$sql_path"
 }
 
 # Test 1: DuckDB 1.3
@@ -248,7 +248,6 @@ if [ "$SKIP_13" = false ]; then
   echo "TEST 1: DuckDB ${VER13}"                                                | tee -a "$LOG_FILE"
   echo "======================================================================"  | tee -a "$LOG_FILE"
   DUCKDB_SQL_13="${OUTPUT_DIR}/duckdb_sort_13.sql"
-  PARQUET_TEMPLATE_13="${OUTPUT_DIR}/sorted_13"
 
   DUCKDB_13_LOG="${OUTPUT_DIR}/duckdb_13_output.log"
   : > "$DUCKDB_13_LOG"
@@ -264,12 +263,12 @@ if [ "$SKIP_13" = false ]; then
       mkdir -p "$RUN_TMPDIR"
       # Use unique per-run DB path in temp directory
       RUN_DB="${RUN_TMPDIR}/benchmark_warmup${i}.duckdb"
-      RUN_PARQUET="${RUN_TMPDIR}/sorted_warmup${i}.parquet"
+      RUN_TABLE="sorted_warmup${i}"
       sync
       # Evict CSV file from page cache
       "$VMTOUCH_BIN" -e "$CSV_FILE" > /dev/null 2>&1 || true
-      # Build SQL with unique parquet file
-      build_duckdb_sql "$DUCKDB_SQL_13" "$RUN_PARQUET"
+      # Build SQL with unique table name
+      build_duckdb_sql "$DUCKDB_SQL_13" "$RUN_TABLE"
       set +e
       "$DUCKDB13_BIN" "$RUN_DB" < "$DUCKDB_SQL_13" 2>&1 | tee -a "$DUCKDB_13_LOG" >/dev/null
       cmd_status=${PIPESTATUS[0]}
@@ -311,14 +310,14 @@ if [ "$SKIP_13" = false ]; then
       mkdir -p "$RUN_TMPDIR"
       # Use unique per-run DB path in temp directory
       RUN_DB="${RUN_TMPDIR}/benchmark_run${i}.duckdb"
-      RUN_PARQUET="${RUN_TMPDIR}/sorted_run${i}.parquet"
+      RUN_TABLE="sorted_run${i}"
       sync
       # Evict CSV file from page cache
       "$VMTOUCH_BIN" -e "$CSV_FILE" > /dev/null 2>&1 || true
       sleep 1
 
-      # Build SQL with unique parquet file
-      build_duckdb_sql "$DUCKDB_SQL_13" "$RUN_PARQUET"
+      # Build SQL with unique table name
+      build_duckdb_sql "$DUCKDB_SQL_13" "$RUN_TABLE"
       RUN_LOG="${OUTPUT_DIR}/duckdb_13_run${i}.log"
       set +e
       "$DUCKDB13_BIN" "$RUN_DB" < "$DUCKDB_SQL_13" 2>&1 | tee "$RUN_LOG" >> "$DUCKDB_13_LOG"
@@ -387,7 +386,6 @@ echo "======================================================================"  |
 echo "TEST 2: DuckDB ${VER14}"                                                | tee -a "$LOG_FILE"
 echo "======================================================================"  | tee -a "$LOG_FILE"
 DUCKDB_SQL_14="${OUTPUT_DIR}/duckdb_sort_14.sql"
-PARQUET_TEMPLATE_14="${OUTPUT_DIR}/sorted_14"
 
 DUCKDB_14_LOG="${OUTPUT_DIR}/duckdb_14_output.log"
 : > "$DUCKDB_14_LOG"
@@ -403,12 +401,12 @@ if [ "$WARMUP_RUNS" -gt 0 ]; then
     mkdir -p "$RUN_TMPDIR"
     # Use unique per-run DB path in temp directory
     RUN_DB="${RUN_TMPDIR}/benchmark_warmup${i}.duckdb"
-    RUN_PARQUET="${RUN_TMPDIR}/sorted_warmup${i}.parquet"
+    RUN_TABLE="sorted_warmup${i}"
     sync
     # Evict CSV file from page cache
     "$VMTOUCH_BIN" -e "$CSV_FILE" > /dev/null 2>&1 || true
-    # Build SQL with unique parquet file
-    build_duckdb_sql "$DUCKDB_SQL_14" "$RUN_PARQUET"
+    # Build SQL with unique table name
+    build_duckdb_sql "$DUCKDB_SQL_14" "$RUN_TABLE"
     set +e
     "$DUCKDB14_BIN" "$RUN_DB" < "$DUCKDB_SQL_14" 2>&1 | tee -a "$DUCKDB_14_LOG" >/dev/null
     cmd_status=${PIPESTATUS[0]}
@@ -449,14 +447,14 @@ if [ "$DUCKDB_14_CRASHED" = false ]; then
     mkdir -p "$RUN_TMPDIR"
     # Use unique per-run DB path in temp directory
     RUN_DB="${RUN_TMPDIR}/benchmark_run${i}.duckdb"
-    RUN_PARQUET="${RUN_TMPDIR}/sorted_run${i}.parquet"
+    RUN_TABLE="sorted_run${i}"
     sync
     # Evict CSV file from page cache
     "$VMTOUCH_BIN" -e "$CSV_FILE" > /dev/null 2>&1 || true
     sleep 1
 
-    # Build SQL with unique parquet file
-    build_duckdb_sql "$DUCKDB_SQL_14" "$RUN_PARQUET"
+    # Build SQL with unique table name
+    build_duckdb_sql "$DUCKDB_SQL_14" "$RUN_TABLE"
     RUN_LOG="${OUTPUT_DIR}/duckdb_14_run${i}.log"
     set +e
     "$DUCKDB14_BIN" "$RUN_DB" < "$DUCKDB_SQL_14" 2>&1 | tee "$RUN_LOG" >> "$DUCKDB_14_LOG"

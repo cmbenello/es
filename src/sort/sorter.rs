@@ -169,7 +169,6 @@ impl ExternalSorter {
         for (thread_id, scanner) in scanners.into_iter().enumerate() {
             let io_tracker = Arc::clone(&run_generation_io_tracker);
             let dir = dir.as_ref().to_path_buf();
-            let cpu_id = thread_id;
 
             let handle = thread::spawn(move || {
                 let mut local_runs = Vec::new();
@@ -370,7 +369,6 @@ impl ExternalSorter {
             let dir = dir.as_ref().to_path_buf();
             let io_tracker = Arc::clone(&merge_io_tracker);
             let cdf = Arc::clone(&cdf);
-            let cpu_id = thread_id;
 
             let handle = thread::spawn(move || {
                 let tid = thread_id as f64;
