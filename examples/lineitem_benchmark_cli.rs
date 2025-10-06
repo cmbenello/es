@@ -3,7 +3,6 @@ use es::benchmark::{
     BenchmarkConfig, BenchmarkRunner, CsvInputProvider, DetailedCsvVerifier,
     print_benchmark_summary,
 };
-use std::fs::File;
 use std::path::PathBuf;
 
 // TPC-H lineitem column cardinality reference table
@@ -111,7 +110,7 @@ struct Args {
     #[arg(long, default_value = "1.0")]
     boundary_imbalance_factor: f64,
 
-    /// Experiment type: "run_length" or "thread_count"
+    /// Experiment type: "run_length", "thread_count", or "imbalance_factor"
     #[arg(long, default_value = "run_length")]
     experiment_type: String,
 }
@@ -132,8 +131,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Validate experiment type
     let experiment_type = args.experiment_type.to_lowercase();
-    if experiment_type != "run_length" && experiment_type != "thread_count" {
-        eprintln!("Error: experiment_type must be either 'run_length' or 'thread_count'");
+    if experiment_type != "run_length"
+        && experiment_type != "thread_count"
+        && experiment_type != "imbalance_factor"
+    {
+        eprintln!(
+            "Error: experiment_type must be 'run_length', 'thread_count', or 'imbalance_factor'"
+        );
         std::process::exit(1);
     }
 

@@ -136,12 +136,8 @@ impl std::fmt::Display for SortStats {
                 0.0
             };
 
-            // Calculate imbalance factor (max/min)
-            let imbalance_factor = if min_entries > 0 {
-                max_entries as f64 / min_entries as f64
-            } else {
-                0.0
-            };
+            // Calculate imbalance factor (max / avg)
+            let imbalance_factor = max_entries as f64 / avg_entries as f64;
 
             writeln!(f, "    Partitions: {}", self.merge_entry_num.len())?;
             writeln!(f, "    Total entries: {}", total_entries)?;
@@ -170,7 +166,7 @@ impl std::fmt::Display for SortStats {
             writeln!(f, "    Coefficient of variation: {:.1}%", cv)?;
             writeln!(
                 f,
-                "    Imbalance factor (max/min): {:.2}x",
+                "    Imbalance factor (max/avg): {:.2}x",
                 imbalance_factor
             )?;
 
@@ -319,6 +315,7 @@ pub mod order_preserving_encoding;
 pub mod ovc;
 pub mod rand;
 pub mod sort;
+pub mod sort_policy_imbalance_factor;
 pub mod sort_policy_run_length;
 pub mod sort_policy_sub;
 pub mod sort_policy_thread_count;

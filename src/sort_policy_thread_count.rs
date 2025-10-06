@@ -55,6 +55,7 @@ impl SortPolicy for PolicyThreadCount {
             merge_memory_mb: (config.dataset_mb / run_size)
                 * self.threads
                 * (config.page_size_kb / 1024.0),
+            imbalance_factor: config.imbalance_factor,
         }
     }
 }
@@ -141,6 +142,7 @@ mod tests {
             dataset_mb: 1024.0,
             page_size_kb: 64.0,
             max_threads: 32.0,
+            imbalance_factor: 1.0,
         };
 
         let run_size = calculate_run_size(config);
@@ -155,6 +157,7 @@ mod tests {
             dataset_mb: 8192.0,
             page_size_kb: 64.0,
             max_threads: 32.0,
+            imbalance_factor: 1.0,
         };
 
         let results = calculate_all_thread_policies(config);
@@ -175,6 +178,7 @@ mod tests {
             dataset_mb: 4096.0,
             page_size_kb: 64.0,
             max_threads: 32.0,
+            imbalance_factor: 1.0,
         };
 
         let results = calculate_all_thread_policies(config);
@@ -193,6 +197,7 @@ mod tests {
             dataset_mb: 2048.0,
             page_size_kb: 64.0,
             max_threads: 32.0,
+            imbalance_factor: 1.0,
         };
 
         let policy = PolicyThreadCount::new(8.0);
@@ -217,6 +222,7 @@ mod tests {
             dataset_mb: 4096.0,
             page_size_kb: 64.0,
             max_threads: 16.0,
+            imbalance_factor: 1.0,
         };
 
         let results = calculate_all_thread_policies(config);
@@ -234,6 +240,7 @@ mod tests {
             dataset_mb: 200.0 * 1024.0, // 200 GB
             page_size_kb: 64.0,         // 64 KB
             max_threads: 32.0,          // 32 threads
+            imbalance_factor: 1.0,
         };
 
         println!("\n=== Testing Thread Count Policies ===");

@@ -1,6 +1,7 @@
 use super::input::BenchmarkInputProvider;
 use super::types::{BenchmarkConfig, BenchmarkResult, BenchmarkStats};
 use super::verification::OutputVerifier;
+use crate::sort_policy_imbalance_factor::get_all_policies as get_all_imbalance_policies;
 use crate::sort_policy_run_length::{PolicyResult, SortConfig, SortPolicy, get_all_policies};
 use crate::sort_policy_thread_count::get_all_thread_policies;
 use crate::{
@@ -40,11 +41,13 @@ impl BenchmarkRunner {
             dataset_mb,
             page_size_kb: 64.0,
             max_threads: self.config.threads as f64,
+            imbalance_factor: self.config.boundary_imbalance_factor,
         };
 
         let policies: Vec<Box<dyn SortPolicy>> = match self.config.experiment_type.as_str() {
             "run_length" => get_all_policies(),
             "thread_count" => get_all_thread_policies(sort_config),
+            "imbalance_factor" => get_all_imbalance_policies(),
             _ => {
                 return Err(
                     format!("Invalid experiment type: {}", self.config.experiment_type).into(),
@@ -228,18 +231,12 @@ impl BenchmarkRunner {
             }
 
             // Calculate imbalance factor
-            if output.stats().merge_entry_num.len() > 1 {
-                let min_entries = *output.stats().merge_entry_num.iter().min().unwrap_or(&0);
-                let max_entries = *output.stats().merge_entry_num.iter().max().unwrap_or(&0);
-                if min_entries > 0 {
-                    let imbalance = max_entries as f64 / min_entries as f64;
-                    accumulated_stats.imbalance_sum += imbalance;
-                    accumulated_stats.imbalance_count += 1;
-                }
-            } else if output.stats().merge_entry_num.len() == 1 {
-                accumulated_stats.imbalance_sum += 1.0;
-                accumulated_stats.imbalance_count += 1;
-            }
+            let max_entries = *output.stats().merge_entry_num.iter().max().unwrap_or(&0) as f64;
+            let avg_entries = output.stats().merge_entry_num.iter().sum::<u64>() as f64
+                / output.stats().merge_entry_num.len() as f64;
+            let imbalance = max_entries / avg_entries;
+            accumulated_stats.imbalance_sum += imbalance;
+            accumulated_stats.imbalance_count += 1;
 
             valid_runs += 1;
             println!(

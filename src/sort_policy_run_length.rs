@@ -11,19 +11,35 @@ pub struct PolicyResult {
     pub merge_threads: f64,
     pub run_gen_memory_mb: f64,
     pub merge_memory_mb: f64,
+    pub imbalance_factor: f64,
+}
+
+impl Default for PolicyResult {
+    fn default() -> Self {
+        Self {
+            name: String::new(),
+            run_size_mb: 0.0,
+            run_gen_threads: 0.0,
+            merge_threads: 0.0,
+            run_gen_memory_mb: 0.0,
+            merge_memory_mb: 0.0,
+            imbalance_factor: 1.0,
+        }
+    }
 }
 
 impl std::fmt::Display for PolicyResult {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
-            "[{}]: Run Size: {:.2} MB, Run Gen Threads: {:.0}, Merge Threads: {:.0}, Run Gen Memory: {:.1} MB, Merge Memory: {:.1} MB",
+            "[{}]: Run Size: {:.2} MB, Run Gen Threads: {:.0}, Merge Threads: {:.0}, Run Gen Memory: {:.1} MB, Merge Memory: {:.1} MB, Imbalance Factor: {:.1}",
             self.name,
             self.run_size_mb,
             self.run_gen_threads,
             self.merge_threads,
             self.run_gen_memory_mb,
-            self.merge_memory_mb
+            self.merge_memory_mb,
+            self.imbalance_factor
         )
     }
 }
@@ -34,15 +50,17 @@ pub struct SortConfig {
     pub dataset_mb: f64,
     pub page_size_kb: f64,
     pub max_threads: f64,
+    pub imbalance_factor: f64,
 }
 
 impl Default for SortConfig {
     fn default() -> Self {
         Self {
-            memory_mb: 4096.0,
-            dataset_mb: 32768.0,
+            memory_mb: 32768.0,         // 32 GB
+            dataset_mb: 200.0 * 1024.0, // 200 GB
             page_size_kb: 64.0,
             max_threads: 32.0,
+            imbalance_factor: 1.0,
         }
     }
 }
@@ -101,6 +119,7 @@ impl SortPolicy for PolicyLog0RunLength {
             merge_memory_mb: (config.dataset_mb / min_run_size)
                 * merge_threads
                 * (config.page_size_kb / 1024.0),
+            imbalance_factor: 1.0,
         }
     }
 }
@@ -129,6 +148,7 @@ impl SortPolicy for PolicyLog025RunLength {
             merge_memory_mb: (config.dataset_mb / run_size)
                 * merge_threads
                 * (config.page_size_kb / 1024.0),
+            imbalance_factor: 1.0,
         }
     }
 }
@@ -157,6 +177,7 @@ impl SortPolicy for PolicyLog05RunLength {
             merge_memory_mb: (config.dataset_mb / run_size)
                 * merge_threads
                 * (config.page_size_kb / 1024.0),
+            imbalance_factor: 1.0,
         }
     }
 }
@@ -185,6 +206,7 @@ impl SortPolicy for PolicyLog075RunLength {
             merge_memory_mb: (config.dataset_mb / run_size)
                 * merge_threads
                 * (config.page_size_kb / 1024.0),
+            imbalance_factor: 1.0,
         }
     }
 }
@@ -211,6 +233,7 @@ impl SortPolicy for PolicyLog1RunLength {
             merge_memory_mb: (config.dataset_mb / max_run_size)
                 * merge_threads
                 * (config.page_size_kb / 1024.0),
+            imbalance_factor: 1.0,
         }
     }
 }
@@ -312,6 +335,7 @@ mod tests {
             dataset_mb: 8192.0,
             page_size_kb: 64.0,
             max_threads: 16.0,
+            imbalance_factor: 1.0,
         };
 
         let (min_run, max_run) = calculate_run_bounds(config);
@@ -332,6 +356,7 @@ mod tests {
             dataset_mb: 10000.0,
             page_size_kb: 64.0,
             max_threads: 32.0,
+            imbalance_factor: 1.0,
         };
 
         assert!(!is_configuration_feasible(config));
@@ -344,6 +369,7 @@ mod tests {
             dataset_mb: 4096.0,
             page_size_kb: 64.0,
             max_threads: 8.0,
+            imbalance_factor: 1.0,
         };
 
         let policy = PolicyLog0RunLength;
@@ -362,6 +388,7 @@ mod tests {
             dataset_mb: 4096.0,
             page_size_kb: 64.0,
             max_threads: 8.0,
+            imbalance_factor: 1.0,
         };
 
         let policy = PolicyLog1RunLength;
@@ -380,6 +407,7 @@ mod tests {
             dataset_mb: 8192.0,
             page_size_kb: 64.0,
             max_threads: 16.0,
+            imbalance_factor: 1.0,
         };
 
         let results = calculate_all_policies(config);
@@ -406,6 +434,7 @@ mod tests {
             dataset_mb: 2048.0,
             page_size_kb: 64.0,
             max_threads: 8.0,
+            imbalance_factor: 1.0,
         };
 
         let policy = PolicyLog05RunLength;
@@ -430,6 +459,7 @@ mod tests {
             dataset_mb: 4096.0,
             page_size_kb: 64.0,
             max_threads: 8.0,
+            imbalance_factor: 1.0,
         };
 
         let (min_run, max_run) = calculate_run_bounds(config);
@@ -464,6 +494,7 @@ mod tests {
             dataset_mb: 80.0 * 1024.0, // 80 GB
             page_size_kb: 64.0,        // 64 KB
             max_threads: 32.0,         // 32 threads
+            imbalance_factor: 1.0,
         };
 
         println!("\n=== Testing All Policies ===");

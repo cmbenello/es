@@ -300,8 +300,8 @@ impl ExternalSorter {
     ) -> Result<(Vec<RunImpl>, MergeStats), String> {
         let imbalance_factor = imbalance_factor.unwrap_or(1.0);
         println!(
-            "CDF boundary imbalance factor for merge: {:.4}",
-            imbalance_factor
+            "CDF boundary imbalance factor for merge: {:.4}. One thread will handle {:.4} times the average load.",
+            imbalance_factor, imbalance_factor
         );
         // If no runs or single run, return early
         if output_runs.is_empty() {
@@ -352,6 +352,7 @@ impl ExternalSorter {
         let mut merge_handles = vec![];
 
         // Create imbalance portions
+        // Imbalance factor is defined as the ratio of the largest portion to the average portion
         let k = merge_threads as f64;
         let r = if imbalance_factor <= 0.0 {
             1.0
@@ -359,7 +360,9 @@ impl ExternalSorter {
             imbalance_factor
         };
         // each = portion size for all non-first threads
-        let each = 1.0 / (r + (k - 1.0));
+        let each = (1.0 - r * (1.0 / k)) / (k - 1.0);
+        // When imbalance_factor = 1.0, each = 1/k
+        // When imbalance_factor = 1.3, each = (1 - 1.3/k) / (k-1)
 
         for thread_id in 0..merge_threads {
             let runs = Arc::clone(&runs_arc);
@@ -374,11 +377,11 @@ impl ExternalSorter {
                 let lower_bound = if thread_id == 0 {
                     vec![]
                 } else {
-                    cdf.query((r + (tid - 1.0)) * each)
+                    cdf.query(r / k + (tid - 1.0) * each)
                 };
 
                 let upper_bound = if thread_id < merge_threads - 1 {
-                    cdf.query((r + tid) * each)
+                    cdf.query(r / k + tid * each)
                 } else {
                     vec![]
                 };

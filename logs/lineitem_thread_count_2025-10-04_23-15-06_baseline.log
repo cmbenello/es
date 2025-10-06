@@ -1,0 +1,523 @@
+
+=== BENCHMARK MODE ===
+CSV file: "lineitem_sf500.csv", key_columns: [8, 9, 13, 14, 15], value_columns: [0, 3], delimiter: ',', headers: true
+Estimated data size: 208678.86 MB
+Threads: 40
+Memory limit: 32768 MB
+OVC enabled: false
+Temporary directory: "."
+Warmup runs: 1
+Runs per configuration: 3
+Verify output: false
+
+
+Running benchmark for policy: Thread_1
+Parameters: [Thread_1]: Run Size: 114.20 MB, Run Gen Threads: 1, Merge Threads: 1, Run Gen Memory: 114.2 MB, Merge Memory: 114.2 MB
+================================================================================
+  Run 1/1: Starting sort with 1 parallel scanners for run generation
+Generated 1749 runs in 14561047 ms
+CDF boundary imbalance factor for merge: 1.0000
+Merging 1749 runs using 1 threads
+Merge phase took 3287879 ms
+SortStats:
+  Number of runs: 1749
+  (R) time: 14561047 ms
+  (M) time: 3287879 ms
+  (R) I/O stats: I/O Stats: Read Ops: 6215240, Read Bytes: 407321838929, Write Ops: 3194552, Write Bytes: 209358115328
+  (M) I/O stats: I/O Stats: Read Ops: 3196300, Read Bytes: 209472672256, Write Ops: 3194552, Write Bytes: 209358115328
+  Read amplification:
+    Run generation writes: 209358115328 bytes (194.98 GB)
+    Merge phase reads: 209472672256 bytes (195.09 GB)
+    Read amplification factor: 1.00x
+    Excess reads: 0.1% (sparse indexing overhead)
+
+17848.93s
+
+Running benchmark for policy: Thread_2
+Parameters: [Thread_2]: Run Size: 114.20 MB, Run Gen Threads: 2, Merge Threads: 2, Run Gen Memory: 228.4 MB, Merge Memory: 228.4 MB
+================================================================================
+  Run 1/1: Starting sort with 2 parallel scanners for run generation
+Generated 1749 runs in 7349884 ms
+CDF boundary imbalance factor for merge: 1.0000
+Merging 1749 runs using 2 threads
+Merge phase took 1771291 ms
+SortStats:
+  Number of runs: 1749
+  (R) time: 7349884 ms
+  (M) time: 1771291 ms
+  (R) I/O stats: I/O Stats: Read Ops: 6215241, Read Bytes: 407321903953, Write Ops: 3194552, Write Bytes: 209358115840
+  (M) I/O stats: I/O Stats: Read Ops: 3198856, Read Bytes: 209640182784, Write Ops: 3194552, Write Bytes: 209358115328
+  Read amplification:
+    Run generation writes: 209358115840 bytes (194.98 GB)
+    Merge phase reads: 209640182784 bytes (195.24 GB)
+    Read amplification factor: 1.00x
+    Excess reads: 0.1% (sparse indexing overhead)
+  Partition imbalance:
+    Partitions: 2
+    Total entries: 3000028242
+    Avg per partition: 1500014121
+    Min entries: 1483534039 (98.9% of avg)
+    Max entries: 1516494203 (101.1% of avg)
+    Std deviation: 16480082
+    Coefficient of variation: 1.1%
+    Imbalance factor (max/min): 1.02x
+    Distribution: [1516494203, 1483534039]
+
+9121.17s
+
+Running benchmark for policy: Thread_4
+Parameters: [Thread_4]: Run Size: 114.20 MB, Run Gen Threads: 4, Merge Threads: 4, Run Gen Memory: 456.8 MB, Merge Memory: 456.8 MB
+================================================================================
+  Run 1/1: Starting sort with 4 parallel scanners for run generation
+Generated 1749 runs in 3853876 ms
+CDF boundary imbalance factor for merge: 1.0000
+Merging 1749 runs using 4 threads
+Merge phase took 1056037 ms
+SortStats:
+  Number of runs: 1749
+  (R) time: 3853876 ms
+  (M) time: 1056037 ms
+  (R) I/O stats: I/O Stats: Read Ops: 6215241, Read Bytes: 407321936721, Write Ops: 3194553, Write Bytes: 209358116864
+  (M) I/O stats: I/O Stats: Read Ops: 3204305, Read Bytes: 209997223936, Write Ops: 3194553, Write Bytes: 209358115840
+  Read amplification:
+    Run generation writes: 209358116864 bytes (194.98 GB)
+    Merge phase reads: 209997223936 bytes (195.58 GB)
+    Read amplification factor: 1.00x
+    Excess reads: 0.3% (sparse indexing overhead)
+  Partition imbalance:
+    Partitions: 4
+    Total entries: 3000028242
+    Avg per partition: 750007060
+    Min entries: 722275848 (96.3% of avg)
+    Max entries: 774832816 (103.3% of avg)
+    Std deviation: 19014404
+    Coefficient of variation: 2.5%
+    Imbalance factor (max/min): 1.07x
+    Distribution: [756781026, 774832816, 722275848, 746138552]
+
+4909.91s
+
+Running benchmark for policy: Thread_8
+Parameters: [Thread_8]: Run Size: 114.20 MB, Run Gen Threads: 8, Merge Threads: 8, Run Gen Memory: 913.6 MB, Merge Memory: 913.6 MB
+================================================================================
+  Performing 1 warmup run(s)...
+    Warmup 1/1: Starting sort with 8 parallel scanners for run generation
+Generated 1750 runs in 2278176 ms
+CDF boundary imbalance factor for merge: 1.0000
+Merging 1750 runs using 8 threads
+Merge phase took 817988 ms
+3096.16s
+  Warmup complete.
+
+  Run 1/3: Starting sort with 8 parallel scanners for run generation
+Generated 1750 runs in 2204474 ms
+CDF boundary imbalance factor for merge: 1.0000
+Merging 1750 runs using 8 threads
+Merge phase took 737898 ms
+SortStats:
+  Number of runs: 1750
+  (R) time: 2204474 ms
+  (M) time: 737898 ms
+  (R) I/O stats: I/O Stats: Read Ops: 6215241, Read Bytes: 407321952593, Write Ops: 3194556, Write Bytes: 209358117376
+  (M) I/O stats: I/O Stats: Read Ops: 3214828, Read Bytes: 210686663168, Write Ops: 3194555, Write Bytes: 209358117888
+  Read amplification:
+    Run generation writes: 209358117376 bytes (194.98 GB)
+    Merge phase reads: 210686663168 bytes (196.22 GB)
+    Read amplification factor: 1.01x
+    Excess reads: 0.6% (sparse indexing overhead)
+  Partition imbalance:
+    Partitions: 8
+    Total entries: 3000028242
+    Avg per partition: 375003530
+    Min entries: 364771030 (97.3% of avg)
+    Max entries: 386436514 (103.0% of avg)
+    Std deviation: 7725846
+    Coefficient of variation: 2.1%
+    Imbalance factor (max/min): 1.06x
+    Distribution: [386436514, 369001617, 379260968, 364771030, 381506964, 369951369, 382286590, 366813190]
+
+2942.37s
+
+  Run 2/3: Starting sort with 8 parallel scanners for run generation
+Generated 1750 runs in 2183782 ms
+CDF boundary imbalance factor for merge: 1.0000
+Merging 1750 runs using 8 threads
+Merge phase took 792834 ms
+SortStats:
+  Number of runs: 1750
+  (R) time: 2183782 ms
+  (M) time: 792834 ms
+  (R) I/O stats: I/O Stats: Read Ops: 6215241, Read Bytes: 407321952593, Write Ops: 3194556, Write Bytes: 209358117376
+  (M) I/O stats: I/O Stats: Read Ops: 3214761, Read Bytes: 210682272256, Write Ops: 3194556, Write Bytes: 209358116864
+  Read amplification:
+    Run generation writes: 209358117376 bytes (194.98 GB)
+    Merge phase reads: 210682272256 bytes (196.21 GB)
+    Read amplification factor: 1.01x
+    Excess reads: 0.6% (sparse indexing overhead)
+  Partition imbalance:
+    Partitions: 8
+    Total entries: 3000028242
+    Avg per partition: 375003530
+    Min entries: 361806071 (96.5% of avg)
+    Max entries: 394875880 (105.3% of avg)
+    Std deviation: 11354329
+    Coefficient of variation: 3.0%
+    Imbalance factor (max/min): 1.09x
+    Distribution: [394875880, 361806071, 389266284, 372374673, 381417734, 368723036, 364977122, 366587442]
+
+2976.62s
+
+  Run 3/3: Starting sort with 8 parallel scanners for run generation
+Generated 1750 runs in 2286364 ms
+CDF boundary imbalance factor for merge: 1.0000
+Merging 1750 runs using 8 threads
+Merge phase took 919098 ms
+SortStats:
+  Number of runs: 1750
+  (R) time: 2286364 ms
+  (M) time: 919098 ms
+  (R) I/O stats: I/O Stats: Read Ops: 6215241, Read Bytes: 407321952593, Write Ops: 3194556, Write Bytes: 209358117376
+  (M) I/O stats: I/O Stats: Read Ops: 3215243, Read Bytes: 210713860608, Write Ops: 3194556, Write Bytes: 209358117888
+  Read amplification:
+    Run generation writes: 209358117376 bytes (194.98 GB)
+    Merge phase reads: 210713860608 bytes (196.24 GB)
+    Read amplification factor: 1.01x
+    Excess reads: 0.6% (sparse indexing overhead)
+  Partition imbalance:
+    Partitions: 8
+    Total entries: 3000028242
+    Avg per partition: 375003530
+    Min entries: 354120813 (94.4% of avg)
+    Max entries: 385420850 (102.8% of avg)
+    Std deviation: 10524079
+    Coefficient of variation: 2.8%
+    Imbalance factor (max/min): 1.09x
+    Distribution: [382909455, 375703309, 361269597, 385420850, 382056787, 354120813, 380617180, 377930251]
+
+3205.46s
+
+Running benchmark for policy: Thread_16
+Parameters: [Thread_16]: Run Size: 114.20 MB, Run Gen Threads: 16, Merge Threads: 16, Run Gen Memory: 1827.3 MB, Merge Memory: 1827.3 MB
+================================================================================
+  Performing 1 warmup run(s)...
+    Warmup 1/1: Starting sort with 16 parallel scanners for run generation
+Generated 1751 runs in 1534482 ms
+CDF boundary imbalance factor for merge: 1.0000
+Merging 1751 runs using 16 threads
+Merge phase took 802248 ms
+2336.73s
+  Warmup complete.
+
+  Run 1/3: Starting sort with 16 parallel scanners for run generation
+Generated 1751 runs in 1505006 ms
+CDF boundary imbalance factor for merge: 1.0000
+Merging 1751 runs using 16 threads
+Merge phase took 782549 ms
+SortStats:
+  Number of runs: 1751
+  (R) time: 1505006 ms
+  (M) time: 782549 ms
+  (R) I/O stats: I/O Stats: Read Ops: 6215249, Read Bytes: 407322452305, Write Ops: 3194560, Write Bytes: 209358119424
+  (M) I/O stats: I/O Stats: Read Ops: 3236728, Read Bytes: 212121641472, Write Ops: 3194560, Write Bytes: 209358119424
+  Read amplification:
+    Run generation writes: 209358119424 bytes (194.98 GB)
+    Merge phase reads: 212121641472 bytes (197.55 GB)
+    Read amplification factor: 1.01x
+    Excess reads: 1.3% (sparse indexing overhead)
+  Partition imbalance:
+    Partitions: 16
+    Total entries: 3000028242
+    Avg per partition: 187501765
+    Min entries: 175568480 (93.6% of avg)
+    Max entries: 197064799 (105.1% of avg)
+    Std deviation: 5426944
+    Coefficient of variation: 2.9%
+    Imbalance factor (max/min): 1.12x
+    Distribution: [187034964, 189166142, 197064799, 182140957, 183247400, 193728516, 181384094, 183829638, 187614345, 189853306, 187075369, 188447920, 187105716, 190074015, 196692581, 175568480]
+
+2287.56s
+
+  Run 2/3: Starting sort with 16 parallel scanners for run generation
+Generated 1751 runs in 1504626 ms
+CDF boundary imbalance factor for merge: 1.0000
+Merging 1751 runs using 16 threads
+Merge phase took 712653 ms
+SortStats:
+  Number of runs: 1751
+  (R) time: 1504626 ms
+  (M) time: 712653 ms
+  (R) I/O stats: I/O Stats: Read Ops: 6215249, Read Bytes: 407322452305, Write Ops: 3194560, Write Bytes: 209358119424
+  (M) I/O stats: I/O Stats: Read Ops: 3236426, Read Bytes: 212101849600, Write Ops: 3194559, Write Bytes: 209358118912
+  Read amplification:
+    Run generation writes: 209358119424 bytes (194.98 GB)
+    Merge phase reads: 212101849600 bytes (197.54 GB)
+    Read amplification factor: 1.01x
+    Excess reads: 1.3% (sparse indexing overhead)
+  Partition imbalance:
+    Partitions: 16
+    Total entries: 3000028242
+    Avg per partition: 187501765
+    Min entries: 172997138 (92.3% of avg)
+    Max entries: 203893230 (108.7% of avg)
+    Std deviation: 8603781
+    Coefficient of variation: 4.6%
+    Imbalance factor (max/min): 1.18x
+    Distribution: [172997138, 192302791, 196286958, 191818842, 184186307, 179067815, 191192061, 176439763, 203893230, 177378560, 191026123, 187670216, 176617863, 193002155, 197690113, 188458307]
+
+2217.28s
+
+  Run 3/3: Starting sort with 16 parallel scanners for run generation
+Generated 1751 runs in 1543143 ms
+CDF boundary imbalance factor for merge: 1.0000
+Merging 1751 runs using 16 threads
+Merge phase took 717033 ms
+SortStats:
+  Number of runs: 1751
+  (R) time: 1543143 ms
+  (M) time: 717033 ms
+  (R) I/O stats: I/O Stats: Read Ops: 6215249, Read Bytes: 407322452305, Write Ops: 3194560, Write Bytes: 209358119424
+  (M) I/O stats: I/O Stats: Read Ops: 3236400, Read Bytes: 212100145664, Write Ops: 3194559, Write Bytes: 209358118912
+  Read amplification:
+    Run generation writes: 209358119424 bytes (194.98 GB)
+    Merge phase reads: 212100145664 bytes (197.53 GB)
+    Read amplification factor: 1.01x
+    Excess reads: 1.3% (sparse indexing overhead)
+  Partition imbalance:
+    Partitions: 16
+    Total entries: 3000028242
+    Avg per partition: 187501765
+    Min entries: 167737057 (89.5% of avg)
+    Max entries: 204540203 (109.1% of avg)
+    Std deviation: 9623496
+    Coefficient of variation: 5.1%
+    Imbalance factor (max/min): 1.22x
+    Distribution: [185302829, 192889920, 177110888, 197246591, 186280561, 167737057, 191659755, 204540203, 180861328, 191911450, 189721913, 187198761, 178756999, 193100855, 201430715, 174278417]
+
+2260.18s
+
+Running benchmark for policy: Thread_24
+Parameters: [Thread_24]: Run Size: 114.20 MB, Run Gen Threads: 24, Merge Threads: 24, Run Gen Memory: 2740.9 MB, Merge Memory: 2740.9 MB
+================================================================================
+  Performing 1 warmup run(s)...
+    Warmup 1/1: Starting sort with 24 parallel scanners for run generation
+Generated 1760 runs in 1124500 ms
+CDF boundary imbalance factor for merge: 1.0000
+Merging 1760 runs using 24 threads
+Merge phase took 652889 ms
+1777.39s
+  Warmup complete.
+
+  Run 1/3: Starting sort with 24 parallel scanners for run generation
+Generated 1760 runs in 1106191 ms
+CDF boundary imbalance factor for merge: 1.0000
+Merging 1760 runs using 24 threads
+Merge phase took 693691 ms
+SortStats:
+  Number of runs: 1760
+  (R) time: 1106191 ms
+  (M) time: 693691 ms
+  (R) I/O stats: I/O Stats: Read Ops: 6215257, Read Bytes: 407322968401, Write Ops: 3194565, Write Bytes: 209358121984
+  (M) I/O stats: I/O Stats: Read Ops: 3258785, Read Bytes: 213566843904, Write Ops: 3194562, Write Bytes: 209358121472
+  Read amplification:
+    Run generation writes: 209358121984 bytes (194.98 GB)
+    Merge phase reads: 213566843904 bytes (198.90 GB)
+    Read amplification factor: 1.02x
+    Excess reads: 2.0% (sparse indexing overhead)
+  Partition imbalance:
+    Partitions: 24
+    Total entries: 3000028242
+    Avg per partition: 125001177
+    Min entries: 107965933 (86.4% of avg)
+    Max entries: 139534171 (111.6% of avg)
+    Std deviation: 8727046
+    Coefficient of variation: 7.0%
+    Imbalance factor (max/min): 1.29x
+    Distribution: [118177608, 124005715, 129302280, 125848782, 117673232, 138778351, 124086222, 107965933, 134135522, 127064556, 131995492, 108694050, 126622833, 139534171, 119254623, 117055068, 118768360, 137101500, 128736226, 117928759, 122920310, 133431924, 135192656, 115754069]
+
+1799.88s
+
+  Run 2/3: Starting sort with 24 parallel scanners for run generation
+Generated 1760 runs in 1142248 ms
+CDF boundary imbalance factor for merge: 1.0000
+Merging 1760 runs using 24 threads
+Merge phase took 514188 ms
+SortStats:
+  Number of runs: 1760
+  (R) time: 1142248 ms
+  (M) time: 514188 ms
+  (R) I/O stats: I/O Stats: Read Ops: 6215257, Read Bytes: 407322968401, Write Ops: 3194565, Write Bytes: 209358121984
+  (M) I/O stats: I/O Stats: Read Ops: 3258605, Read Bytes: 213555047424, Write Ops: 3194564, Write Bytes: 209358121472
+  Read amplification:
+    Run generation writes: 209358121984 bytes (194.98 GB)
+    Merge phase reads: 213555047424 bytes (198.89 GB)
+    Read amplification factor: 1.02x
+    Excess reads: 2.0% (sparse indexing overhead)
+  Partition imbalance:
+    Partitions: 24
+    Total entries: 3000028242
+    Avg per partition: 125001177
+    Min entries: 110058013 (88.0% of avg)
+    Max entries: 138029019 (110.4% of avg)
+    Std deviation: 6385697
+    Coefficient of variation: 5.1%
+    Imbalance factor (max/min): 1.25x
+    Distribution: [117001132, 129380927, 128927047, 125039547, 120663010, 138029019, 119719479, 115724016, 123736729, 130805417, 124964567, 122037144, 119464955, 132625836, 122290007, 132799706, 116911688, 130686514, 129466826, 110058013, 129236426, 126439919, 125081714, 128938604]
+
+1656.44s
+
+  Run 3/3: Starting sort with 24 parallel scanners for run generation
+Generated 1760 runs in 1108908 ms
+CDF boundary imbalance factor for merge: 1.0000
+Merging 1760 runs using 24 threads
+Merge phase took 637580 ms
+SortStats:
+  Number of runs: 1760
+  (R) time: 1108908 ms
+  (M) time: 637580 ms
+  (R) I/O stats: I/O Stats: Read Ops: 6215257, Read Bytes: 407322968401, Write Ops: 3194565, Write Bytes: 209358121984
+  (M) I/O stats: I/O Stats: Read Ops: 3258374, Read Bytes: 213539908608, Write Ops: 3194564, Write Bytes: 209358123520
+  Read amplification:
+    Run generation writes: 209358121984 bytes (194.98 GB)
+    Merge phase reads: 213539908608 bytes (198.87 GB)
+    Read amplification factor: 1.02x
+    Excess reads: 2.0% (sparse indexing overhead)
+  Partition imbalance:
+    Partitions: 24
+    Total entries: 3000028242
+    Avg per partition: 125001177
+    Min entries: 114224128 (91.4% of avg)
+    Max entries: 134618336 (107.7% of avg)
+    Std deviation: 5697772
+    Coefficient of variation: 4.6%
+    Imbalance factor (max/min): 1.18x
+    Distribution: [124646548, 123928278, 125036949, 125575604, 117802804, 134529451, 121758513, 124460327, 116705327, 134207080, 131759794, 119131947, 127862209, 122658246, 124259712, 121997618, 127282668, 127924848, 125170469, 114224128, 127102509, 134618336, 131966814, 115418063]
+
+1746.49s
+
+Running benchmark for policy: Thread_32
+Parameters: [Thread_32]: Run Size: 114.20 MB, Run Gen Threads: 32, Merge Threads: 32, Run Gen Memory: 3654.5 MB, Merge Memory: 3654.5 MB
+================================================================================
+  Performing 1 warmup run(s)...
+    Warmup 1/1: Starting sort with 32 parallel scanners for run generation
+Generated 1761 runs in 1124306 ms
+CDF boundary imbalance factor for merge: 1.0000
+Merging 1761 runs using 32 threads
+Merge phase took 665869 ms
+1790.18s
+  Warmup complete.
+
+  Run 1/3: Starting sort with 32 parallel scanners for run generation
+Generated 1761 runs in 1164919 ms
+CDF boundary imbalance factor for merge: 1.0000
+Merging 1761 runs using 32 threads
+Merge phase took 591377 ms
+SortStats:
+  Number of runs: 1761
+  (R) time: 1164919 ms
+  (M) time: 591377 ms
+  (R) I/O stats: I/O Stats: Read Ops: 6215265, Read Bytes: 407323488593, Write Ops: 3194566, Write Bytes: 209358121984
+  (M) I/O stats: I/O Stats: Read Ops: 3280001, Read Bytes: 214957190144, Write Ops: 3194567, Write Bytes: 209358124544
+  Read amplification:
+    Run generation writes: 209358121984 bytes (194.98 GB)
+    Merge phase reads: 214957190144 bytes (200.19 GB)
+    Read amplification factor: 1.03x
+    Excess reads: 2.7% (sparse indexing overhead)
+  Partition imbalance:
+    Partitions: 32
+    Total entries: 3000028242
+    Avg per partition: 93750883
+    Min entries: 72396802 (77.2% of avg)
+    Max entries: 114277928 (121.9% of avg)
+    Std deviation: 10909380
+    Coefficient of variation: 11.6%
+    Imbalance factor (max/min): 1.58x
+    Distribution: [113845353, 81476333, 95883600, 93339211, 82493199, 114277928, 86440067, 101006739, 89285508, 79023246, 113632422, 79055405, 95075503, 100230400, 94222675, 82644837, 105909564, 81687382, 96528404, 103119068, 86130426, 92987823, 86455011, 106261089, 92187379, 95998071, 106826647, 72396802, 107048721, 90018905, 89846362, 84694162]
+
+1756.30s
+
+  Run 2/3: Starting sort with 32 parallel scanners for run generation
+Generated 1761 runs in 1070712 ms
+CDF boundary imbalance factor for merge: 1.0000
+Merging 1761 runs using 32 threads
+Merge phase took 586530 ms
+SortStats:
+  Number of runs: 1761
+  (R) time: 1070712 ms
+  (M) time: 586530 ms
+  (R) I/O stats: I/O Stats: Read Ops: 6215265, Read Bytes: 407323488593, Write Ops: 3194566, Write Bytes: 209358121984
+  (M) I/O stats: I/O Stats: Read Ops: 3280138, Read Bytes: 214966168576, Write Ops: 3194565, Write Bytes: 209358122496
+  Read amplification:
+    Run generation writes: 209358121984 bytes (194.98 GB)
+    Merge phase reads: 214966168576 bytes (200.20 GB)
+    Read amplification factor: 1.03x
+    Excess reads: 2.7% (sparse indexing overhead)
+  Partition imbalance:
+    Partitions: 32
+    Total entries: 3000028242
+    Avg per partition: 93750883
+    Min entries: 72360424 (77.2% of avg)
+    Max entries: 111729879 (119.2% of avg)
+    Std deviation: 8083230
+    Coefficient of variation: 8.6%
+    Imbalance factor (max/min): 1.54x
+    Distribution: [96055887, 80465601, 86253000, 111729879, 72360424, 99647653, 96343861, 92867661, 98329038, 99446927, 98362243, 81933853, 86811335, 97266970, 89303619, 95272271, 98406581, 94922393, 101420750, 95977875, 88270227, 81763513, 105015858, 83358671, 88729083, 101493816, 100884637, 96457483, 91887408, 89489748, 99333603, 100166374]
+
+1657.24s
+
+  Run 3/3: Starting sort with 32 parallel scanners for run generation
+Generated 1761 runs in 1050975 ms
+CDF boundary imbalance factor for merge: 1.0000
+Merging 1761 runs using 32 threads
+Merge phase took 618073 ms
+SortStats:
+  Number of runs: 1761
+  (R) time: 1050975 ms
+  (M) time: 618073 ms
+  (R) I/O stats: I/O Stats: Read Ops: 6215265, Read Bytes: 407323488593, Write Ops: 3194566, Write Bytes: 209358121984
+  (M) I/O stats: I/O Stats: Read Ops: 3280235, Read Bytes: 214972525568, Write Ops: 3194569, Write Bytes: 209358124032
+  Read amplification:
+    Run generation writes: 209358121984 bytes (194.98 GB)
+    Merge phase reads: 214972525568 bytes (200.21 GB)
+    Read amplification factor: 1.03x
+    Excess reads: 2.7% (sparse indexing overhead)
+  Partition imbalance:
+    Partitions: 32
+    Total entries: 3000028242
+    Avg per partition: 93750883
+    Min entries: 67546490 (72.0% of avg)
+    Max entries: 124053848 (132.3% of avg)
+    Std deviation: 12288599
+    Coefficient of variation: 13.1%
+    Imbalance factor (max/min): 1.84x
+    Distribution: [101288676, 88774100, 106834879, 86764403, 90338695, 115908515, 72305627, 84442261, 100743103, 86459188, 100982277, 92553127, 94642142, 106097878, 91832621, 72498175, 124053848, 67546490, 93709450, 100362208, 87405406, 111057975, 92601514, 93274190, 107662717, 75121275, 93954190, 88728445, 87741796, 102156856, 95588420, 86597795]
+
+1669.05s
+
+========================================================================================================================================================================================================
+Benchmark Results Summary
+========================================================================================================================================================================================================
+Policy                                             Threads  Memory       Run Size   Gen Thr    Merge Thr  Runs   Total (s)  RunGen (s)   Merge (s)  Entries      Throughput       Read MB    Write MB   Imbalance   
+                                                                         (MB)                                                                                    (M entries/s)                          Factor      
+--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+Thread_1                                           32       32.00 GB     114.2      1          1          1749   17848.93   14561.05     3287.88    3000028242   0.17             616794.5   418716.2   N/A         
+Thread_2                                           32       32.00 GB     114.2      2          2          1749   9121.17    7349.88      1771.29    3000028242   0.33             616962.1   418716.2   1.02222x    
+Thread_4                                           32       32.00 GB     114.2      4          4          1749   4909.91    3853.88      1056.04    3000028242   0.61             617319.2   418716.2   1.07277x   
+Thread_8                                           40       32.00 GB     114.2      8          8          1750   3041.48    2224.87      816.61     3000028242   0.99             618016.2   418716.2   1.07973x    
+Thread_16                                          40       32.00 GB     114.2      16         16         1751   2255.00    1517.59      737.41     3000028242   1.33             619430.3   418716.2   1.17348x    
+Thread_24                                          40       32.00 GB     114.2      24         24         1760   1734.27    1119.12      615.15     3000028242   1.73             620876.9   418716.2   1.24169x    
+Thread_32                                          40       32.00 GB     114.2      32         32         1761   1694.20    1095.54      598.66     3000028242   1.77             622288.8   418716.2   1.65305x    
+========================================================================================================================================================================================================
+
+Detailed I/O Statistics Summary:
+------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+Policy                                             Threads  Memory       Run Gen Reads        Run Gen Writes       Merge Reads          Merge Writes         Read Amp.      
+                                                                         (ops / MB)           (ops / MB)           (ops / MB)           (ops / MB)           Factor         
+------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+Thread_1                                           32       32.00 GB     6215240 / 407321.8   3194552 / 209358.1   3196300 / 209472.7   3194552 / 209358.1   1.001x         
+Thread_2                                           32       32.00 GB     6215241 / 407321.9   3194552 / 209358.1   3198856 / 209640.2   3194552 / 209358.1   1.001x         
+Thread_4                                           32       32.00 GB     6215241 / 407321.9   3194553 / 209358.1   3204305 / 209997.2   3194553 / 209358.1   1.003x         
+Thread_8                                           40       32.00 GB     6215241 / 407322.0   3194556 / 209358.1   3214944 / 210694.3   3194555 / 209358.1   1.006x         
+Thread_16                                          40       32.00 GB     6215249 / 407322.5   3194560 / 209358.1   3236518 / 212107.9   3194559 / 209358.1   1.013x         
+Thread_24                                          40       32.00 GB     6215257 / 407323.0   3194565 / 209358.1   3258588 / 213553.9   3194563 / 209358.1   1.020x         
+Thread_32                                          40       32.00 GB     6215265 / 407323.5   3194566 / 209358.1   3280124 / 214965.3   3194567 / 209358.1   1.027x         
+------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
