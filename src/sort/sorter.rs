@@ -4,7 +4,6 @@ use std::sync::Arc;
 use std::thread;
 use std::time::Instant;
 
-use crate::affinity;
 use crate::diskio::aligned_writer::AlignedWriter;
 use crate::diskio::file::SharedFd;
 use crate::kll::Sketch;
@@ -136,11 +135,6 @@ impl ExternalSorter {
         run_indexing_interval: usize,
         dir: impl AsRef<Path>,
     ) -> Result<(Vec<RunImpl>, Sketch<Vec<u8>>, RunGenerationStats), String> {
-        // Pin main thread to the last CPU
-        let total_cpus = affinity::get_total_cpus();
-        let _main_affinity = affinity::AffinityGuard::pin(total_cpus - 1)
-            .expect("Failed to pin main thread to last CPU");
-
         // Start timing for run generation
         let run_generation_start = Instant::now();
 
@@ -178,58 +172,23 @@ impl ExternalSorter {
             let cpu_id = thread_id;
 
             let handle = thread::spawn(move || {
-                // Pin this thread to its designated CPU
-                affinity::with_affinity(cpu_id, || {
-                    let mut local_runs = Vec::new();
-                    let mut sort_buffer = SortBuffer::new(per_thread_mem);
-                    let mut sketch = Sketch::new(sketch_size);
+                let mut local_runs = Vec::new();
+                let mut sort_buffer = SortBuffer::new(per_thread_mem);
+                let mut sketch = Sketch::new(sketch_size);
 
-                    let run_path = dir.join(format!("intermediate_{}.dat", thread_id));
-                    let fd = Arc::new(
-                        SharedFd::new_from_path(&run_path)
-                            .expect("Failed to open run file with Direct I/O"),
-                    );
-                    let mut run_writer = Option::Some(
-                        AlignedWriter::from_fd_with_tracker(fd, Some((*io_tracker).clone()))
-                            .expect("Failed to create run writer"),
-                    );
-                    let mut cnt = 0;
+                let run_path = dir.join(format!("intermediate_{}.dat", thread_id));
+                let fd = Arc::new(
+                    SharedFd::new_from_path(&run_path)
+                        .expect("Failed to open run file with Direct I/O"),
+                );
+                let mut run_writer = Option::Some(
+                    AlignedWriter::from_fd_with_tracker(fd, Some((*io_tracker).clone()))
+                        .expect("Failed to create run writer"),
+                );
+                let mut cnt = 0;
 
-                    for (key, value) in scanner {
-                        if !sort_buffer.has_space(&key, &value) {
-                            let mut output_run = RunImpl::from_writer_with_indexing_interval(
-                                run_writer.take().unwrap(),
-                                run_indexing_interval,
-                            )
-                            .expect("Failed to create run");
-
-                            for (k, v) in sort_buffer.sorted_iter() {
-                                if cnt % sketch_sampling_interval == 0 {
-                                    sketch.update(k.clone());
-                                }
-                                cnt += 1;
-                                output_run.append(k, v);
-                            }
-
-                            // Finalize the run and get writer back
-                            run_writer = Some(output_run.finalize_write());
-
-                            // Create a read-only run with proper metadata
-                            local_runs.push(output_run);
-
-                            sort_buffer.reset();
-                            if !sort_buffer.append(key, value) {
-                                panic!(
-                                    "Failed to append data to sort buffer, it should have space"
-                                );
-                            }
-                        } else {
-                            sort_buffer.append(key, value);
-                        }
-                    }
-
-                    // Final buffer
-                    if !sort_buffer.is_empty() {
+                for (key, value) in scanner {
+                    if !sort_buffer.has_space(&key, &value) {
                         let mut output_run = RunImpl::from_writer_with_indexing_interval(
                             run_writer.take().unwrap(),
                             run_indexing_interval,
@@ -249,13 +208,42 @@ impl ExternalSorter {
 
                         // Create a read-only run with proper metadata
                         local_runs.push(output_run);
+
+                        sort_buffer.reset();
+                        if !sort_buffer.append(key, value) {
+                            panic!("Failed to append data to sort buffer, it should have space");
+                        }
+                    } else {
+                        sort_buffer.append(key, value);
+                    }
+                }
+
+                // Final buffer
+                if !sort_buffer.is_empty() {
+                    let mut output_run = RunImpl::from_writer_with_indexing_interval(
+                        run_writer.take().unwrap(),
+                        run_indexing_interval,
+                    )
+                    .expect("Failed to create run");
+
+                    for (k, v) in sort_buffer.sorted_iter() {
+                        if cnt % sketch_sampling_interval == 0 {
+                            sketch.update(k.clone());
+                        }
+                        cnt += 1;
+                        output_run.append(k, v);
                     }
 
-                    drop(run_writer); // Ensure the writer is closed
+                    // Finalize the run and get writer back
+                    run_writer = Some(output_run.finalize_write());
 
-                    (local_runs, sketch)
-                })
-                .expect("Failed to set CPU affinity for run generation")
+                    // Create a read-only run with proper metadata
+                    local_runs.push(output_run);
+                }
+
+                drop(run_writer); // Ensure the writer is closed
+
+                (local_runs, sketch)
             });
 
             handles.push(handle);
@@ -311,11 +299,6 @@ impl ExternalSorter {
         dir: impl AsRef<Path>,
         imbalance_factor: Option<f64>,
     ) -> Result<(Vec<RunImpl>, MergeStats), String> {
-        // Pin main thread to the last CPU
-        let total_cpus = affinity::get_total_cpus();
-        let _main_affinity = affinity::AffinityGuard::pin(total_cpus - 1)
-            .expect("Failed to pin main thread to last CPU");
-
         let imbalance_factor = imbalance_factor.unwrap_or(1.0);
         println!(
             "CDF boundary imbalance factor for merge: {:.4}. One thread will handle {:.4} times the average load.",
@@ -390,100 +373,57 @@ impl ExternalSorter {
             let cpu_id = thread_id;
 
             let handle = thread::spawn(move || {
-                // Pin this thread to its designated CPU
-                affinity::with_affinity(cpu_id, || {
-                    let tid = thread_id as f64;
+                let tid = thread_id as f64;
 
-                    // Determine the key range for this thread
-                    let lower_bound = if thread_id == 0 {
-                        vec![]
-                    } else {
-                        cdf.query(r / k + (tid - 1.0) * each)
-                    };
+                // Determine the key range for this thread
+                let lower_bound = if thread_id == 0 {
+                    vec![]
+                } else {
+                    cdf.query(r / k + (tid - 1.0) * each)
+                };
 
-                    let upper_bound = if thread_id < merge_threads - 1 {
-                        cdf.query(r / k + tid * each)
-                    } else {
-                        vec![]
-                    };
+                let upper_bound = if thread_id < merge_threads - 1 {
+                    cdf.query(r / k + tid * each)
+                } else {
+                    vec![]
+                };
 
-                    // TEMPORARY: Track individual run IO stats for debugging
-                    // println!("=== INDIVIDUAL RUN IO TRACKING (Thread {}) ===", thread_id);
-                    // let mut individual_trackers = Vec::new();
-                    // let mut total_records_per_run = Vec::new();
+                // Create iterators for this key range from all runs
+                let iterators: Vec<_> = runs
+                    .iter()
+                    .map(|run| {
+                        run.scan_range_with_io_tracker(
+                            &lower_bound,
+                            &upper_bound,
+                            Some((*io_tracker).clone()),
+                        )
+                    })
+                    .collect();
 
-                    // for (run_idx, run) in runs.iter().enumerate() {
-                    //     let individual_tracker = IoStatsTracker::new();
-                    //     let iter = run.scan_range_with_io_tracker(
-                    //         &lower_bound,
-                    //         &upper_bound,
-                    //         Some(individual_tracker.clone()),
-                    //     );
-                    //     let records: Vec<_> = iter.collect();
-                    //     let (read_ops, read_bytes) = individual_tracker.get_read_stats();
+                // Create output run for this thread
+                let run_path = dir.join(format!("merge_output_{}.dat", thread_id));
+                let fd = Arc::new(
+                    SharedFd::new_from_path(&run_path)
+                        .expect("Failed to open merge output file with Direct I/O"),
+                );
+                let writer = AlignedWriter::from_fd_with_tracker(fd, Some((*io_tracker).clone()))
+                    .expect("Failed to create run writer");
+                let mut output_run =
+                    RunImpl::from_writer(writer).expect("Failed to create merge output run");
 
-                    //     // Calculate actual logical bytes from the records
-                    //     let logical_bytes: usize = records.iter()
-                    //         .map(|(key, value)| 8 + key.len() + value.len())
-                    //         .sum();
+                // Merge this range directly into the output run
+                let merge_iter = MergeIterator::new(iterators);
 
-                    //     println!("Run {}: {} records, {} ops, {} io_bytes, {} logical_bytes, ratio: {:.2}x",
-                    //              run_idx, records.len(), read_ops, read_bytes, logical_bytes,
-                    //              if logical_bytes > 0 { read_bytes as f64 / logical_bytes as f64 } else { 0.0 });
+                for (key, value) in merge_iter {
+                    output_run.append(key, value);
+                }
 
-                    //     individual_trackers.push(individual_tracker);
-                    //     total_records_per_run.push(records.len());
-                    // }
+                // Finalize to flush
+                let writer = output_run.finalize_write();
+                drop(writer);
 
-                    // let total_individual_ops: u64 = individual_trackers.iter()
-                    //     .map(|t| t.get_read_stats().0).sum();
-                    // let total_individual_bytes: u64 = individual_trackers.iter()
-                    //     .map(|t| t.get_read_stats().1).sum();
-                    // let total_records: usize = total_records_per_run.iter().sum();
-
-                    // println!("Individual tracking totals: {} records, {} ops, {} bytes",
-                    //          total_records, total_individual_ops, total_individual_bytes);
-                    // println!("==========================================");
-
-                    // Create iterators for this key range from all runs
-                    let iterators: Vec<_> = runs
-                        .iter()
-                        .map(|run| {
-                            run.scan_range_with_io_tracker(
-                                &lower_bound,
-                                &upper_bound,
-                                Some((*io_tracker).clone()),
-                            )
-                        })
-                        .collect();
-
-                    // Create output run for this thread
-                    let run_path = dir.join(format!("merge_output_{}.dat", thread_id));
-                    let fd = Arc::new(
-                        SharedFd::new_from_path(&run_path)
-                            .expect("Failed to open merge output file with Direct I/O"),
-                    );
-                    let writer =
-                        AlignedWriter::from_fd_with_tracker(fd, Some((*io_tracker).clone()))
-                            .expect("Failed to create run writer");
-                    let mut output_run =
-                        RunImpl::from_writer(writer).expect("Failed to create merge output run");
-
-                    // Merge this range directly into the output run
-                    let merge_iter = MergeIterator::new(iterators);
-
-                    for (key, value) in merge_iter {
-                        output_run.append(key, value);
-                    }
-
-                    // Finalize to flush
-                    let writer = output_run.finalize_write();
-                    drop(writer);
-
-                    // Return a read-only run
-                    output_run
-                })
-                .expect("Failed to set CPU affinity for merge")
+                // Return a read-only run
+                output_run
             });
 
             merge_handles.push(handle);
