@@ -75,6 +75,7 @@ pub struct ExternalSorterWithOVC {
     sketch_sampling_interval: usize,
     run_indexing_interval: usize,
     temp_dir_info: Arc<TempDirInfo>,
+    boundary_imbalance_factor: f64,
 }
 
 impl ExternalSorterWithOVC {
@@ -125,6 +126,7 @@ impl ExternalSorterWithOVC {
                 path: temp_dir,
                 should_delete: true,
             }),
+            boundary_imbalance_factor: 1.0,
         }
     }
 
@@ -310,12 +312,18 @@ impl ExternalSorterWithOVC {
         num_threads: usize,
         sketch: Sketch<Vec<u8>>,
         dir: impl AsRef<Path>,
+        imbalance_factor: Option<f64>,
     ) -> Result<(Vec<RunWithOVC>, MergeStats), String> {
         // Pin main thread to the last CPU
         let total_cpus = affinity::get_total_cpus();
         let _main_affinity = affinity::AffinityGuard::pin(total_cpus - 1)
             .expect("Failed to pin main thread to last CPU");
 
+        let imbalance_factor = imbalance_factor.unwrap_or(1.0);
+        println!(
+            "CDF boundary imbalance factor for merge: {:.4}. One thread will handle {:.4} times the average load.",
+            imbalance_factor, imbalance_factor
+        );
         // If no runs or single run, return early
         if output_runs.is_empty() {
             let merge_stats = MergeStats {
@@ -364,6 +372,19 @@ impl ExternalSorterWithOVC {
         // Create merge tasks
         let mut merge_handles = vec![];
 
+        // Create imbalance portions
+        // Imbalance factor is defined as the ratio of the largest portion to the average portion
+        let k = merge_threads as f64;
+        let r = if imbalance_factor <= 0.0 {
+            1.0
+        } else {
+            imbalance_factor
+        };
+        // each = portion size for all non-first threads
+        let each = (1.0 - r * (1.0 / k)) / (k - 1.0);
+        // When imbalance_factor = 1.0, each = 1/k
+        // When imbalance_factor = 1.3, each = (1 - 1.3/k) / (k-1)
+
         for thread_id in 0..merge_threads {
             let runs = Arc::clone(&runs_arc);
             let dir = dir.as_ref().to_path_buf();
@@ -374,15 +395,17 @@ impl ExternalSorterWithOVC {
             let handle = thread::spawn(move || {
                 // Pin this thread to its designated CPU
                 affinity::with_affinity(cpu_id, || {
+                    let tid = thread_id as f64;
+
                     // Determine the key range for this thread
                     let lower_bound = if thread_id == 0 {
                         vec![]
                     } else {
-                        cdf.query(thread_id as f64 / merge_threads as f64)
+                        cdf.query(r / k + (tid - 1.0) * each)
                     };
 
                     let upper_bound = if thread_id < merge_threads - 1 {
-                        cdf.query((thread_id + 1) as f64 / merge_threads as f64)
+                        cdf.query(r / k + tid * each)
                     } else {
                         vec![]
                     };
@@ -483,6 +506,7 @@ impl Sorter for ExternalSorterWithOVC {
             self.merge_threads,
             sketch,
             self.temp_dir_info.as_ref(),
+            Some(self.boundary_imbalance_factor),
         )?;
 
         // Combine stats

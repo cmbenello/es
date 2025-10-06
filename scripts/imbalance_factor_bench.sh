@@ -9,6 +9,7 @@ OVC="logs/lineitem_imbalance_factor_${TS}_ovc.log"
 ./target/release/examples/lineitem_benchmark_cli \
   --warmup-runs 1 --benchmark-runs 3 -i lineitem_sf500.csv -t 32 -m 32768 \
   --sketch-sampling-interval 100 \
+  --boundary-imbalance-factor 10.0 \
   --experiment-type imbalance_factor \
   2>&1 | tee "$BASE"
 
@@ -16,5 +17,6 @@ OVC="logs/lineitem_imbalance_factor_${TS}_ovc.log"
 ./target/release/examples/lineitem_benchmark_cli \
   --warmup-runs 1 --benchmark-runs 3 -i lineitem_sf500.csv -t 32 -m 32768 \
   --sketch-sampling-interval 100 --ovc \
+  --boundary-imbalance-factor 10.0 \
   --experiment-type imbalance_factor \
   2>&1 | tee "$OVC"

@@ -47,7 +47,7 @@ impl BenchmarkRunner {
         let policies: Vec<Box<dyn SortPolicy>> = match self.config.experiment_type.as_str() {
             "run_length" => get_all_policies(),
             "thread_count" => get_all_thread_policies(sort_config),
-            "imbalance_factor" => get_all_imbalance_policies(),
+            "imbalance_factor" => get_all_imbalance_policies(sort_config),
             _ => {
                 return Err(
                     format!("Invalid experiment type: {}", self.config.experiment_type).into(),
@@ -133,6 +133,7 @@ impl BenchmarkRunner {
                     params.merge_threads as usize,
                     sketch,
                     &temp_dir,
+                    Some(params.imbalance_factor),
                 )?;
                 drop(_merged_runs);
 
@@ -153,7 +154,7 @@ impl BenchmarkRunner {
                     params.merge_threads as usize,
                     sketch,
                     &temp_dir,
-                    Some(self.config.boundary_imbalance_factor),
+                    Some(params.imbalance_factor),
                 )?;
                 drop(_merged_runs);
 
@@ -304,6 +305,7 @@ impl BenchmarkRunner {
                 params.merge_threads as usize,
                 sketch,
                 temp_dir,
+                Some(params.imbalance_factor),
             )?;
 
             let stats = SortStats {
@@ -336,7 +338,7 @@ impl BenchmarkRunner {
                 params.merge_threads as usize,
                 sketch,
                 temp_dir,
-                Some(self.config.boundary_imbalance_factor),
+                Some(params.imbalance_factor),
             )?;
 
             let stats = SortStats {
