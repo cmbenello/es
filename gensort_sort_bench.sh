@@ -46,7 +46,7 @@ run_case() {
     fi
   done
 
-  echo "[$name]: Run Size: ${run_size_mb} MB, Run Gen Threads: ${RUN_GEN_THREADS}, Merge Threads: ${MERGE_THREADS}, Run Gen Mem: ${run_gen_mem} MB, Merge Mem: ${merge_mem} MB, OVC: ${ovc_label}" | tee -a "${OUT_DIR}/${name}.log"
+  echo "[$name]: Run Size: ${run_size_mb} MB, Run Gen Threads: ${RUN_GEN_THREADS}, Merge Threads: ${MERGE_THREADS}, OVC: ${ovc_label}" | tee -a "${OUT_DIR}/${name}.log"
 
   cargo run --release --example gen_sort_cli -- \
     -n "$name" \
