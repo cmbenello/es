@@ -1,5 +1,6 @@
 use std::cmp::Ordering;
 
+#[allow(dead_code)]
 pub(crate) struct Entry<T: Ord + SentinelValue> {
     pub(crate) value: T,
     pub(crate) run_id: usize,
@@ -15,6 +16,7 @@ impl<T: std::fmt::Debug + Ord + SentinelValue> std::fmt::Debug for Entry<T> {
     }
 }
 
+#[allow(dead_code)]
 impl<T: Ord + SentinelValue> Entry<T> {
     pub fn new(value: T, run_id: usize) -> Self {
         Entry { value, run_id }
@@ -133,6 +135,7 @@ impl<T: Ord> SentinelValue for Sentineled<T> {
     }
 }
 
+#[allow(dead_code)]
 pub(crate) fn next_power_of_two(num: usize) -> usize {
     let mut size = 1;
     while size < num {

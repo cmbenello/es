@@ -20,58 +20,50 @@ pub trait SortOutput {
     fn iter(&self) -> Box<dyn Iterator<Item = (Vec<u8>, Vec<u8>)>>;
 
     /// Get statistics about the sort operation
-    fn stats(&self) -> SortStats {
-        // Default implementation returns unknown stats
-        SortStats {
-            num_runs: 0,
-            runs_info: vec![],
-            run_generation_time_ms: None,
-            merge_time_ms: None,
-            run_generation_io_stats: None,
-            merge_io_stats: None,
-            per_merge_stats: None,
-        }
-    }
+    fn stats(&self) -> SortStats;
 }
 
 /// Statistics about a sort operation
 #[derive(Clone, Debug)]
 pub struct SortStats {
-    pub num_runs: usize,
-    pub runs_info: Vec<RunInfo>,
-    pub run_generation_time_ms: Option<u128>,
-    pub merge_time_ms: Option<u128>,
-    pub run_generation_io_stats: Option<IoStats>,
-    pub merge_io_stats: Option<IoStats>,
-    pub per_merge_stats: Option<Vec<MergeStats>>,
+    pub run_gen_stats: RunGenerationStats,
+    pub per_merge_stats: Vec<MergeStats>,
+}
+
+impl SortStats {
+    pub fn new(run_gen_stats: RunGenerationStats, per_merge_stats: Vec<MergeStats>) -> Self {
+        Self {
+            run_gen_stats,
+            per_merge_stats,
+        }
+    }
 }
 
 impl std::fmt::Display for SortStats {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
         // Clean display implementation
         writeln!(f, "SortStats:")?;
-        writeln!(f, "  Number of runs: {}", self.num_runs)?;
-        writeln!(
-            f,
-            "  (R) time: {} ms",
-            self.run_generation_time_ms.unwrap_or(0)
-        )?;
-        writeln!(f, "  (M) time: {} ms", self.merge_time_ms.unwrap_or(0))?;
-        if let Some(io_stats) = &self.run_generation_io_stats {
-            writeln!(f, "  (R) I/O stats: {}", io_stats)?;
+        let rg = &self.run_gen_stats;
+        writeln!(f, "  Number of runs: {}", rg.num_runs)?;
+        writeln!(f, "  (R) time: {} ms", rg.time_ms)?;
+        if let Some(io) = &rg.io_stats {
+            writeln!(f, "  (R) I/O stats: {}", io)?;
         }
-        if let Some(io_stats) = &self.merge_io_stats {
-            writeln!(f, "  (M) I/O stats: {}", io_stats)?;
-        }
+
+        let total_merge_time_ms: u128 = self.per_merge_stats.iter().map(|m| m.time_ms).sum();
+        writeln!(f, "  (M) time: {} ms", total_merge_time_ms)?;
 
         // Display read amplification (sparse indexing effectiveness)
-        if let (Some(run_gen_io), Some(merge_io)) =
-            (&self.run_generation_io_stats, &self.merge_io_stats)
-        {
+        if let Some(run_gen_io) = &self.run_gen_stats.io_stats {
+            let merge_read_bytes: u64 = self
+                .per_merge_stats
+                .iter()
+                .filter_map(|m| m.io_stats.as_ref())
+                .map(|io| io.read_bytes)
+                .sum();
             if run_gen_io.write_bytes > 0 {
-                let read_amplification = merge_io.read_bytes as f64 / run_gen_io.write_bytes as f64;
+                let read_amplification = merge_read_bytes as f64 / run_gen_io.write_bytes as f64;
                 let excess_read_pct = (read_amplification - 1.0) * 100.0;
-
                 writeln!(f, "  Read amplification:")?;
                 writeln!(
                     f,
@@ -82,8 +74,8 @@ impl std::fmt::Display for SortStats {
                 writeln!(
                     f,
                     "    Merge phase reads: {} bytes ({:.2} GB)",
-                    merge_io.read_bytes,
-                    merge_io.read_bytes as f64 / (1024.0 * 1024.0 * 1024.0)
+                    merge_read_bytes,
+                    merge_read_bytes as f64 / (1024.0 * 1024.0 * 1024.0)
                 )?;
                 writeln!(
                     f,
@@ -97,11 +89,7 @@ impl std::fmt::Display for SortStats {
                         excess_read_pct
                     )?;
                 } else if excess_read_pct < 0.0 {
-                    writeln!(
-                        f,
-                        "    Read reduction: {:.1}% (possible data compression or skipping)",
-                        -excess_read_pct
-                    )?;
+                    writeln!(f, "    Read reduction: {:.1}%", -excess_read_pct)?;
                 } else {
                     writeln!(f, "    Perfect read efficiency (1.0x)")?;
                 }
@@ -109,8 +97,8 @@ impl std::fmt::Display for SortStats {
         }
 
         // Display thread timing statistics if available
-        if let Some(ref per_merge) = self.per_merge_stats {
-            for (i, merge_stat) in per_merge.iter().enumerate() {
+        if !self.per_merge_stats.is_empty() {
+            for (i, merge_stat) in self.per_merge_stats.iter().enumerate() {
                 if !merge_stat.per_thread_times_ms.is_empty() {
                     let min_time = *merge_stat.per_thread_times_ms.iter().min().unwrap_or(&0);
                     let max_time = *merge_stat.per_thread_times_ms.iter().max().unwrap_or(&0);
@@ -118,7 +106,7 @@ impl std::fmt::Display for SortStats {
                         / merge_stat.per_thread_times_ms.len() as f64;
                     let time_imbalance = max_time as f64 / avg_time;
 
-                    if per_merge.len() > 1 {
+                    if self.per_merge_stats.len() > 1 {
                         writeln!(f, "  Thread timing (merge pass {}):", i + 1)?;
                     } else {
                         writeln!(f, "  Thread timing:")?;
@@ -141,37 +129,36 @@ impl std::fmt::Display for SortStats {
         }
 
         // Display per-merge statistics if available (from multi-level merge)
-        if let Some(ref per_merge) = self.per_merge_stats {
-            if per_merge.len() > 1 {
-                writeln!(f, "  Multi-level merge details:")?;
-                writeln!(f, "    Total merge passes: {}", per_merge.len())?;
+        if self.per_merge_stats.len() > 1 {
+            let multi_merge_stats = &self.per_merge_stats;
+            writeln!(f, "  Multi-level merge details:")?;
+            writeln!(f, "    Total merge passes: {}", multi_merge_stats.len())?;
 
-                for (i, merge_stat) in per_merge.iter().enumerate() {
-                    writeln!(f, "    Merge pass {}:", i + 1)?;
-                    writeln!(f, "      Time: {} ms", merge_stat.time_ms)?;
-                    writeln!(f, "      Output runs: {}", merge_stat.output_runs)?;
+            for (i, merge_stat) in multi_merge_stats.iter().enumerate() {
+                writeln!(f, "    Merge pass {}:", i + 1)?;
+                writeln!(f, "      Time: {} ms", merge_stat.time_ms)?;
+                writeln!(f, "      Output runs: {}", merge_stat.output_runs)?;
 
-                    if let Some(ref io) = merge_stat.io_stats {
-                        writeln!(
-                            f,
-                            "      I/O: read={:.2} MB, write={:.2} MB",
-                            io.read_bytes as f64 / 1_000_000.0,
-                            io.write_bytes as f64 / 1_000_000.0
-                        )?;
-                    }
+                if let Some(ref io) = merge_stat.io_stats {
+                    writeln!(
+                        f,
+                        "      I/O: read={:.2} MiB, write={:.2} MiB",
+                        io.read_bytes as f64 / (1024.0 * 1024.0),
+                        io.write_bytes as f64 / (1024.0 * 1024.0)
+                    )?;
+                }
 
-                    if merge_stat.merge_entry_num.len() > 1 {
-                        let total: u64 = merge_stat.merge_entry_num.iter().sum();
-                        let avg = total as f64 / merge_stat.merge_entry_num.len() as f64;
-                        let max = *merge_stat.merge_entry_num.iter().max().unwrap_or(&0);
-                        let imbalance = max as f64 / avg;
-                        writeln!(
-                            f,
-                            "      Partitions: {}, imbalance: {:.2}x",
-                            merge_stat.merge_entry_num.len(),
-                            imbalance
-                        )?;
-                    }
+                if merge_stat.merge_entry_num.len() > 1 {
+                    let total: u64 = merge_stat.merge_entry_num.iter().sum();
+                    let avg = total as f64 / merge_stat.merge_entry_num.len() as f64;
+                    let max = *merge_stat.merge_entry_num.iter().max().unwrap_or(&0);
+                    let imbalance = max as f64 / avg;
+                    writeln!(
+                        f,
+                        "      Partitions: {}, imbalance: {:.2}x",
+                        merge_stat.merge_entry_num.len(),
+                        imbalance
+                    )?;
                 }
             }
         }
@@ -212,13 +199,6 @@ pub struct MergeStats {
     pub per_thread_times_ms: Vec<u128>,
 }
 
-/// Statistics from multi-level merge with fine-grained per-merge tracking
-#[derive(Clone, Debug)]
-pub struct MultiMergeStats {
-    /// Statistics for each individual merge operation
-    pub per_merge_stats: Vec<MergeStats>,
-}
-
 // Input implementation
 pub struct InMemInput {
     pub data: Vec<(Vec<u8>, Vec<u8>)>,
@@ -252,7 +232,7 @@ impl SortInput for InMemInput {
 // Output implementation that materializes all data
 pub struct InMemOutput {
     pub data: Vec<(Vec<u8>, Vec<u8>)>,
-    pub stats: Option<SortStats>,
+    pub stats: SortStats,
 }
 
 impl SortOutput for InMemOutput {
@@ -261,21 +241,7 @@ impl SortOutput for InMemOutput {
     }
 
     fn stats(&self) -> SortStats {
-        self.stats.clone().unwrap_or_else(|| {
-            // Default stats for in-memory output
-            SortStats {
-                num_runs: 1,
-                runs_info: vec![RunInfo {
-                    entries: self.data.len(),
-                    file_size: 0, // No file for in-memory data
-                }],
-                run_generation_time_ms: None,
-                merge_time_ms: None,
-                run_generation_io_stats: None,
-                merge_io_stats: None,
-                per_merge_stats: None,
-            }
-        })
+        self.stats.clone()
     }
 }
 
@@ -323,10 +289,6 @@ pub mod order_preserving_encoding;
 pub mod ovc;
 pub mod rand;
 pub mod sort;
-pub mod sort_policy_imbalance_factor;
-pub mod sort_policy_run_length;
-pub mod sort_policy_sub;
-pub mod sort_policy_thread_count;
 pub mod sort_stats;
 pub mod sort_with_ovc;
 

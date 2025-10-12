@@ -1,4 +1,4 @@
-use crate::rand::{set_seed, small_thread_rng};
+use crate::rand::small_thread_rng;
 use rand::Rng;
 use std::cmp::Ordering;
 use std::fmt;
@@ -679,7 +679,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::rand::{SmallThreadRng, THREAD_RNG_KEY, small_thread_rng};
+    use crate::rand::{set_seed, small_thread_rng};
     use rand::Rng;
     use rand_distr::{Distribution, Exp, Normal};
 

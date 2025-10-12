@@ -15,7 +15,7 @@ fn test_dir() -> PathBuf {
 #[test]
 fn test_parallel_merge_with_multiple_threads() {
     // Create a scenario that guarantees multiple runs and parallel merge
-    let mut sorter = ExternalSorter::new_with_dir(4, 512, test_dir()); // 4 threads, small buffer
+    let mut sorter = ExternalSorter::new(4, 512, 4, 10000, test_dir());
 
     // Generate enough data to create many runs
     let mut data = Vec::new();
@@ -61,7 +61,7 @@ fn test_parallel_merge_with_multiple_threads() {
 #[test]
 fn test_parallel_merge_boundary_conditions() {
     // Test with exact partition boundaries
-    let mut sorter = ExternalSorter::new_with_dir(3, 256, test_dir()); // 3 threads
+    let mut sorter = ExternalSorter::new(3, 1024, 3, 10000, test_dir());
 
     let mut data = Vec::new();
 
@@ -114,7 +114,7 @@ fn test_parallel_merge_performance() {
 
     for size in sizes {
         // Single thread
-        let mut sorter1 = ExternalSorter::new_with_dir(1, 2048, test_dir());
+        let mut sorter1 = ExternalSorter::new(1, 2048, 1, 10000, test_dir());
         let mut data1 = Vec::new();
         for i in 0..size {
             let key = format!("{:08}", (i * 7919) % size);
@@ -126,7 +126,7 @@ fn test_parallel_merge_performance() {
         let time1 = start1.elapsed();
 
         // Multiple threads
-        let mut sorter4 = ExternalSorter::new_with_dir(4, 2048, test_dir());
+        let mut sorter4 = ExternalSorter::new(4, 2048, 4, 10000, test_dir());
         let mut data4 = Vec::new();
         for i in 0..size {
             let key = format!("{:08}", (i * 7919) % size);

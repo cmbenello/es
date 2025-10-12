@@ -1,23 +1,19 @@
 use clap::Parser;
 use es::benchmark::{
-    BenchmarkConfig, BenchmarkRunner, GenSortInputProvider, SimpleVerifier, print_benchmark_summary,
+    BenchmarkConfig, BenchmarkInputProvider, BenchmarkResult, BenchmarkRunner,
+    GenSortInputProvider, SimpleVerifier, print_benchmark_summary,
 };
-use std::fs::File;
+use es::diskio::constants::DEFAULT_BUFFER_SIZE;
 use std::path::PathBuf;
 
 #[derive(Parser)]
 struct SortArgs {
+    /// Configuration name for labeling the run
+    #[arg(short, default_value = "no_name")]
+    name: String,
     /// Input GenSort file path
     #[arg(short, long)]
     input: PathBuf,
-
-    /// Max number of threads
-    #[arg(short, long, default_value = "4")]
-    threads: usize,
-
-    /// Maximum total memory
-    #[arg(short, long, default_value = "1024")]
-    memory_mb: usize,
 
     /// Sketch size for quantile estimation (KLL)
     #[arg(long, default_value = "200")]
@@ -51,28 +47,61 @@ struct SortArgs {
     #[arg(long, default_value = "0")]
     warmup_runs: usize,
 
-    #[arg(long, default_value = "1.0")]
-    boundary_imbalance_factor: f64,
+    /// Threads for run generation
+    #[arg(long, required_unless_present = "estimate_size")]
+    run_gen_threads: Option<usize>,
 
-    /// Experiment type: "run_length" or "thread_count"
-    #[arg(long, default_value = "run_length")]
-    experiment_type: String,
+    /// Threads for merge phase
+    #[arg(long, required_unless_present = "estimate_size")]
+    merge_threads: Option<usize>,
+
+    /// Run size for run generation (MB)
+    #[arg(long, required_unless_present = "estimate_size")]
+    run_size_mb: Option<f64>,
+
+    /// Merge fan-in (per-thread)
+    #[arg(long, required_unless_present = "estimate_size")]
+    merge_fanin: Option<usize>,
+
+    /// Merge imbalance factor (>= 1.0)
+    #[arg(long, default_value = "1.0")]
+    imbalance_factor: f64,
+
+    /// Only estimate dataset size (MB) and exit
+    #[arg(long, default_value = "false")]
+    estimate_size: bool,
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args = SortArgs::parse();
 
-    // Validate experiment type
-    let experiment_type = args.experiment_type.to_lowercase();
-    if experiment_type != "run_length" && experiment_type != "thread_count" {
-        eprintln!("Error: experiment_type must be either 'run_length' or 'thread_count'");
-        std::process::exit(1);
+    // Create input provider for GenSort files
+    let input_provider = GenSortInputProvider { path: args.input };
+
+    // If only estimating size, compute and print, then exit
+    if args.estimate_size {
+        let estimated_mb = input_provider.estimate_data_size_mb()?;
+        println!("Estimated data size: {:.2} MB", estimated_mb);
+        return Ok(());
     }
+
+    // Unwrap required args (clap enforces presence when not estimating)
+    let run_gen_threads = args
+        .run_gen_threads
+        .expect("--run-gen-threads required unless --estimate-size");
+    let merge_threads = args
+        .merge_threads
+        .expect("--merge-threads required unless --estimate-size");
+    let run_size_mb = args
+        .run_size_mb
+        .expect("--run-size-mb required unless --estimate-size");
+    let merge_fanin = args
+        .merge_fanin
+        .expect("--merge-fanin required unless --estimate-size");
 
     // Create benchmark configuration
     let config = BenchmarkConfig {
-        threads: args.threads,
-        memory_mb: args.memory_mb,
+        config_name: args.name,
         warmup_runs: args.warmup_runs,
         benchmark_runs: args.benchmark_runs,
         verify: args.verify,
@@ -81,12 +110,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         sketch_size: args.sketch_size,
         sketch_sampling_interval: args.sketch_sampling_interval,
         run_indexing_interval: args.run_indexing_interval,
-        boundary_imbalance_factor: args.boundary_imbalance_factor,
-        experiment_type,
+        run_gen_threads,
+        run_size_mb,
+        run_gen_memory_mb: run_size_mb * run_gen_threads as f64,
+        merge_threads,
+        merge_fanin,
+        merge_memory_mb: (merge_fanin as f64)
+            * (merge_threads as f64)
+            * (DEFAULT_BUFFER_SIZE as f64 / 1024.0 / 1024.0),
+        imbalance_factor: args.imbalance_factor,
     };
 
-    // Create input provider for GenSort files
-    let input_provider = Box::new(GenSortInputProvider { path: args.input });
+    let input_provider = Box::new(input_provider);
 
     // Create benchmark runner
     let mut runner = BenchmarkRunner::new(config, input_provider);
@@ -97,11 +132,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         runner.set_verifier(Box::new(verifier));
     }
 
-    // Run all benchmarks
-    let results = runner.run_benchmarks()?;
+    // Run single benchmark configuration
+    let result: BenchmarkResult = runner.run_configuration()?;
 
-    // Print comprehensive summary (identical to original output)
-    print_benchmark_summary(&results);
+    // Print comprehensive summary
+    print_benchmark_summary(&result);
 
     Ok(())
 }

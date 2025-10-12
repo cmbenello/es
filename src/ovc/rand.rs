@@ -7,6 +7,7 @@ thread_local! {
     pub static THREAD_RNG_KEY: RefCell<SmallRng> = RefCell::new(SmallRng::from_os_rng());
 }
 
+#[allow(dead_code)]
 pub fn set_seed(seed: u64) {
     THREAD_RNG_KEY.with(|rng_cell| {
         *rng_cell.borrow_mut() = SmallRng::seed_from_u64(seed);
@@ -14,6 +15,7 @@ pub fn set_seed(seed: u64) {
 }
 
 /// A handle to the thread-local `SmallRng`—similar to `rand::ThreadRng`.
+#[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub struct SmallThreadRng;
 
@@ -31,6 +33,7 @@ impl RngCore for SmallThreadRng {
     }
 }
 
+#[allow(dead_code)]
 pub fn small_thread_rng() -> SmallThreadRng {
     SmallThreadRng
 }

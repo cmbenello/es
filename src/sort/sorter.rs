@@ -1,11 +1,9 @@
-use std::io::Write;
 use std::path::Path;
 use std::sync::Arc;
 use std::thread;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use crate::diskio::aligned_writer::AlignedWriter;
-use crate::diskio::constants::DEFAULT_BUFFER_SIZE;
 use crate::diskio::file::SharedFd;
 use crate::diskio::io_stats::IoStatsTracker;
 use crate::kll::Sketch;
@@ -13,8 +11,7 @@ use crate::sort::merge::MergeIterator;
 use crate::sort::run::RunImpl;
 use crate::sort::sort_buffer::SortBuffer;
 use crate::{
-    MergeStats, MultiMergeStats, RunGenerationStats, RunInfo, SortInput, SortOutput, SortStats,
-    Sorter, TempDirInfo,
+    MergeStats, RunGenerationStats, RunInfo, SortInput, SortOutput, SortStats, Sorter, TempDirInfo,
 };
 
 // Abstraction for inputs to the merge function
@@ -101,6 +98,13 @@ impl MergeableRun {
         }
     }
 
+    pub fn total_bytes(&self) -> usize {
+        match self {
+            MergeableRun::Single(run) => run.total_bytes(),
+            MergeableRun::RangePartitioned(runs) => runs.iter().map(|r| r.total_bytes()).sum(),
+        }
+    }
+
     /// Convert MergeableRun into Vec<RunImpl>
     /// - Single(run) becomes vec![run]
     /// - RangePartitioned(runs) returns runs directly
@@ -143,24 +147,13 @@ impl Iterator for ChainedRangeIterator {
 
 // Output implementation that chains run iterators without materializing
 pub struct RunsOutput {
-    pub runs: Vec<RunImpl>,
+    pub run: MergeableRun,
     pub stats: SortStats,
 }
 
 impl SortOutput for RunsOutput {
     fn iter(&self) -> Box<dyn Iterator<Item = (Vec<u8>, Vec<u8>)>> {
-        // Create a chained iterator from all runs
-        let mut iterators: Vec<Box<dyn Iterator<Item = (Vec<u8>, Vec<u8>)>>> = Vec::new();
-
-        for run in &self.runs {
-            iterators.push(run.scan_range(&[], &[]));
-        }
-
-        // Chain all iterators together
-        Box::new(ChainedIterator {
-            iterators,
-            current: 0,
-        })
+        self.run.scan_range_with_io_tracker(&[], &[], None)
     }
 
     fn stats(&self) -> SortStats {
@@ -168,60 +161,27 @@ impl SortOutput for RunsOutput {
     }
 }
 
-// Helper iterator that chains multiple iterators
-struct ChainedIterator {
-    iterators: Vec<Box<dyn Iterator<Item = (Vec<u8>, Vec<u8>)>>>,
-    current: usize,
-}
-
-impl Iterator for ChainedIterator {
-    type Item = (Vec<u8>, Vec<u8>);
-
-    fn next(&mut self) -> Option<Self::Item> {
-        while self.current < self.iterators.len() {
-            if let Some(item) = self.iterators[self.current].next() {
-                return Some(item);
-            }
-            self.current += 1;
-        }
-        None
-    }
-}
-
 // External sorter following sorter.rs pattern
 pub struct ExternalSorter {
     run_gen_threads: usize,
+    run_size: usize,
     merge_threads: usize,
-    max_memory: usize,
+    merge_fanin: usize,
     sketch_size: usize,
     sketch_sampling_interval: usize,
     run_indexing_interval: usize,
+    imbalance_factor: f64,
     temp_dir_info: Arc<TempDirInfo>,
-    boundary_imbalance_factor: f64,
 }
 
 impl ExternalSorter {
-    /// Create a new ExternalSorter with temporary files in the current directory
-    pub fn new(num_threads: usize, max_memory: usize) -> Self {
-        Self::new_with_threads_and_dir(num_threads, num_threads, max_memory, ".")
-    }
-
-    /// Create a new ExternalSorter with temporary files in the specified directory
-    /// Uses same thread count for both run generation and merge phases
-    pub fn new_with_dir(
-        num_threads: usize,
-        max_memory: usize,
-        base_dir: impl AsRef<std::path::Path>,
-    ) -> Self {
-        Self::new_with_threads_and_dir(num_threads, num_threads, max_memory, base_dir)
-    }
-
     /// Create a new ExternalSorter with separate thread counts for run generation and merge
     /// The temporary directory will be automatically cleaned up when the sorter is dropped
-    pub fn new_with_threads_and_dir(
+    pub fn new(
         run_gen_threads: usize,
+        run_size: usize,
         merge_threads: usize,
-        max_memory: usize,
+        merge_fanin: usize,
         base_dir: impl AsRef<std::path::Path>,
     ) -> Self {
         // Use a unique temp directory for each instance to avoid conflicts
@@ -239,8 +199,9 @@ impl ExternalSorter {
 
         Self {
             run_gen_threads,
+            run_size,
             merge_threads,
-            max_memory,
+            merge_fanin,
             sketch_size: 200,
             sketch_sampling_interval: 1000,
             run_indexing_interval: 1000,
@@ -248,19 +209,19 @@ impl ExternalSorter {
                 path: temp_dir,
                 should_delete: true,
             }),
-            boundary_imbalance_factor: 1.0,
+            imbalance_factor: 1.0,
         }
     }
 
     pub fn run_generation(
         sort_input: Box<dyn SortInput>,
         num_threads: usize,
-        per_thread_mem: usize,
+        run_size: usize,
         sketch_size: usize,
         sketch_sampling_interval: usize,
         run_indexing_interval: usize,
         dir: impl AsRef<Path>,
-    ) -> Result<(Vec<RunImpl>, Sketch<Vec<u8>>, RunGenerationStats), String> {
+    ) -> Result<(Vec<MergeableRun>, Sketch<Vec<u8>>, RunGenerationStats), String> {
         // Start timing for run generation
         let run_generation_start = Instant::now();
 
@@ -298,7 +259,7 @@ impl ExternalSorter {
 
             let handle = thread::spawn(move || {
                 let mut local_runs = Vec::new();
-                let mut sort_buffer = SortBuffer::new(per_thread_mem);
+                let mut sort_buffer = SortBuffer::new(run_size);
                 let mut sketch = Sketch::new(sketch_size);
 
                 let run_path = dir.join(format!("intermediate_{}.dat", thread_id));
@@ -332,7 +293,7 @@ impl ExternalSorter {
                         run_writer = Some(output_run.finalize_write());
 
                         // Create a read-only run with proper metadata
-                        local_runs.push(output_run);
+                        local_runs.push(MergeableRun::Single(output_run));
 
                         sort_buffer.reset();
                         if !sort_buffer.append(key, value) {
@@ -363,7 +324,7 @@ impl ExternalSorter {
                     run_writer = Some(output_run.finalize_write());
 
                     // Create a read-only run with proper metadata
-                    local_runs.push(output_run);
+                    local_runs.push(MergeableRun::Single(output_run));
                 }
 
                 drop(run_writer); // Ensure the writer is closed
@@ -417,25 +378,16 @@ impl ExternalSorter {
         ))
     }
 
-    fn max_fanin(num_threads: usize, available_memory: usize) -> usize {
-        // F * num_threads * PAGE_SIZE <= available_memory
-        // F = floor(available_memory / (num_threads * PAGE_SIZE))
-        ((available_memory as f64
-            / (num_threads as f64 * DEFAULT_BUFFER_SIZE as f64 / 1024.0 / 1024.0))
-            as usize)
-            .max(2) // Minimum fan-in of 2
-    }
-
     /// Performs multi-level merge if needed based on memory constraints
     /// Merges runs level by level until a single MergeableRun is produced
-    pub fn multi_level_merge(
+    pub fn multi_merge(
         mut runs: Vec<MergeableRun>,
         fanin: usize,
         num_threads: usize,
         sketch: &Sketch<Vec<u8>>,
+        imbalance_factor: f64,
         dir: impl AsRef<Path>,
-        imbalance_factor: Option<f64>,
-    ) -> Result<(MergeableRun, MultiMergeStats), String> {
+    ) -> Result<(MergeableRun, Vec<MergeStats>), String> {
         let dir = dir.as_ref();
         let mut per_merge_stats = Vec::new();
 
@@ -443,10 +395,9 @@ impl ExternalSorter {
             // Can merge all runs in one pass
             println!("Merging all {} runs in single pass", runs.len());
             let (merged_run, stats) =
-                Self::merge(runs, num_threads, sketch, dir, imbalance_factor)?;
+                Self::merge(runs, num_threads, sketch, imbalance_factor, dir)?;
             per_merge_stats.push(stats);
-            let multi_stats = MultiMergeStats { per_merge_stats };
-            return Ok((merged_run, multi_stats));
+            return Ok((merged_run, per_merge_stats));
         }
 
         // Multiple merge operations using optimal merge pattern (Knuth Vol 3, pp. 365-366):
@@ -480,7 +431,7 @@ impl ExternalSorter {
             let batch: Vec<MergeableRun> = runs.drain(..batch_size).collect();
             let total_entries: usize = batch.iter().map(|r| r.total_entries()).sum();
             let (merged_run, stats) =
-                Self::merge(batch, num_threads, sketch, dir, imbalance_factor)?;
+                Self::merge(batch, num_threads, sketch, imbalance_factor, dir)?;
             println!(
                 "Merge {}/{}: merging {} shortest runs ({} total entries)",
                 merge_count, expected_merges, batch_size, total_entries
@@ -495,8 +446,7 @@ impl ExternalSorter {
         }
 
         let final_run = runs.into_iter().next().unwrap();
-        let multi_stats = MultiMergeStats { per_merge_stats };
-        Ok((final_run, multi_stats))
+        Ok((final_run, per_merge_stats))
     }
 
     /// Single-level merge (used internally by multi_level_merge)
@@ -504,10 +454,9 @@ impl ExternalSorter {
         output_runs: Vec<MergeableRun>,
         num_threads: usize,
         sketch: &Sketch<Vec<u8>>,
+        imbalance_factor: f64,
         dir: impl AsRef<Path>,
-        imbalance_factor: Option<f64>,
     ) -> Result<(MergeableRun, MergeStats), String> {
-        let imbalance_factor = imbalance_factor.unwrap_or(1.0);
         // If no runs or single run, return early
         if output_runs.is_empty() {
             let merge_stats = MergeStats {
@@ -713,54 +662,26 @@ impl Sorter for ExternalSorter {
         let (runs, sketch, run_gen_stats) = ExternalSorter::run_generation(
             sort_input,
             self.run_gen_threads,
-            self.max_memory / self.run_gen_threads,
+            self.run_size,
             self.sketch_size,
             self.sketch_sampling_interval,
             self.run_indexing_interval,
             self.temp_dir_info.as_ref(),
         )?;
 
-        // Merge phase - convert runs to MergeableRun::Single
-        let mergeable_runs: Vec<MergeableRun> = runs
-            .into_iter()
-            .map(|run| MergeableRun::Single(run))
-            .collect();
-
         // Use multi-level merge with memory-aware policy
-        let fanin = ExternalSorter::max_fanin(self.merge_threads, self.max_memory);
-        let (merged_run, merge_stats) = ExternalSorter::multi_level_merge(
-            mergeable_runs,
-            fanin,
+        let (merged_run, merge_stats) = ExternalSorter::multi_merge(
+            runs,
+            self.merge_fanin,
             self.merge_threads,
             &sketch,
+            self.imbalance_factor,
             self.temp_dir_info.as_ref(),
-            Some(self.boundary_imbalance_factor),
         )?;
-
-        // Convert MergeableRun back to Vec<RunImpl> for output
-        let final_runs = merged_run.into_runs();
-
-        // Combine stats
-        let total_merge_time: u128 = merge_stats.per_merge_stats.iter().map(|s| s.time_ms).sum();
-        let last_merge_io = merge_stats
-            .per_merge_stats
-            .last()
-            .and_then(|s| s.io_stats.clone());
-
-        let sort_stats: SortStats = SortStats {
-            num_runs: run_gen_stats.num_runs,
-            runs_info: run_gen_stats.runs_info,
-            run_generation_time_ms: Some(run_gen_stats.time_ms),
-            merge_time_ms: Some(total_merge_time),
-            run_generation_io_stats: run_gen_stats.io_stats,
-            merge_io_stats: last_merge_io,
-            per_merge_stats: Some(merge_stats.per_merge_stats),
-        };
-
         // Create output
         Ok(Box::new(RunsOutput {
-            runs: final_runs,
-            stats: sort_stats,
+            run: merged_run,
+            stats: SortStats::new(run_gen_stats, merge_stats),
         }))
     }
 }
@@ -867,16 +788,16 @@ mod tests {
         use rand::seq::SliceRandom;
         use tempfile::TempDir;
 
-        // Test parameters
+        // Test parameters (mirror non-OVC test)
         let num_records = 100000;
         let num_threads_run_gen = 2;
-        let page_size = 512;
-        let run_max_size = 200;
-        let run_page_capacity = 1000;
-        let fanout_limit = 1000;
+        let run_size = 512; // bytes
+        let sketch_size = 200;
+        let sketch_sampling_interval = 1000;
+        let run_indexing_interval = 1000;
         let fanin = 100;
         let num_threads = 4;
-        let imbalance_factor = Some(1.0);
+        let imbalance_factor = 1.0;
 
         let temp_dir = TempDir::new().unwrap();
         let mut data: Vec<_> = (0..num_records)
@@ -893,32 +814,25 @@ mod tests {
         let (runs, sketch, _run_gen_stats) = ExternalSorter::run_generation(
             Box::new(InMemInput { data }),
             num_threads_run_gen,
-            page_size,
-            run_max_size,
-            run_page_capacity,
-            fanout_limit,
+            run_size,
+            sketch_size,
+            sketch_sampling_interval,
+            run_indexing_interval,
             temp_dir.path(),
         )
         .unwrap();
 
-        let mergeable_runs: Vec<_> = runs
-            .into_iter()
-            .map(|run| MergeableRun::Single(run))
-            .collect();
-        let (merged_run, multi_merge_stats) = ExternalSorter::multi_level_merge(
-            mergeable_runs,
+        let (merged_run, per_merge_stats) = ExternalSorter::multi_merge(
+            runs,
             fanin,
             num_threads,
             &sketch,
-            temp_dir.path(),
             imbalance_factor,
+            temp_dir.path(),
         )
         .unwrap();
 
-        println!(
-            "Multi-level merge: {} passes",
-            multi_merge_stats.per_merge_stats.len()
-        );
+        println!("Multi-level merge: {} passes", per_merge_stats.len());
         let final_runs = merged_run.into_runs();
         assert_eq!(
             final_runs.len(),
@@ -950,7 +864,7 @@ mod tests {
             num_records, count
         );
 
-        for (i, stat) in multi_merge_stats.per_merge_stats.iter().enumerate() {
+        for (i, stat) in per_merge_stats.iter().enumerate() {
             assert!(
                 stat.time_ms > 0 && stat.output_runs > 0 && stat.io_stats.is_some(),
                 "Merge pass {} missing required stats",
@@ -958,51 +872,10 @@ mod tests {
             );
         }
         assert_eq!(
-            multi_merge_stats
-                .per_merge_stats
-                .last()
-                .unwrap()
-                .output_runs,
+            per_merge_stats.last().unwrap().output_runs,
             num_threads,
             "Final merge should produce exactly {} runs",
             num_threads
         );
-    }
-
-    #[test]
-    fn test_max_fanin() {
-        // DEFAULT_BUFFER_SIZE = 64KB = 0.0625 MB
-        // F = floor(memory_mb / (threads * 0.0625))
-
-        // Basic calculations
-        assert_eq!(ExternalSorter::max_fanin(1, 1), 16);
-        assert_eq!(ExternalSorter::max_fanin(4, 1), 4);
-        assert_eq!(ExternalSorter::max_fanin(4, 16), 64);
-
-        // Minimum fanin enforcement
-        assert_eq!(ExternalSorter::max_fanin(1, 0), 2);
-        assert_eq!(ExternalSorter::max_fanin(10, 0), 2);
-
-        // Large memory scenarios
-        assert_eq!(ExternalSorter::max_fanin(1, 1024), 16384);
-        assert_eq!(ExternalSorter::max_fanin(16, 1024), 1024);
-
-        // Thread scaling: doubling threads halves fanin (fixed memory)
-        let fanin_1 = ExternalSorter::max_fanin(1, 256);
-        let fanin_2 = ExternalSorter::max_fanin(2, 256);
-        let fanin_4 = ExternalSorter::max_fanin(4, 256);
-        assert!(fanin_1 > fanin_2 && fanin_2 > fanin_4);
-        assert!((fanin_1 as f64 / fanin_2 as f64 - 2.0).abs() < 0.1);
-
-        // Memory scaling: doubling memory doubles fanin (fixed threads)
-        let fanin_64 = ExternalSorter::max_fanin(4, 64);
-        let fanin_128 = ExternalSorter::max_fanin(4, 128);
-        assert!(fanin_128 > fanin_64);
-        assert!((fanin_128 as f64 / fanin_64 as f64 - 2.0).abs() < 0.1);
-
-        // Realistic scenarios
-        assert!(ExternalSorter::max_fanin(4, 256) >= 256);
-        assert!(ExternalSorter::max_fanin(16, 2048) >= 512);
-        assert!(ExternalSorter::max_fanin(32, 128) >= 2);
     }
 }

@@ -1,6 +1,3 @@
-use std::cmp::Ordering;
-use std::collections::BinaryHeap;
-
 use crate::ovc::entry::SentinelValue;
 use crate::ovc::offset_value_coding_u64::OVCU64;
 use crate::ovc::offset_value_coding_u64_kv::OVCKeyValuePair;

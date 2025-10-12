@@ -185,7 +185,7 @@ fn test_gensort_sort_integration() {
 
     // Sort using ExternalSorter
     let input = GenSortInputDirect::new(&test_file).unwrap();
-    let mut sorter = ExternalSorter::new(2, 1024 * 1024);
+    let mut sorter = ExternalSorter::new(2, 512, 2, 10000, temp_dir.path());
     let output = sorter.sort(Box::new(input)).unwrap();
 
     // Verify sorted output
@@ -227,7 +227,7 @@ fn test_gensort_large_sort() {
 
     // Sort with multiple threads
     let input = GenSortInputDirect::new(&test_file).unwrap();
-    let mut sorter = ExternalSorter::new_with_dir(2, 1024 * 1024, temp_dir.path());
+    let mut sorter = ExternalSorter::new(4, 1024 * 1024, 4, 10000, temp_dir.path());
     let output = sorter.sort(Box::new(input)).unwrap();
 
     // Verify sorted output
@@ -258,11 +258,5 @@ fn test_gensort_large_sort() {
     // Print statistics
     let stats = output.stats();
     println!("Sort statistics:");
-    println!("  Number of runs: {}", stats.num_runs);
-    if let Some(run_gen_time) = stats.run_generation_time_ms {
-        println!("  Run generation time: {} ms", run_gen_time);
-    }
-    if let Some(merge_time) = stats.merge_time_ms {
-        println!("  Merge time: {} ms", merge_time);
-    }
+    println!("{}", stats);
 }

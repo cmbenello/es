@@ -17,7 +17,7 @@ fn test_external_sorter_cleanup() {
 
     // Run a sort that creates temp files
     {
-        let mut sorter = ExternalSorter::new_with_dir(2, 1024, &base_dir);
+        let mut sorter = ExternalSorter::new(2, 512, 2, 10000, &base_dir);
 
         let mut data = Vec::new();
         for i in 0..1000 {

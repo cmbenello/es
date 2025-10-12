@@ -14,6 +14,7 @@ struct TolEntry<T: OVCTrait> {
     run_id: usize,
 }
 
+#[allow(dead_code)]
 impl<T: OVCTrait> TolEntry<T> {
     pub fn new(value: T, run_id: usize) -> Self {
         Self { value, run_id }

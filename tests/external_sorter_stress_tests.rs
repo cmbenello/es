@@ -20,7 +20,7 @@ fn test_dir() -> PathBuf {
 #[ignore] // Run with: cargo test --ignored test_very_large_dataset
 fn test_very_large_dataset() {
     // Test with 1M entries
-    let mut sorter = ExternalSorter::new_with_dir(8, 16 * 1024 * 1024, test_dir()); // 16MB buffer
+    let mut sorter = ExternalSorter::new(8, 16 * 1024 * 1024, 8, 10000, test_dir()); // 16MB buffer
 
     let mut data = Vec::new();
     for i in 0..1_000_000 {
@@ -43,7 +43,7 @@ fn test_very_large_dataset() {
 
 #[test]
 fn test_pathological_key_distribution() {
-    let mut sorter = ExternalSorter::new_with_dir(4, 1024, test_dir());
+    let mut sorter = ExternalSorter::new(4, 1024 * 1024, 4, 10000, test_dir());
 
     let mut data = Vec::new();
 
@@ -84,7 +84,7 @@ fn test_pathological_key_distribution() {
 #[test]
 fn test_memory_pressure() {
     // Test behavior under memory pressure with large values
-    let mut sorter = ExternalSorter::new_with_dir(2, 30_000, test_dir()); // Buffer large enough for one entry
+    let mut sorter = ExternalSorter::new(2, 15000, 2, 10000, test_dir()); // 15KB buffer
 
     let mut data = Vec::new();
     for i in 0..100 {
@@ -111,7 +111,8 @@ fn test_memory_pressure() {
 fn test_extreme_thread_counts() {
     // Test with various thread counts including edge cases
     for num_threads in [1, 16, 32, 64] {
-        let mut sorter = ExternalSorter::new_with_dir(num_threads, 1024 * 1024, test_dir());
+        let mut sorter =
+            ExternalSorter::new(num_threads, 1024 * 1024, num_threads, 10000, test_dir());
 
         let mut data = Vec::new();
         let entries = 100000;
@@ -139,7 +140,7 @@ fn test_max_memory_edge_cases() {
     let max_memories = [1024, 4096, 8192];
 
     for &max_memory in &max_memories {
-        let mut sorter = ExternalSorter::new_with_dir(2, max_memory, test_dir());
+        let mut sorter = ExternalSorter::new(2, max_memory / 2, 2, 10000, test_dir());
 
         let mut data = Vec::new();
         for i in 0..500 {
@@ -170,7 +171,7 @@ fn test_concurrent_massive_sorts() {
     let handles: Vec<_> = (0..num_concurrent)
         .map(|thread_id| {
             thread::spawn(move || {
-                let mut sorter = ExternalSorter::new_with_dir(2, 1024 * 1024, test_dir());
+                let mut sorter = ExternalSorter::new(4, 1024 * 1024, 4, 10000, test_dir());
 
                 let mut data = Vec::new();
                 for i in 0..entries_per_sort {
@@ -207,7 +208,7 @@ fn test_concurrent_massive_sorts() {
 #[test]
 fn test_all_identical_keys() {
     // Test when all keys are identical
-    let mut sorter = ExternalSorter::new_with_dir(4, 512, test_dir());
+    let mut sorter = ExternalSorter::new(2, 512, 2, 10000, test_dir());
 
     let mut data = Vec::new();
     for i in 0..10_000 {
@@ -229,7 +230,7 @@ fn test_all_identical_keys() {
 #[test]
 fn test_alternating_small_large() {
     // Alternate between very small and very large entries
-    let mut sorter = ExternalSorter::new_with_dir(2, 15000, test_dir()); // Buffer large enough for largest entry
+    let mut sorter = ExternalSorter::new(2, 2048, 2, 10000, test_dir());
 
     let mut data = Vec::new();
     for i in 0..1000 {
@@ -267,7 +268,7 @@ fn test_random_binary_keys() {
     use rand::Rng;
     let mut rng = rand::rng();
 
-    let mut sorter = ExternalSorter::new_with_dir(4, 1024, test_dir());
+    let mut sorter = ExternalSorter::new(4, 1024 * 1024, 4, 10000, test_dir());
 
     let mut data = Vec::new();
     for _ in 0..5000 {
@@ -296,7 +297,7 @@ fn test_random_binary_keys() {
 #[test]
 fn test_progressive_key_lengths() {
     // Keys that progressively get longer
-    let mut sorter = ExternalSorter::new_with_dir(2, 2048, test_dir()); // Larger buffer
+    let mut sorter = ExternalSorter::new(2, 512, 2, 10000, test_dir());
 
     let mut data = Vec::new();
     for i in 0..100 {
@@ -326,7 +327,7 @@ fn test_progressive_key_lengths() {
 #[test]
 fn test_interleaved_runs() {
     // Force creation of many runs with interleaved data
-    let mut sorter = ExternalSorter::new_with_dir(1, 256, test_dir()); // Very small buffer
+    let mut sorter = ExternalSorter::new(2, 512, 2, 10000, test_dir());
 
     let mut data = Vec::new();
     // Create data that will form many runs
@@ -360,7 +361,7 @@ fn test_stress_file_handles() {
             let counter = Arc::clone(&counter);
             thread::spawn(move || {
                 let id = counter.fetch_add(1, Ordering::SeqCst);
-                let mut sorter = ExternalSorter::new_with_dir(2, 512, test_dir());
+                let mut sorter = ExternalSorter::new(4, 1024 * 1024, 4, 10000, test_dir());
 
                 let mut data = Vec::new();
                 for i in 0..1000 {
@@ -386,7 +387,7 @@ fn test_stress_file_handles() {
 #[test]
 fn test_max_value_sizes() {
     // Test with very large values
-    let mut sorter = ExternalSorter::new_with_dir(1, 2_000_000, test_dir()); // Buffer large enough for one 1MB entry
+    let mut sorter = ExternalSorter::new(2, 10 * 1024 * 1024, 2, 10000, test_dir()); // 10MB buffer
 
     let mut data = Vec::new();
     for i in 0..10 {

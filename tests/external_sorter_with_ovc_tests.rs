@@ -15,7 +15,7 @@ use es::{ExternalSorterWithOVC, InMemInput, Sorter};
 
 #[test]
 fn test_basic_sort_with_ovc() {
-    let mut sorter = ExternalSorterWithOVC::new_with_dir(2, 1024, test_dir());
+    let mut sorter = ExternalSorterWithOVC::new(2, 512, 2, 10000, test_dir());
 
     let data = vec![
         (b"c".to_vec(), b"3".to_vec()),
@@ -39,7 +39,7 @@ fn test_basic_sort_with_ovc() {
 #[test]
 fn test_external_sort_with_ovc() {
     // Use small buffer to force external sorting with multiple runs
-    let mut sorter = ExternalSorterWithOVC::new_with_dir(2, 512, test_dir());
+    let mut sorter = ExternalSorterWithOVC::new(2, 512, 2, 10000, test_dir());
 
     let mut data = Vec::new();
     for i in (0..100).rev() {
@@ -65,7 +65,7 @@ fn test_external_sort_with_ovc() {
 
 #[test]
 fn test_empty_input_with_ovc() {
-    let mut sorter = ExternalSorterWithOVC::new_with_dir(2, 1024, test_dir());
+    let mut sorter = ExternalSorterWithOVC::new(2, 512, 2, 10000, test_dir());
 
     let data = vec![];
     let input = InMemInput { data };
@@ -77,7 +77,7 @@ fn test_empty_input_with_ovc() {
 
 #[test]
 fn test_single_element_with_ovc() {
-    let mut sorter = ExternalSorterWithOVC::new_with_dir(2, 1024, test_dir());
+    let mut sorter = ExternalSorterWithOVC::new(2, 512, 2, 10000, test_dir());
 
     let data = vec![(b"only".to_vec(), b"one".to_vec())];
     let input = InMemInput { data };
@@ -91,7 +91,7 @@ fn test_single_element_with_ovc() {
 
 #[test]
 fn test_duplicate_keys_with_ovc() {
-    let mut sorter = ExternalSorterWithOVC::new_with_dir(2, 1024, test_dir());
+    let mut sorter = ExternalSorterWithOVC::new(2, 512, 2, 10000, test_dir());
 
     let data = vec![
         (b"b".to_vec(), b"2".to_vec()),
@@ -122,7 +122,7 @@ fn test_duplicate_keys_with_ovc() {
 
 #[test]
 fn test_large_values_with_ovc() {
-    let mut sorter = ExternalSorterWithOVC::new_with_dir(2, 2048, test_dir());
+    let mut sorter = ExternalSorterWithOVC::new(2, 512, 2, 10000, test_dir());
 
     // Create large values to test buffer handling
     let large_value = vec![b'x'; 500];
@@ -149,7 +149,7 @@ fn test_large_values_with_ovc() {
 #[test]
 fn test_parallel_sorting_with_ovc() {
     // Test with different thread configurations
-    let mut sorter = ExternalSorterWithOVC::new_with_threads_and_dir(4, 4, 1024, test_dir());
+    let mut sorter = ExternalSorterWithOVC::new(4, 1024, 4, 10000, test_dir());
 
     let mut data = Vec::new();
     for i in (0..1000).rev() {
@@ -174,10 +174,10 @@ fn test_parallel_sorting_with_ovc() {
 #[test]
 fn test_sort_stats_with_ovc() {
     // Small buffer to force multiple runs
-    let mut sorter = ExternalSorterWithOVC::new_with_dir(2, 256, test_dir());
+    let mut sorter = ExternalSorterWithOVC::new(2, 512, 2, 10000, test_dir());
 
     let mut data = Vec::new();
-    for i in (0..50).rev() {
+    for i in (0..5000).rev() {
         let key = format!("key_{:02}", i);
         let value = format!("value_{}", i);
         data.push((key.into_bytes(), value.into_bytes()));
@@ -190,18 +190,20 @@ fn test_sort_stats_with_ovc() {
     let stats = output.stats();
 
     // Should have created multiple runs with small buffer
-    assert!(stats.num_runs > 0);
-    assert!(stats.run_generation_time_ms.is_some());
+    let num_runs = stats.run_gen_stats.num_runs;
+    assert!(num_runs > 0);
+    assert!(stats.run_gen_stats.time_ms > 0);
 
-    // If there were multiple runs, merge time should be recorded
-    if stats.num_runs > 1 {
-        assert!(stats.merge_time_ms.is_some());
+    // If there were multiple runs, there should be non-zero merge time recorded across merges
+    if num_runs > 1 {
+        let total_merge_time: u128 = stats.per_merge_stats.iter().map(|m| m.time_ms).sum();
+        assert!(total_merge_time > 0);
     }
 }
 
 #[test]
 fn test_binary_keys_with_ovc() {
-    let mut sorter = ExternalSorterWithOVC::new_with_dir(2, 1024, test_dir());
+    let mut sorter = ExternalSorterWithOVC::new(2, 512, 2, 10000, test_dir());
 
     // Test with binary (non-UTF8) keys
     let data = vec![
@@ -233,7 +235,7 @@ fn test_binary_keys_with_ovc() {
 
 #[test]
 fn test_variable_length_keys_with_ovc() {
-    let mut sorter = ExternalSorterWithOVC::new_with_dir(2, 1024, test_dir());
+    let mut sorter = ExternalSorterWithOVC::new(2, 512, 2, 10000, test_dir());
 
     let data = vec![
         (b"zzz".to_vec(), b"3_chars".to_vec()),

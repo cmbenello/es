@@ -36,6 +36,9 @@ impl SortBufferOVC {
         let entry_size = Self::entry_size(&key, &value);
 
         if self.memory_used + entry_size > self.memory_limit {
+            println!("entry_size: {}", entry_size);
+            println!("memory_used: {}", self.memory_used);
+            println!("memory_limit: {}", self.memory_limit);
             return false;
         }
 

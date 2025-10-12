@@ -1,8 +1,9 @@
 use clap::Parser;
 use es::benchmark::{
-    BenchmarkConfig, BenchmarkRunner, CsvInputProvider, DetailedCsvVerifier,
-    print_benchmark_summary,
+    BenchmarkConfig, BenchmarkInputProvider, BenchmarkResult, BenchmarkRunner,
+    LineitemCsvInputProvider, LineitemCsvVerifier, print_benchmark_summary,
 };
+use es::diskio::constants::DEFAULT_BUFFER_SIZE;
 use std::path::PathBuf;
 
 // TPC-H lineitem column cardinality reference table
@@ -45,11 +46,34 @@ use std::path::PathBuf;
 
 #[derive(Parser)]
 #[command(name = "lineitem_benchmark")]
-#[command(about = "TPC-H Lineitem CSV Sort Benchmark with policy-based optimization")]
+#[command(about = "TPC-H Lineitem CSV Sort Benchmark")]
 struct Args {
+    #[arg(short, default_value = "no_name")]
+    name: String,
+
     /// Input CSV file path
     #[arg(short, long)]
     input: PathBuf,
+
+    /// Threads for run generation
+    #[arg(long, required_unless_present = "estimate_size")]
+    run_gen_threads: Option<usize>,
+
+    /// Threads for merge phase
+    #[arg(long, required_unless_present = "estimate_size")]
+    merge_threads: Option<usize>,
+
+    /// Run size for run generation (MB)
+    #[arg(long, required_unless_present = "estimate_size")]
+    run_size_mb: Option<f64>,
+
+    /// Merge fan-in (per-thread)
+    #[arg(long, required_unless_present = "estimate_size")]
+    merge_fanin: Option<usize>,
+
+    /// Merge imbalance factor (>= 1.0)
+    #[arg(long, default_value = "1.0")]
+    imbalance_factor: f64,
 
     /// Key column indices (comma-separated)
     #[arg(short = 'k', long, default_value = "8,9,13,14,15")]
@@ -59,20 +83,12 @@ struct Args {
     #[arg(short = 'v', long, default_value = "0,3")]
     value_columns: String,
 
-    /// Max number of threads
-    #[arg(short, long, default_value = "4")]
-    threads: usize,
-
-    /// Maximum total memory in MB
-    #[arg(short, long, default_value = "1024")]
-    memory_mb: usize,
-
     /// Sketch size for quantile estimation (KLL)
     #[arg(long, default_value = "200")]
     sketch_size: usize,
 
     /// Sketch sampling interval (update the sketch every N records of the run)
-    #[arg(long, default_value = "1000")]
+    #[arg(long, default_value = "100")]
     sketch_sampling_interval: usize,
 
     /// Run indexing interval (store every Nth key in the run index)
@@ -107,12 +123,9 @@ struct Args {
     #[arg(long, default_value = "0")]
     warmup_runs: usize,
 
-    #[arg(long, default_value = "1.0")]
-    boundary_imbalance_factor: f64,
-
-    /// Experiment type: "run_length", "thread_count", or "imbalance_factor"
-    #[arg(long, default_value = "run_length")]
-    experiment_type: String,
+    /// Only estimate dataset size (MB) and exit
+    #[arg(long, default_value = "false")]
+    estimate_size: bool,
 }
 
 fn parse_columns(column_str: &str) -> Vec<usize> {
@@ -129,22 +142,39 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let key_columns = parse_columns(&args.key_columns);
     let value_columns = parse_columns(&args.value_columns);
 
-    // Validate experiment type
-    let experiment_type = args.experiment_type.to_lowercase();
-    if experiment_type != "run_length"
-        && experiment_type != "thread_count"
-        && experiment_type != "imbalance_factor"
-    {
-        eprintln!(
-            "Error: experiment_type must be 'run_length', 'thread_count', or 'imbalance_factor'"
-        );
-        std::process::exit(1);
+    // Create input provider for CSV files
+    let input_provider = LineitemCsvInputProvider::new(
+        args.input,
+        key_columns.clone(),
+        value_columns,
+        args.delimiter,
+        args.headers,
+    );
+
+    // If only estimating size, compute and print, then exit
+    if args.estimate_size {
+        let estimated_mb = input_provider.estimate_data_size_mb()?;
+        println!("Estimated data size: {:.2} MB", estimated_mb);
+        return Ok(());
     }
+
+    // Unwrap required args (clap enforces presence when not estimating)
+    let run_gen_threads = args
+        .run_gen_threads
+        .expect("--run-gen-threads required unless --estimate-size");
+    let merge_threads = args
+        .merge_threads
+        .expect("--merge-threads required unless --estimate-size");
+    let run_size_mb = args
+        .run_size_mb
+        .expect("--run-size-mb required unless --estimate-size");
+    let merge_fanin = args
+        .merge_fanin
+        .expect("--merge-fanin required unless --estimate-size");
 
     // Create benchmark configuration
     let config = BenchmarkConfig {
-        threads: args.threads,
-        memory_mb: args.memory_mb,
+        config_name: args.name,
         warmup_runs: args.warmup_runs,
         benchmark_runs: args.benchmark_runs,
         verify: args.verify,
@@ -153,33 +183,33 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         sketch_size: args.sketch_size,
         sketch_sampling_interval: args.sketch_sampling_interval,
         run_indexing_interval: args.run_indexing_interval,
-        boundary_imbalance_factor: args.boundary_imbalance_factor,
-        experiment_type,
+        run_gen_threads,
+        run_size_mb,
+        run_gen_memory_mb: run_size_mb * run_gen_threads as f64,
+        merge_threads,
+        merge_fanin,
+        merge_memory_mb: (merge_fanin as f64)
+            * (merge_threads as f64)
+            * (DEFAULT_BUFFER_SIZE as f64 / 1024.0 / 1024.0),
+        imbalance_factor: args.imbalance_factor,
     };
 
-    // Create input provider for CSV files
-    let input_provider = Box::new(CsvInputProvider::new(
-        args.input,
-        key_columns.clone(),
-        value_columns,
-        args.delimiter,
-        args.headers,
-    ));
+    let input_provider = Box::new(input_provider);
 
     // Create benchmark runner
     let mut runner = BenchmarkRunner::new(config, input_provider);
 
     // Set up verification if requested
     if args.verify {
-        let verifier = DetailedCsvVerifier::new(key_columns);
+        let verifier = LineitemCsvVerifier::new(key_columns);
         runner.set_verifier(Box::new(verifier));
     }
 
-    // Run all benchmarks
-    let results = runner.run_benchmarks()?;
+    // Run single benchmark configuration
+    let result: BenchmarkResult = runner.run_configuration()?;
 
-    // Print comprehensive summary (identical to original output)
-    print_benchmark_summary(&results);
+    // Print comprehensive summary
+    print_benchmark_summary(&result);
 
     Ok(())
 }
