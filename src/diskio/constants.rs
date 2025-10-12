@@ -8,9 +8,6 @@ pub const DIRECT_IO_ALIGNMENT: usize = 512;
 /// Default buffer size for aligned I/O operations (64KB)
 pub const DEFAULT_BUFFER_SIZE: usize = 64 * 1024;
 
-/// Page size for memory operations (4KB)
-pub const PAGE_SIZE: usize = 4096;
-
 /// Calculate the aligned size by rounding up to the next alignment boundary
 ///
 /// # Arguments

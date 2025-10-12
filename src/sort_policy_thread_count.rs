@@ -64,13 +64,11 @@ impl SortPolicy for PolicyThreadCount {
 pub fn get_all_thread_policies(config: SortConfig) -> Vec<Box<dyn SortPolicy>> {
     let mut policies: Vec<Box<dyn SortPolicy>> = Vec::new();
 
-    // Specific thread counts: 8, 16, 24, 32, 40
-    let thread_counts = vec![8.0, 16.0, 24.0, 32.0, 40.0];
-
-    for threads in thread_counts {
-        if threads <= config.max_threads {
-            policies.push(Box::new(PolicyThreadCount::new(threads)));
-        }
+    // Progressive doubling: 1, 2, 4, 8, ... up to max_threads (inclusive)
+    let mut threads = 1.0;
+    while threads <= config.max_threads {
+        policies.push(Box::new(PolicyThreadCount::new(threads)));
+        threads *= 2.0;
     }
 
     policies

@@ -1,9 +1,11 @@
+use std::io::Write;
 use std::path::Path;
 use std::sync::Arc;
 use std::thread;
-use std::time::Instant;
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use crate::diskio::aligned_writer::AlignedWriter;
+use crate::diskio::constants::DEFAULT_BUFFER_SIZE;
 use crate::diskio::file::SharedFd;
 use crate::diskio::io_stats::IoStatsTracker;
 use crate::kll::Sketch;
@@ -11,7 +13,8 @@ use crate::sort::merge::MergeIterator;
 use crate::sort::run::RunImpl;
 use crate::sort::sort_buffer::SortBuffer;
 use crate::{
-    MergeStats, RunGenerationStats, RunInfo, SortInput, SortOutput, SortStats, Sorter, TempDirInfo,
+    MergeStats, MultiMergeStats, RunGenerationStats, RunInfo, SortInput, SortOutput, SortStats,
+    Sorter, TempDirInfo,
 };
 
 // Abstraction for inputs to the merge function
@@ -414,18 +417,97 @@ impl ExternalSorter {
         ))
     }
 
+    fn max_fanin(num_threads: usize, available_memory: usize) -> usize {
+        // F * num_threads * PAGE_SIZE <= available_memory
+        // F = floor(available_memory / (num_threads * PAGE_SIZE))
+        ((available_memory as f64
+            / (num_threads as f64 * DEFAULT_BUFFER_SIZE as f64 / 1024.0 / 1024.0))
+            as usize)
+            .max(2) // Minimum fan-in of 2
+    }
+
+    /// Performs multi-level merge if needed based on memory constraints
+    /// Merges runs level by level until a single MergeableRun is produced
+    pub fn multi_level_merge(
+        mut runs: Vec<MergeableRun>,
+        fanin: usize,
+        num_threads: usize,
+        sketch: &Sketch<Vec<u8>>,
+        dir: impl AsRef<Path>,
+        imbalance_factor: Option<f64>,
+    ) -> Result<(MergeableRun, MultiMergeStats), String> {
+        let dir = dir.as_ref();
+        let mut per_merge_stats = Vec::new();
+
+        if fanin >= runs.len() {
+            // Can merge all runs in one pass
+            println!("Merging all {} runs in single pass", runs.len());
+            let (merged_run, stats) =
+                Self::merge(runs, num_threads, sketch, dir, imbalance_factor)?;
+            per_merge_stats.push(stats);
+            let multi_stats = MultiMergeStats { per_merge_stats };
+            return Ok((merged_run, multi_stats));
+        }
+
+        // Multiple merge operations using optimal merge pattern (Knuth Vol 3, pp. 365-366):
+        // Repeatedly merge the F shortest runs to minimize total I/O.
+        let n = runs.len();
+        let f = fanin;
+
+        // Add dummy runs to make (N-1) divisible by (F-1) for balanced merging
+        let dummy_count = if n > 1 {
+            (f - 1 - ((n - 1) % (f - 1))) % (f - 1)
+        } else {
+            0
+        };
+        runs.extend((0..dummy_count).map(|_| MergeableRun::RangePartitioned(vec![])));
+        let total_runs = runs.len();
+        let expected_merges = total_runs.saturating_sub(1) / (f - 1);
+        println!(
+            "Multi-level merge: {} runs (including {} dummies), F={}, expected {} merge operations",
+            total_runs, dummy_count, f, expected_merges
+        );
+
+        // Repeatedly merge F shortest runs until only one remains
+        let mut merge_count = 0;
+        while runs.len() > 1 {
+            merge_count += 1;
+            // Sort runs by size (ascending) to find F shortest
+            runs.sort_by_key(|r| r.total_entries());
+
+            // Take F shortest runs
+            let batch_size = std::cmp::min(f, runs.len());
+            let batch: Vec<MergeableRun> = runs.drain(..batch_size).collect();
+            let total_entries: usize = batch.iter().map(|r| r.total_entries()).sum();
+            let (merged_run, stats) =
+                Self::merge(batch, num_threads, sketch, dir, imbalance_factor)?;
+            println!(
+                "Merge {}/{}: merging {} shortest runs ({} total entries)",
+                merge_count, expected_merges, batch_size, total_entries
+            );
+            per_merge_stats.push(stats);
+            runs.push(merged_run);
+        }
+
+        // Should have exactly one run remaining
+        if runs.is_empty() {
+            return Err("No runs remaining after merge".to_string());
+        }
+
+        let final_run = runs.into_iter().next().unwrap();
+        let multi_stats = MultiMergeStats { per_merge_stats };
+        Ok((final_run, multi_stats))
+    }
+
+    /// Single-level merge (used internally by multi_level_merge)
     pub fn merge(
         output_runs: Vec<MergeableRun>,
         num_threads: usize,
-        sketch: Sketch<Vec<u8>>,
+        sketch: &Sketch<Vec<u8>>,
         dir: impl AsRef<Path>,
         imbalance_factor: Option<f64>,
     ) -> Result<(MergeableRun, MergeStats), String> {
         let imbalance_factor = imbalance_factor.unwrap_or(1.0);
-        println!(
-            "CDF boundary imbalance factor for merge: {:.4}. One thread will handle {:.4} times the average load.",
-            imbalance_factor, imbalance_factor
-        );
         // If no runs or single run, return early
         if output_runs.is_empty() {
             let merge_stats = MergeStats {
@@ -433,6 +515,7 @@ impl ExternalSorter {
                 merge_entry_num: vec![],
                 time_ms: 0,
                 io_stats: None,
+                per_thread_times_ms: vec![],
             };
             return Ok((MergeableRun::RangePartitioned(vec![]), merge_stats));
         }
@@ -444,6 +527,7 @@ impl ExternalSorter {
                 merge_entry_num: vec![entry_count as u64],
                 time_ms: 0,
                 io_stats: None,
+                per_thread_times_ms: vec![],
             };
             let run = output_runs.into_iter().next().unwrap();
             return Ok((run, merge_stats));
@@ -496,6 +580,7 @@ impl ExternalSorter {
             let cdf = Arc::clone(&cdf);
 
             let handle = thread::spawn(move || {
+                let thread_start = Instant::now();
                 let tid = thread_id as f64;
 
                 // Determine the key range for this thread
@@ -524,7 +609,10 @@ impl ExternalSorter {
                     .collect();
 
                 // Create output run for this thread
-                let run_path = dir.join(format!("merge_output_{}.dat", thread_id));
+                // Use a unique file name per thread. Use time with thread ID to avoid conflicts.
+                let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap();
+                let ts = format!("{}{:09}", now.as_secs(), now.subsec_nanos()); // zero-pad nanos to 9
+                let run_path = dir.join(format!("merge_output_{}_{}.dat", thread_id, ts));
                 let fd = Arc::new(
                     SharedFd::new_from_path(&run_path)
                         .expect("Failed to open merge output file with Direct I/O"),
@@ -545,8 +633,10 @@ impl ExternalSorter {
                 let writer = output_run.finalize_write();
                 drop(writer);
 
-                // Return a read-only run
-                output_run
+                let thread_time_ms = thread_start.elapsed().as_millis();
+
+                // Return a read-only run and thread time
+                (output_run, thread_time_ms)
             });
 
             merge_handles.push(handle);
@@ -554,9 +644,12 @@ impl ExternalSorter {
 
         // Collect merge results as runs
         let mut output_runs = Vec::new();
+        let mut per_thread_times_ms = Vec::new();
 
         for handle in merge_handles {
-            output_runs.push(handle.join().unwrap());
+            let (run, thread_time) = handle.join().unwrap();
+            output_runs.push(run);
+            per_thread_times_ms.push(thread_time);
         }
 
         // Capture merge time
@@ -566,18 +659,47 @@ impl ExternalSorter {
         // Capture merge IO stats
         let merge_io_stats = Some(merge_io_tracker.get_detailed_stats());
 
-        println!("Merge phase took {} ms", merge_time_ms);
-
+        // Build single-line output with all merge statistics
         let merge_entry_num: Vec<u64> = output_runs
             .iter()
             .map(|run| run.total_entries() as u64)
             .collect();
+        let total_entries = merge_entry_num.iter().sum::<u64>();
+        let num_runs = output_runs.len();
+
+        let mut output = format!(
+            "Merge phase took {} ms | Merged {} entries across {} runs",
+            merge_time_ms, total_entries, num_runs
+        );
+
+        if !per_thread_times_ms.is_empty() {
+            let (min_time, max_time) = (
+                *per_thread_times_ms.iter().min().unwrap(),
+                *per_thread_times_ms.iter().max().unwrap(),
+            );
+            output.push_str(&format!(
+                " | Thread timing: min={} ms, max={} ms",
+                min_time, max_time
+            ));
+        }
+
+        if merge_entry_num.len() > 1 {
+            let avg = total_entries as f64 / merge_entry_num.len() as f64;
+            let max_entries = *merge_entry_num.iter().max().unwrap();
+            output.push_str(&format!(
+                " | Partition sizes: imbalance={:.2}x",
+                max_entries as f64 / avg
+            ));
+        }
+
+        println!("{}", output);
 
         let merge_stats = MergeStats {
             output_runs: output_runs.len(),
             merge_entry_num,
             time_ms: merge_time_ms,
             io_stats: merge_io_stats,
+            per_thread_times_ms,
         };
 
         Ok((MergeableRun::RangePartitioned(output_runs), merge_stats))
@@ -604,10 +726,13 @@ impl Sorter for ExternalSorter {
             .map(|run| MergeableRun::Single(run))
             .collect();
 
-        let (merged_run, merge_stats) = ExternalSorter::merge(
+        // Use multi-level merge with memory-aware policy
+        let fanin = ExternalSorter::max_fanin(self.merge_threads, self.max_memory);
+        let (merged_run, merge_stats) = ExternalSorter::multi_level_merge(
             mergeable_runs,
+            fanin,
             self.merge_threads,
-            sketch,
+            &sketch,
             self.temp_dir_info.as_ref(),
             Some(self.boundary_imbalance_factor),
         )?;
@@ -616,14 +741,20 @@ impl Sorter for ExternalSorter {
         let final_runs = merged_run.into_runs();
 
         // Combine stats
+        let total_merge_time: u128 = merge_stats.per_merge_stats.iter().map(|s| s.time_ms).sum();
+        let last_merge_io = merge_stats
+            .per_merge_stats
+            .last()
+            .and_then(|s| s.io_stats.clone());
+
         let sort_stats: SortStats = SortStats {
             num_runs: run_gen_stats.num_runs,
             runs_info: run_gen_stats.runs_info,
             run_generation_time_ms: Some(run_gen_stats.time_ms),
-            merge_entry_num: merge_stats.merge_entry_num,
-            merge_time_ms: Some(merge_stats.time_ms),
+            merge_time_ms: Some(total_merge_time),
             run_generation_io_stats: run_gen_stats.io_stats,
-            merge_io_stats: merge_stats.io_stats,
+            merge_io_stats: last_merge_io,
+            per_merge_stats: Some(merge_stats.per_merge_stats),
         };
 
         // Create output
@@ -639,6 +770,7 @@ mod tests {
     use super::*;
     use crate::diskio::aligned_writer::AlignedWriter;
     use crate::diskio::file::SharedFd;
+    use crate::rand::small_thread_rng;
     use tempfile::TempDir;
 
     #[test]
@@ -727,5 +859,150 @@ mod tests {
         let (read_ops4, read_bytes4) = io_tracker4.get_read_stats();
         assert!(read_ops4 > 0, "Should track IO operations");
         assert!(read_bytes4 > 0, "Should track IO bytes");
+    }
+
+    #[test]
+    fn test_multi_level_merge_small_fanout() {
+        use crate::InMemInput;
+        use rand::seq::SliceRandom;
+        use tempfile::TempDir;
+
+        // Test parameters
+        let num_records = 100000;
+        let num_threads_run_gen = 2;
+        let page_size = 512;
+        let run_max_size = 200;
+        let run_page_capacity = 1000;
+        let fanout_limit = 1000;
+        let fanin = 100;
+        let num_threads = 4;
+        let imbalance_factor = Some(1.0);
+
+        let temp_dir = TempDir::new().unwrap();
+        let mut data: Vec<_> = (0..num_records)
+            .rev()
+            .map(|i| {
+                (
+                    format!("key_{:05}", i).into_bytes(),
+                    format!("value_{}", i).into_bytes(),
+                )
+            })
+            .collect();
+        data.shuffle(&mut small_thread_rng());
+
+        let (runs, sketch, _run_gen_stats) = ExternalSorter::run_generation(
+            Box::new(InMemInput { data }),
+            num_threads_run_gen,
+            page_size,
+            run_max_size,
+            run_page_capacity,
+            fanout_limit,
+            temp_dir.path(),
+        )
+        .unwrap();
+
+        let mergeable_runs: Vec<_> = runs
+            .into_iter()
+            .map(|run| MergeableRun::Single(run))
+            .collect();
+        let (merged_run, multi_merge_stats) = ExternalSorter::multi_level_merge(
+            mergeable_runs,
+            fanin,
+            num_threads,
+            &sketch,
+            temp_dir.path(),
+            imbalance_factor,
+        )
+        .unwrap();
+
+        println!(
+            "Multi-level merge: {} passes",
+            multi_merge_stats.per_merge_stats.len()
+        );
+        let final_runs = merged_run.into_runs();
+        assert_eq!(
+            final_runs.len(),
+            num_threads,
+            "Expected {} final runs, got {}",
+            num_threads,
+            final_runs.len()
+        );
+
+        let (mut prev_key, mut count): (Option<Vec<u8>>, usize) = (None, 0);
+        for run in &final_runs {
+            let mut iter = run.scan_range(&[], &[]);
+            while let Some((key, _value)) = iter.next() {
+                if let Some(prev) = &prev_key {
+                    assert!(
+                        key.as_slice() >= prev.as_slice(),
+                        "Data not sorted: {:?} should be >= {:?}",
+                        String::from_utf8_lossy(&key),
+                        String::from_utf8_lossy(prev)
+                    );
+                }
+                prev_key = Some(key);
+                count += 1;
+            }
+        }
+        assert_eq!(
+            count, num_records,
+            "Expected {} entries, got {}",
+            num_records, count
+        );
+
+        for (i, stat) in multi_merge_stats.per_merge_stats.iter().enumerate() {
+            assert!(
+                stat.time_ms > 0 && stat.output_runs > 0 && stat.io_stats.is_some(),
+                "Merge pass {} missing required stats",
+                i + 1
+            );
+        }
+        assert_eq!(
+            multi_merge_stats
+                .per_merge_stats
+                .last()
+                .unwrap()
+                .output_runs,
+            num_threads,
+            "Final merge should produce exactly {} runs",
+            num_threads
+        );
+    }
+
+    #[test]
+    fn test_max_fanin() {
+        // DEFAULT_BUFFER_SIZE = 64KB = 0.0625 MB
+        // F = floor(memory_mb / (threads * 0.0625))
+
+        // Basic calculations
+        assert_eq!(ExternalSorter::max_fanin(1, 1), 16);
+        assert_eq!(ExternalSorter::max_fanin(4, 1), 4);
+        assert_eq!(ExternalSorter::max_fanin(4, 16), 64);
+
+        // Minimum fanin enforcement
+        assert_eq!(ExternalSorter::max_fanin(1, 0), 2);
+        assert_eq!(ExternalSorter::max_fanin(10, 0), 2);
+
+        // Large memory scenarios
+        assert_eq!(ExternalSorter::max_fanin(1, 1024), 16384);
+        assert_eq!(ExternalSorter::max_fanin(16, 1024), 1024);
+
+        // Thread scaling: doubling threads halves fanin (fixed memory)
+        let fanin_1 = ExternalSorter::max_fanin(1, 256);
+        let fanin_2 = ExternalSorter::max_fanin(2, 256);
+        let fanin_4 = ExternalSorter::max_fanin(4, 256);
+        assert!(fanin_1 > fanin_2 && fanin_2 > fanin_4);
+        assert!((fanin_1 as f64 / fanin_2 as f64 - 2.0).abs() < 0.1);
+
+        // Memory scaling: doubling memory doubles fanin (fixed threads)
+        let fanin_64 = ExternalSorter::max_fanin(4, 64);
+        let fanin_128 = ExternalSorter::max_fanin(4, 128);
+        assert!(fanin_128 > fanin_64);
+        assert!((fanin_128 as f64 / fanin_64 as f64 - 2.0).abs() < 0.1);
+
+        // Realistic scenarios
+        assert!(ExternalSorter::max_fanin(4, 256) >= 256);
+        assert!(ExternalSorter::max_fanin(16, 2048) >= 512);
+        assert!(ExternalSorter::max_fanin(32, 128) >= 2);
     }
 }

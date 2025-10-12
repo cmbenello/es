@@ -1,22 +1,146 @@
-use std::io::Write;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::Arc;
 use std::thread;
-use std::time::Instant;
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use crate::diskio::aligned_writer::AlignedWriter;
+use crate::diskio::constants::DEFAULT_BUFFER_SIZE;
 use crate::diskio::file::SharedFd;
 use crate::kll::Sketch;
 use crate::ovc::offset_value_coding_u64::OVCU64;
-use crate::sort::merge::MergeIterator;
-use crate::sort::run::RunImpl;
 use crate::sort_with_ovc::merge_with_ovc::MergeWithOVC;
 use crate::sort_with_ovc::run_with_ovc::RunWithOVC;
 use crate::sort_with_ovc::sort_buffer_with_ovc::SortBufferOVC;
 use crate::{
-    IoStats, IoStatsTracker, MergeStats, RunGenerationStats, RunInfo, SortInput, SortOutput,
-    SortStats, Sorter, TempDirInfo,
+    IoStatsTracker, MergeStats, MultiMergeStats, RunGenerationStats, RunInfo, SortInput,
+    SortOutput, SortStats, Sorter, TempDirInfo,
 };
+
+// Abstraction for inputs to the merge function
+pub enum MergeableRunWithOVC {
+    Single(RunWithOVC),
+    RangePartitioned(Vec<RunWithOVC>),
+}
+
+impl MergeableRunWithOVC {
+    pub fn scan_range_with_io_tracker(
+        &self,
+        lower_bound: &[u8],
+        upper_bound: &[u8],
+        io_tracker: Option<IoStatsTracker>,
+    ) -> Box<dyn Iterator<Item = (OVCU64, Vec<u8>, Vec<u8>)> + Send> {
+        match self {
+            MergeableRunWithOVC::Single(run) => {
+                run.scan_range_with_io_tracker(lower_bound, upper_bound, io_tracker)
+            }
+            MergeableRunWithOVC::RangePartitioned(runs) => {
+                // [lower_bound, upper_bound) may span multiple partitions
+                // Filter out empty runs (those with no entries)
+                let non_empty_runs: Vec<&RunWithOVC> =
+                    runs.iter().filter(|r| r.start_key().is_some()).collect();
+
+                if non_empty_runs.is_empty() {
+                    return Box::new(std::iter::empty());
+                }
+
+                // Find the last partition whose start key < lower_bound
+                let start_partition = if lower_bound.is_empty() {
+                    0
+                } else {
+                    let mut ok = -1;
+                    let mut ng = non_empty_runs.len() as isize;
+                    while (ng - ok).abs() > 1 {
+                        let mid = (ok + ng) / 2;
+                        if non_empty_runs[mid as usize].start_key().unwrap() < lower_bound {
+                            ok = mid;
+                        } else {
+                            ng = mid;
+                        }
+                    }
+                    if ok == -1 { 0 } else { ok as usize }
+                };
+
+                // Find the first partition whose start key >= upper_bound
+                let end_partition = if upper_bound.is_empty() {
+                    non_empty_runs.len()
+                } else {
+                    let mut ok = non_empty_runs.len() as isize;
+                    let mut ng = -1;
+                    while (ng - ok).abs() > 1 {
+                        let mid = (ok + ng) / 2;
+                        if upper_bound <= non_empty_runs[mid as usize].start_key().unwrap() {
+                            ok = mid;
+                        } else {
+                            ng = mid;
+                        }
+                    }
+                    ok as usize
+                };
+
+                let mut iterators = Vec::with_capacity(end_partition - start_partition);
+                for i in start_partition..end_partition {
+                    let run = non_empty_runs[i];
+                    iterators.push(run.scan_range_with_io_tracker(
+                        lower_bound,
+                        upper_bound,
+                        io_tracker.clone(),
+                    ));
+                }
+
+                // Chain all iterators together
+                Box::new(ChainedRangeIteratorWithOVC::new(iterators))
+            }
+        }
+    }
+
+    pub fn total_entries(&self) -> usize {
+        match self {
+            MergeableRunWithOVC::Single(run) => run.total_entries(),
+            MergeableRunWithOVC::RangePartitioned(runs) => {
+                runs.iter().map(|r| r.total_entries()).sum()
+            }
+        }
+    }
+
+    /// Convert MergeableRun into Vec<RunImpl>
+    /// - Single(run) becomes vec![run]
+    /// - RangePartitioned(runs) returns runs directly
+    pub fn into_runs(self) -> Vec<RunWithOVC> {
+        match self {
+            MergeableRunWithOVC::Single(run) => vec![run],
+            MergeableRunWithOVC::RangePartitioned(runs) => runs,
+        }
+    }
+}
+
+// Helper iterator that chains multiple iterators for range-partitioned runs
+struct ChainedRangeIteratorWithOVC {
+    iterators: Vec<Box<dyn Iterator<Item = (OVCU64, Vec<u8>, Vec<u8>)> + Send>>,
+    current: usize,
+}
+
+impl ChainedRangeIteratorWithOVC {
+    fn new(iterators: Vec<Box<dyn Iterator<Item = (OVCU64, Vec<u8>, Vec<u8>)> + Send>>) -> Self {
+        Self {
+            iterators,
+            current: 0,
+        }
+    }
+}
+
+impl Iterator for ChainedRangeIteratorWithOVC {
+    type Item = (OVCU64, Vec<u8>, Vec<u8>);
+
+    fn next(&mut self) -> Option<Self::Item> {
+        while self.current < self.iterators.len() {
+            if let Some(item) = self.iterators[self.current].next() {
+                return Some(item);
+            }
+            self.current += 1;
+        }
+        None
+    }
+}
 
 // Output implementation that chains run iterators without materializing
 pub struct RunsOutputWithOVC {
@@ -294,18 +418,121 @@ impl ExternalSorterWithOVC {
         ))
     }
 
-    pub fn merge(
-        output_runs: Vec<RunWithOVC>,
+    fn max_fanin(num_threads: usize, available_memory: usize) -> usize {
+        // F * num_threads * PAGE_SIZE <= available_memory
+        // F = floor(available_memory / (num_threads * PAGE_SIZE))
+        ((available_memory as f64
+            / (num_threads as f64 * DEFAULT_BUFFER_SIZE as f64 / 1024.0 / 1024.0))
+            as usize)
+            .max(2) // Minimum fan-in of 2
+    }
+
+    /// Performs multi-level merge if needed based on memory constraints
+    /// Merges runs level by level until a single MergeableRun is produced
+    pub fn multi_level_merge(
+        mut runs: Vec<MergeableRunWithOVC>,
+        fanin: usize,
         num_threads: usize,
-        sketch: Sketch<Vec<u8>>,
+        sketch: &Sketch<Vec<u8>>,
         dir: impl AsRef<Path>,
         imbalance_factor: Option<f64>,
-    ) -> Result<(Vec<RunWithOVC>, MergeStats), String> {
-        let imbalance_factor = imbalance_factor.unwrap_or(1.0);
+    ) -> Result<(MergeableRunWithOVC, MultiMergeStats), String> {
+        let dir = dir.as_ref();
+        let mut per_merge_stats = Vec::new();
+
+        if fanin >= runs.len() {
+            // Can merge all runs in one pass
+            println!("Merging all {} runs in single pass", runs.len());
+            let (merged_run, stats) =
+                Self::merge(runs, num_threads, &sketch, dir, imbalance_factor)?;
+
+            // Collect stats
+            per_merge_stats.push(stats);
+
+            let multi_stats = MultiMergeStats { per_merge_stats };
+
+            return Ok((merged_run, multi_stats));
+        }
+
+        // Multi-level merge using optimal merge pattern (Knuth Vol 3, pp. 365-366):
+        // Repeatedly merge the F shortest runs to minimize total I/O.
+
+        let n = runs.len();
+        let f = fanin;
+
+        // Add dummy runs to make (N-1) divisible by (F-1)
+        // This ensures we can always merge F runs at a time
+        let dummy_count = if n > 1 {
+            (f - 1 - ((n - 1) % (f - 1))) % (f - 1)
+        } else {
+            0
+        };
+
+        // Add dummies without extra logging (match non-OVC behavior)
+        runs.extend((0..dummy_count).map(|_| MergeableRunWithOVC::RangePartitioned(vec![])));
+
+        let total_runs = runs.len();
+        let expected_merges = if total_runs > 1 {
+            (total_runs - 1) / (f - 1)
+        } else {
+            0
+        };
+
         println!(
-            "CDF boundary imbalance factor for merge: {:.4}. One thread will handle {:.4} times the average load.",
-            imbalance_factor, imbalance_factor
+            "Multi-level merge: {} runs (including {} dummies), F={}, expected {} merge operations",
+            total_runs, dummy_count, f, expected_merges
         );
+
+        let mut merge_count = 0;
+
+        // Repeatedly merge F shortest runs until only one remains
+        while runs.len() > 1 {
+            merge_count += 1;
+
+            // Sort runs by size (ascending) to find F shortest
+            runs.sort_by_key(|r| r.total_entries());
+
+            // Take F shortest runs
+            let batch_size = std::cmp::min(f, runs.len());
+            let batch: Vec<MergeableRunWithOVC> = runs.drain(..batch_size).collect();
+
+            let total_entries: usize = batch.iter().map(|r| r.total_entries()).sum();
+            println!(
+                "Merge {}/{}: merging {} shortest runs ({} total entries)",
+                merge_count, expected_merges, batch_size, total_entries
+            );
+
+            let (merged_run, stats) =
+                Self::merge(batch, num_threads, sketch, dir, imbalance_factor)?;
+
+            // Collect per-merge stats
+            per_merge_stats.push(stats);
+
+            // Add merged run back to the pool
+            runs.push(merged_run);
+        }
+
+        // Should have exactly one run remaining
+        if runs.is_empty() {
+            return Err("No runs remaining after merge".to_string());
+        }
+
+        let final_run = runs.into_iter().next().unwrap();
+
+        let multi_stats = MultiMergeStats { per_merge_stats };
+
+        Ok((final_run, multi_stats))
+    }
+
+    pub fn merge(
+        output_runs: Vec<MergeableRunWithOVC>,
+        num_threads: usize,
+        sketch: &Sketch<Vec<u8>>,
+        dir: impl AsRef<Path>,
+        imbalance_factor: Option<f64>,
+    ) -> Result<(MergeableRunWithOVC, MergeStats), String> {
+        let imbalance_factor = imbalance_factor.unwrap_or(1.0);
+        // Match non-OVC: do not print CDF boundary imbalance factor
         // If no runs or single run, return early
         if output_runs.is_empty() {
             let merge_stats = MergeStats {
@@ -313,8 +540,9 @@ impl ExternalSorterWithOVC {
                 merge_entry_num: vec![],
                 time_ms: 0,
                 io_stats: None,
+                per_thread_times_ms: vec![],
             };
-            return Ok((vec![], merge_stats));
+            return Ok((MergeableRunWithOVC::RangePartitioned(vec![]), merge_stats));
         }
 
         if output_runs.len() == 1 {
@@ -323,8 +551,10 @@ impl ExternalSorterWithOVC {
                 merge_entry_num: vec![output_runs[0].total_entries() as u64],
                 time_ms: 0,
                 io_stats: None,
+                per_thread_times_ms: vec![],
             };
-            return Ok((output_runs, merge_stats));
+            let run = output_runs.into_iter().next().unwrap();
+            return Ok((run, merge_stats));
         }
 
         // Start timing for merge phase
@@ -374,6 +604,7 @@ impl ExternalSorterWithOVC {
             let cdf = Arc::clone(&cdf);
 
             let handle = thread::spawn(move || {
+                let thread_start = std::time::Instant::now();
                 let tid = thread_id as f64;
 
                 // Determine the key range for this thread
@@ -402,7 +633,10 @@ impl ExternalSorterWithOVC {
                     .collect();
 
                 // Create output run for this thread
-                let run_path = dir.join(format!("merge_output_{}.dat", thread_id));
+                // Use a unique file name per thread. Use time with thread ID to avoid conflicts.
+                let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap();
+                let ts = format!("{}{:09}", now.as_secs(), now.subsec_nanos()); // zero-pad nanos to 9
+                let run_path = dir.join(format!("merge_output_{}_{}.dat", thread_id, ts));
                 let fd = Arc::new(
                     SharedFd::new_from_path(&run_path)
                         .expect("Failed to open merge output file with Direct I/O"),
@@ -423,8 +657,10 @@ impl ExternalSorterWithOVC {
                 let writer = output_run.finalize_write();
                 drop(writer);
 
-                // Return a read-only run
-                output_run
+                let thread_time_ms = thread_start.elapsed().as_millis();
+
+                // Return a read-only run and thread time
+                (output_run, thread_time_ms)
             });
 
             merge_handles.push(handle);
@@ -432,9 +668,12 @@ impl ExternalSorterWithOVC {
 
         // Collect merge results as runs
         let mut output_runs = Vec::new();
+        let mut per_thread_times_ms = Vec::new();
 
         for handle in merge_handles {
-            output_runs.push(handle.join().unwrap());
+            let (run, thread_time) = handle.join().unwrap();
+            output_runs.push(run);
+            per_thread_times_ms.push(thread_time);
         }
 
         // Capture merge time
@@ -444,21 +683,53 @@ impl ExternalSorterWithOVC {
         // Capture merge IO stats
         let merge_io_stats = Some(merge_io_tracker.get_detailed_stats());
 
-        println!("Merge phase took {} ms", merge_time_ms);
-
+        // Build single-line output with all merge statistics (match non-OVC)
         let merge_entry_num: Vec<u64> = output_runs
             .iter()
             .map(|run| run.total_entries() as u64)
             .collect();
+        let total_entries = merge_entry_num.iter().sum::<u64>();
+        let num_runs = output_runs.len();
+
+        let mut output = format!(
+            "Merge phase took {} ms | Merged {} entries across {} runs",
+            merge_time_ms, total_entries, num_runs
+        );
+
+        if !per_thread_times_ms.is_empty() {
+            let (min_time, max_time) = (
+                *per_thread_times_ms.iter().min().unwrap(),
+                *per_thread_times_ms.iter().max().unwrap(),
+            );
+            output.push_str(&format!(
+                " | Thread timing: min={} ms, max={} ms",
+                min_time, max_time
+            ));
+        }
+
+        if merge_entry_num.len() > 1 {
+            let avg = total_entries as f64 / merge_entry_num.len() as f64;
+            let max_entries = *merge_entry_num.iter().max().unwrap();
+            output.push_str(&format!(
+                " | Partition sizes: imbalance={:.2}x",
+                max_entries as f64 / avg
+            ));
+        }
+
+        println!("{}", output);
 
         let merge_stats = MergeStats {
             output_runs: output_runs.len(),
             merge_entry_num,
             time_ms: merge_time_ms,
             io_stats: merge_io_stats,
+            per_thread_times_ms,
         };
 
-        Ok((output_runs, merge_stats))
+        Ok((
+            MergeableRunWithOVC::RangePartitioned(output_runs),
+            merge_stats,
+        ))
     }
 }
 
@@ -476,30 +747,290 @@ impl Sorter for ExternalSorterWithOVC {
             self.temp_dir_info.as_ref(),
         )?;
 
-        // Merge phase
-        let (merged_runs, merge_stats) = ExternalSorterWithOVC::merge(
-            runs,
+        // Merge phase - convert runs to MergeableRun::Single
+        let mergeable_runs: Vec<MergeableRunWithOVC> = runs
+            .into_iter()
+            .map(|run| MergeableRunWithOVC::Single(run))
+            .collect();
+
+        // Use multi-level merge with memory-aware policy
+        let fanin = ExternalSorterWithOVC::max_fanin(self.merge_threads, self.max_memory);
+        let (merged_run, merge_stats) = ExternalSorterWithOVC::multi_level_merge(
+            mergeable_runs,
+            fanin,
             self.merge_threads,
-            sketch,
+            &sketch,
             self.temp_dir_info.as_ref(),
             Some(self.boundary_imbalance_factor),
         )?;
 
+        // Convert MergeableRun back to Vec<RunImpl> for output
+        let final_runs = merged_run.into_runs();
+
         // Combine stats
+        let total_merge_time: u128 = merge_stats.per_merge_stats.iter().map(|s| s.time_ms).sum();
+        let last_merge_io = merge_stats
+            .per_merge_stats
+            .last()
+            .and_then(|s| s.io_stats.clone());
+
         let sort_stats: SortStats = SortStats {
             num_runs: run_gen_stats.num_runs,
             runs_info: run_gen_stats.runs_info,
             run_generation_time_ms: Some(run_gen_stats.time_ms),
-            merge_entry_num: merge_stats.merge_entry_num,
-            merge_time_ms: Some(merge_stats.time_ms),
+            merge_time_ms: Some(total_merge_time),
             run_generation_io_stats: run_gen_stats.io_stats,
-            merge_io_stats: merge_stats.io_stats,
+            merge_io_stats: last_merge_io,
+            per_merge_stats: Some(merge_stats.per_merge_stats),
         };
 
         // Create output
         Ok(Box::new(RunsOutputWithOVC {
-            runs: merged_runs,
+            runs: final_runs,
             stats: sort_stats,
         }))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::rand::small_thread_rng;
+
+    use super::*;
+    use tempfile::TempDir;
+
+    #[test]
+    fn test_range_partitioned_scan_with_io_tracker() {
+        // Create a temporary directory for test files
+        let temp_dir = TempDir::new().unwrap();
+
+        // Create 3 partitions with sorted, non-overlapping data
+        // Partition 0: keys [a00..a99]
+        let path0 = temp_dir.path().join("partition0.dat");
+        let fd0 = Arc::new(SharedFd::new_from_path(&path0).unwrap());
+        let writer0 = AlignedWriter::from_fd(fd0.clone()).unwrap();
+        let mut run0 = RunWithOVC::from_writer(writer0).unwrap();
+        for i in 0..100 {
+            let key = format!("a{:02}", i).into_bytes();
+            let value = format!("value_{}", i).into_bytes();
+            let ovc = OVCU64::initial_value();
+            run0.append(ovc, key, value);
+        }
+        run0.finalize_write();
+
+        // Partition 1: keys [b00..b99]
+        let path1 = temp_dir.path().join("partition1.dat");
+        let fd1 = Arc::new(SharedFd::new_from_path(&path1).unwrap());
+        let writer1 = AlignedWriter::from_fd(fd1.clone()).unwrap();
+        let mut run1 = RunWithOVC::from_writer(writer1).unwrap();
+        for i in 0..100 {
+            let key = format!("b{:02}", i).into_bytes();
+            let value = format!("value_{}", i + 100).into_bytes();
+            let ovc = OVCU64::initial_value();
+            run1.append(ovc, key, value);
+        }
+        run1.finalize_write();
+
+        // Partition 2: keys [c00..c99]
+        let path2 = temp_dir.path().join("partition2.dat");
+        let fd2 = Arc::new(SharedFd::new_from_path(&path2).unwrap());
+        let writer2 = AlignedWriter::from_fd(fd2.clone()).unwrap();
+        let mut run2 = RunWithOVC::from_writer(writer2).unwrap();
+        for i in 0..100 {
+            let key = format!("c{:02}", i).into_bytes();
+            let value = format!("value_{}", i + 200).into_bytes();
+            let ovc = OVCU64::initial_value();
+            run2.append(ovc, key, value);
+        }
+        run2.finalize_write();
+
+        let mergeable_run = MergeableRunWithOVC::RangePartitioned(vec![run0, run1, run2]);
+
+        // Test 1: Scan range within a single partition
+        let io_tracker1 = IoStatsTracker::new();
+        let iter1 =
+            mergeable_run.scan_range_with_io_tracker(b"a10", b"a20", Some(io_tracker1.clone()));
+        let results1: Vec<_> = iter1.collect();
+        assert_eq!(results1.len(), 10); // a10..a19
+        assert_eq!(results1[0].1, b"a10");
+        assert_eq!(results1[9].1, b"a19");
+        let (read_ops1, read_bytes1) = io_tracker1.get_read_stats();
+        assert!(read_ops1 > 0, "Should track IO operations");
+        assert!(read_bytes1 > 0, "Should track IO bytes");
+
+        // Test 2: Scan range across multiple partitions
+        let io_tracker2 = IoStatsTracker::new();
+        let iter2 =
+            mergeable_run.scan_range_with_io_tracker(b"a90", b"c10", Some(io_tracker2.clone()));
+        let results2: Vec<_> = iter2.collect();
+        // Should get: a90..a99 (10) + b00..b99 (100) + c00..c09 (10) = 120
+        assert_eq!(results2.len(), 120);
+        assert_eq!(results2[0].1, b"a90");
+        assert_eq!(results2[9].1, b"a99");
+        assert_eq!(results2[10].1, b"b00");
+        assert_eq!(results2[109].1, b"b99");
+        assert_eq!(results2[110].1, b"c00");
+        assert_eq!(results2[119].1, b"c09");
+        let (read_ops2, read_bytes2) = io_tracker2.get_read_stats();
+        assert!(read_ops2 > 0, "Should track IO operations");
+        assert!(read_bytes2 > 0, "Should track IO bytes");
+
+        // Test 3: Empty range
+        let iter3 = mergeable_run.scan_range_with_io_tracker(b"d00", b"d99", None);
+        let results3: Vec<_> = iter3.collect();
+        assert_eq!(results3.len(), 0);
+
+        // Test 4: Full scan (empty bounds)
+        let io_tracker4 = IoStatsTracker::new();
+        let iter4 = mergeable_run.scan_range_with_io_tracker(&[], &[], Some(io_tracker4.clone()));
+        let results4: Vec<_> = iter4.collect();
+        assert_eq!(results4.len(), 300); // All records
+        let (read_ops4, read_bytes4) = io_tracker4.get_read_stats();
+        assert!(read_ops4 > 0, "Should track IO operations");
+        assert!(read_bytes4 > 0, "Should track IO bytes");
+    }
+
+    #[test]
+    fn test_multi_level_merge_small_fanout() {
+        use crate::InMemInput;
+        use rand::seq::SliceRandom;
+
+        // Test parameters (mirror non-OVC test)
+        let num_records = 100000;
+        let num_threads_run_gen = 2;
+        let per_thread_mem = 512; // bytes
+        let sketch_size = 200;
+        let sketch_sampling_interval = 1000;
+        let run_indexing_interval = 1000;
+        let fanin = 100;
+        let num_threads = 4;
+        let imbalance_factor = Some(1.0);
+
+        let temp_dir = TempDir::new().unwrap();
+        let mut data: Vec<_> = (0..num_records)
+            .rev()
+            .map(|i| {
+                (
+                    format!("key_{:05}", i).into_bytes(),
+                    format!("value_{}", i).into_bytes(),
+                )
+            })
+            .collect();
+        data.shuffle(&mut small_thread_rng());
+
+        let (runs, sketch, _run_gen_stats) = ExternalSorterWithOVC::run_generation(
+            Box::new(InMemInput { data }),
+            num_threads_run_gen,
+            per_thread_mem,
+            sketch_size,
+            sketch_sampling_interval,
+            run_indexing_interval,
+            temp_dir.path(),
+        )
+        .unwrap();
+
+        let mergeable_runs: Vec<_> = runs
+            .into_iter()
+            .map(|run| MergeableRunWithOVC::Single(run))
+            .collect();
+        let (merged_run, multi_merge_stats) = ExternalSorterWithOVC::multi_level_merge(
+            mergeable_runs,
+            fanin,
+            num_threads,
+            &sketch,
+            temp_dir.path(),
+            imbalance_factor,
+        )
+        .unwrap();
+
+        println!(
+            "Multi-level merge: {} passes",
+            multi_merge_stats.per_merge_stats.len()
+        );
+        let final_runs = merged_run.into_runs();
+        assert_eq!(
+            final_runs.len(),
+            num_threads,
+            "Expected {} final runs, got {}",
+            num_threads,
+            final_runs.len()
+        );
+
+        let (mut prev_key, mut count): (Option<Vec<u8>>, usize) = (None, 0);
+        for run in &final_runs {
+            let mut iter = run.scan_range(&[], &[]);
+            while let Some((_ovc, key, _value)) = iter.next() {
+                if let Some(prev) = &prev_key {
+                    assert!(
+                        key.as_slice() >= prev.as_slice(),
+                        "Data not sorted: {:?} should be >= {:?}",
+                        String::from_utf8_lossy(&key),
+                        String::from_utf8_lossy(prev)
+                    );
+                }
+                prev_key = Some(key);
+                count += 1;
+            }
+        }
+        assert_eq!(
+            count, num_records,
+            "Expected {} entries, got {}",
+            num_records, count
+        );
+
+        for (i, stat) in multi_merge_stats.per_merge_stats.iter().enumerate() {
+            assert!(
+                stat.time_ms > 0 && stat.output_runs > 0 && stat.io_stats.is_some(),
+                "Merge pass {} missing required stats",
+                i + 1
+            );
+        }
+        assert_eq!(
+            multi_merge_stats
+                .per_merge_stats
+                .last()
+                .unwrap()
+                .output_runs,
+            num_threads,
+            "Final merge should produce exactly {} runs",
+            num_threads
+        );
+    }
+
+    #[test]
+    fn test_max_fanin() {
+        // DEFAULT_BUFFER_SIZE = 64KB = 0.0625 MB
+        // F = floor(memory_mb / (threads * 0.0625))
+
+        // Basic calculations
+        assert_eq!(ExternalSorterWithOVC::max_fanin(1, 1), 16);
+        assert_eq!(ExternalSorterWithOVC::max_fanin(4, 1), 4);
+        assert_eq!(ExternalSorterWithOVC::max_fanin(4, 16), 64);
+
+        // Minimum fanin enforcement
+        assert_eq!(ExternalSorterWithOVC::max_fanin(1, 0), 2);
+        assert_eq!(ExternalSorterWithOVC::max_fanin(10, 0), 2);
+
+        // Large memory scenarios
+        assert_eq!(ExternalSorterWithOVC::max_fanin(1, 1024), 16384);
+        assert_eq!(ExternalSorterWithOVC::max_fanin(16, 1024), 1024);
+
+        // Thread scaling: doubling threads halves fanin (fixed memory)
+        let fanin_1 = ExternalSorterWithOVC::max_fanin(1, 256);
+        let fanin_2 = ExternalSorterWithOVC::max_fanin(2, 256);
+        let fanin_4 = ExternalSorterWithOVC::max_fanin(4, 256);
+        assert!(fanin_1 > fanin_2 && fanin_2 > fanin_4);
+        assert!((fanin_1 as f64 / fanin_2 as f64 - 2.0).abs() < 0.1);
+
+        // Memory scaling: doubling memory doubles fanin (fixed threads)
+        let fanin_64 = ExternalSorterWithOVC::max_fanin(4, 64);
+        let fanin_128 = ExternalSorterWithOVC::max_fanin(4, 128);
+        assert!(fanin_128 > fanin_64);
+        assert!((fanin_128 as f64 / fanin_64 as f64 - 2.0).abs() < 0.1);
+
+        // Realistic scenarios
+        assert!(ExternalSorterWithOVC::max_fanin(4, 256) >= 256);
+        assert!(ExternalSorterWithOVC::max_fanin(16, 2048) >= 512);
+        assert!(ExternalSorterWithOVC::max_fanin(32, 128) >= 2);
     }
 }

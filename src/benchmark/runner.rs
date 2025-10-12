@@ -1,6 +1,7 @@
 use super::input::BenchmarkInputProvider;
 use super::types::{BenchmarkConfig, BenchmarkResult, BenchmarkStats};
 use super::verification::OutputVerifier;
+use crate::diskio::constants::DEFAULT_BUFFER_SIZE;
 use crate::sort_policy_imbalance_factor::get_all_policies as get_all_imbalance_policies;
 use crate::sort_policy_run_length::{PolicyResult, SortConfig, SortPolicy, get_all_policies};
 use crate::sort_policy_thread_count::get_all_thread_policies;
@@ -117,7 +118,7 @@ impl BenchmarkRunner {
 
             let input = self.input_provider.create_sort_input()?;
 
-            let (run_gen_stats, merge_stats) = if self.config.ovc {
+            let (run_gen_stats, multi_merge_stats) = if self.config.ovc {
                 let (runs, sketch, run_gen_stats) = ExternalSorterWithOVC::run_generation(
                     input,
                     params.run_gen_threads as usize,
@@ -128,16 +129,29 @@ impl BenchmarkRunner {
                     &temp_dir,
                 )?;
 
-                let (_merged_runs, merge_stats) = ExternalSorterWithOVC::merge(
-                    runs,
+                let mergeable_runs: Vec<
+                    crate::sort_with_ovc::sorter_with_ovc::MergeableRunWithOVC,
+                > = runs
+                    .into_iter()
+                    .map(|run| {
+                        crate::sort_with_ovc::sorter_with_ovc::MergeableRunWithOVC::Single(run)
+                    })
+                    .collect();
+
+                let (_merged_runs, multi_merge_stats) = ExternalSorterWithOVC::multi_level_merge(
+                    mergeable_runs,
+                    (params.merge_memory_mb as f64
+                        / (params.merge_threads as f64 * DEFAULT_BUFFER_SIZE as f64
+                            / 1024.0
+                            / 1024.0)) as usize,
                     params.merge_threads as usize,
-                    sketch,
+                    &sketch,
                     &temp_dir,
                     Some(params.imbalance_factor),
                 )?;
                 drop(_merged_runs);
 
-                (run_gen_stats, merge_stats)
+                (run_gen_stats, multi_merge_stats)
             } else {
                 let (runs, sketch, run_gen_stats) = ExternalSorter::run_generation(
                     input,
@@ -154,21 +168,31 @@ impl BenchmarkRunner {
                     .map(|run| crate::sort::sorter::MergeableRun::Single(run))
                     .collect();
 
-                let (_merged_run, merge_stats) = ExternalSorter::merge(
+                let (_merged_run, multi_merge_stats) = ExternalSorter::multi_level_merge(
                     mergeable_runs,
+                    (params.merge_memory_mb as f64
+                        / (params.merge_threads as f64 * DEFAULT_BUFFER_SIZE as f64
+                            / 1024.0
+                            / 1024.0)) as usize,
                     params.merge_threads as usize,
-                    sketch,
+                    &sketch,
                     &temp_dir,
                     Some(params.imbalance_factor),
                 )?;
                 drop(_merged_run);
 
-                (run_gen_stats, merge_stats)
+                (run_gen_stats, multi_merge_stats)
             };
+
+            let total_merge_time_ms: u128 = multi_merge_stats
+                .per_merge_stats
+                .iter()
+                .map(|s| s.time_ms)
+                .sum();
 
             println!(
                 "{:.2}s",
-                run_gen_stats.time_ms as f64 / 1000.0 + merge_stats.time_ms as f64 / 1000.0
+                run_gen_stats.time_ms as f64 / 1000.0 + total_merge_time_ms as f64 / 1000.0
             );
 
             // Clean up
@@ -206,43 +230,21 @@ impl BenchmarkRunner {
             // Capture timing values before using output
             let run_gen_time_ms = output.stats().run_generation_time_ms.unwrap_or(0);
             let merge_time_ms = output.stats().merge_time_ms.unwrap_or(0);
-            let merge_entry_sum = output.stats().merge_entry_num.iter().sum::<u64>() as usize;
+
+            // Calculate total entries from per_merge_stats
+            let merge_entry_sum = if let Some(ref per_merge) = output.stats().per_merge_stats {
+                per_merge
+                    .last()
+                    .map(|m| m.merge_entry_num.iter().sum::<u64>() as usize)
+                    .unwrap_or(0)
+            } else {
+                0
+            };
 
             println!("{}", output.stats());
 
-            // Accumulate statistics
-            accumulated_stats.total_time +=
-                run_gen_time_ms as f64 / 1000.0 + merge_time_ms as f64 / 1000.0;
-            accumulated_stats.runs_count += output.stats().num_runs;
-
-            if let Some(rg_time) = output.stats().run_generation_time_ms {
-                accumulated_stats.run_gen_time += rg_time as f64 / 1000.0;
-            }
-            if let Some(m_time) = output.stats().merge_time_ms {
-                accumulated_stats.merge_time += m_time as f64 / 1000.0;
-            }
-
-            // Accumulate I/O stats
-            if let Some(ref io) = output.stats().run_generation_io_stats {
-                accumulated_stats.run_gen_read_ops += io.read_ops;
-                accumulated_stats.run_gen_read_mb += io.read_bytes as f64 / 1_000_000.0;
-                accumulated_stats.run_gen_write_ops += io.write_ops;
-                accumulated_stats.run_gen_write_mb += io.write_bytes as f64 / 1_000_000.0;
-            }
-            if let Some(ref io) = output.stats().merge_io_stats {
-                accumulated_stats.merge_read_ops += io.read_ops;
-                accumulated_stats.merge_read_mb += io.read_bytes as f64 / 1_000_000.0;
-                accumulated_stats.merge_write_ops += io.write_ops;
-                accumulated_stats.merge_write_mb += io.write_bytes as f64 / 1_000_000.0;
-            }
-
-            // Calculate imbalance factor
-            let max_entries = *output.stats().merge_entry_num.iter().max().unwrap_or(&0) as f64;
-            let avg_entries = output.stats().merge_entry_num.iter().sum::<u64>() as f64
-                / output.stats().merge_entry_num.len() as f64;
-            let imbalance = max_entries / avg_entries;
-            accumulated_stats.imbalance_sum += imbalance;
-            accumulated_stats.imbalance_count += 1;
+            // Accumulate statistics using the new method
+            accumulated_stats.accumulate_from_output(output.as_ref());
 
             valid_runs += 1;
             println!(
@@ -305,26 +307,59 @@ impl BenchmarkRunner {
                 temp_dir,
             )?;
 
-            let (merged_runs, merge_stats) = ExternalSorterWithOVC::merge(
-                runs,
+            let mergeable_runs: Vec<crate::sort_with_ovc::sorter_with_ovc::MergeableRunWithOVC> =
+                runs.into_iter()
+                    .map(|run| {
+                        crate::sort_with_ovc::sorter_with_ovc::MergeableRunWithOVC::Single(run)
+                    })
+                    .collect();
+
+            let (merged_runs, multi_merge_stats) = ExternalSorterWithOVC::multi_level_merge(
+                mergeable_runs,
+                (params.merge_memory_mb as f64
+                    / (params.merge_threads as f64 * DEFAULT_BUFFER_SIZE as f64 / 1024.0 / 1024.0))
+                    as usize,
                 params.merge_threads as usize,
-                sketch,
+                &sketch,
                 temp_dir,
                 Some(params.imbalance_factor),
             )?;
+
+            // Aggregate merge statistics
+            let total_merge_time_ms: u128 = multi_merge_stats
+                .per_merge_stats
+                .iter()
+                .map(|s| s.time_ms)
+                .sum();
+            let total_merge_io = multi_merge_stats.per_merge_stats.iter().fold(
+                None,
+                |acc: Option<crate::IoStats>, s| match (acc, &s.io_stats) {
+                    (None, Some(io)) => Some(io.clone()),
+                    (Some(mut acc_io), Some(io)) => {
+                        acc_io.read_ops += io.read_ops;
+                        acc_io.read_bytes += io.read_bytes;
+                        acc_io.write_ops += io.write_ops;
+                        acc_io.write_bytes += io.write_bytes;
+                        Some(acc_io)
+                    }
+                    (acc, None) => acc,
+                },
+            );
+
+            let final_runs = merged_runs.into_runs();
 
             let stats = SortStats {
                 num_runs: run_gen_stats.num_runs,
                 runs_info: run_gen_stats.runs_info,
                 run_generation_time_ms: Some(run_gen_stats.time_ms),
-                merge_entry_num: merge_stats.merge_entry_num,
-                merge_time_ms: Some(merge_stats.time_ms),
+                merge_time_ms: Some(total_merge_time_ms),
                 run_generation_io_stats: run_gen_stats.io_stats,
-                merge_io_stats: merge_stats.io_stats,
+                merge_io_stats: total_merge_io,
+                per_merge_stats: Some(multi_merge_stats.per_merge_stats),
             };
 
             Box::new(RunsOutputWithOVC {
-                runs: merged_runs,
+                runs: final_runs,
                 stats: stats.clone(),
             }) as Box<dyn SortOutput>
         } else {
@@ -343,13 +378,37 @@ impl BenchmarkRunner {
                 .map(|run| crate::sort::sorter::MergeableRun::Single(run))
                 .collect();
 
-            let (merged_run, merge_stats) = ExternalSorter::merge(
+            let (merged_run, multi_merge_stats) = ExternalSorter::multi_level_merge(
                 mergeable_runs,
+                (params.merge_memory_mb as f64
+                    / (params.merge_threads as f64 * DEFAULT_BUFFER_SIZE as f64 / 1024.0 / 1024.0))
+                    as usize,
                 params.merge_threads as usize,
-                sketch,
+                &sketch,
                 temp_dir,
                 Some(params.imbalance_factor),
             )?;
+
+            // Aggregate merge statistics
+            let total_merge_time_ms: u128 = multi_merge_stats
+                .per_merge_stats
+                .iter()
+                .map(|s| s.time_ms)
+                .sum();
+            let total_merge_io = multi_merge_stats.per_merge_stats.iter().fold(
+                None,
+                |acc: Option<crate::IoStats>, s| match (acc, &s.io_stats) {
+                    (None, Some(io)) => Some(io.clone()),
+                    (Some(mut acc_io), Some(io)) => {
+                        acc_io.read_ops += io.read_ops;
+                        acc_io.read_bytes += io.read_bytes;
+                        acc_io.write_ops += io.write_ops;
+                        acc_io.write_bytes += io.write_bytes;
+                        Some(acc_io)
+                    }
+                    (acc, None) => acc,
+                },
+            );
 
             let final_runs = merged_run.into_runs();
 
@@ -357,10 +416,10 @@ impl BenchmarkRunner {
                 num_runs: run_gen_stats.num_runs,
                 runs_info: run_gen_stats.runs_info,
                 run_generation_time_ms: Some(run_gen_stats.time_ms),
-                merge_entry_num: merge_stats.merge_entry_num,
-                merge_time_ms: Some(merge_stats.time_ms),
+                merge_time_ms: Some(total_merge_time_ms),
                 run_generation_io_stats: run_gen_stats.io_stats,
-                merge_io_stats: merge_stats.io_stats,
+                merge_io_stats: total_merge_io,
+                per_merge_stats: Some(multi_merge_stats.per_merge_stats),
             };
 
             Box::new(RunsOutput {

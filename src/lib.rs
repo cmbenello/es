@@ -26,10 +26,10 @@ pub trait SortOutput {
             num_runs: 0,
             runs_info: vec![],
             run_generation_time_ms: None,
-            merge_entry_num: vec![],
             merge_time_ms: None,
             run_generation_io_stats: None,
             merge_io_stats: None,
+            per_merge_stats: None,
         }
     }
 }
@@ -40,10 +40,10 @@ pub struct SortStats {
     pub num_runs: usize,
     pub runs_info: Vec<RunInfo>,
     pub run_generation_time_ms: Option<u128>,
-    pub merge_entry_num: Vec<u64>,
     pub merge_time_ms: Option<u128>,
     pub run_generation_io_stats: Option<IoStats>,
     pub merge_io_stats: Option<IoStats>,
+    pub per_merge_stats: Option<Vec<MergeStats>>,
 }
 
 impl std::fmt::Display for SortStats {
@@ -108,71 +108,71 @@ impl std::fmt::Display for SortStats {
             }
         }
 
-        // Display partition imbalance if merge was parallelized
-        if self.merge_entry_num.len() > 1 {
-            writeln!(f, "  Partition imbalance:")?;
+        // Display thread timing statistics if available
+        if let Some(ref per_merge) = self.per_merge_stats {
+            for (i, merge_stat) in per_merge.iter().enumerate() {
+                if !merge_stat.per_thread_times_ms.is_empty() {
+                    let min_time = *merge_stat.per_thread_times_ms.iter().min().unwrap_or(&0);
+                    let max_time = *merge_stat.per_thread_times_ms.iter().max().unwrap_or(&0);
+                    let avg_time = merge_stat.per_thread_times_ms.iter().sum::<u128>() as f64
+                        / merge_stat.per_thread_times_ms.len() as f64;
+                    let time_imbalance = max_time as f64 / avg_time;
 
-            let total_entries: u64 = self.merge_entry_num.iter().sum();
-            let avg_entries = total_entries as f64 / self.merge_entry_num.len() as f64;
-            let min_entries = *self.merge_entry_num.iter().min().unwrap_or(&0);
-            let max_entries = *self.merge_entry_num.iter().max().unwrap_or(&0);
+                    if per_merge.len() > 1 {
+                        writeln!(f, "  Thread timing (merge pass {}):", i + 1)?;
+                    } else {
+                        writeln!(f, "  Thread timing:")?;
+                    }
+                    writeln!(f, "    Min thread time: {} ms", min_time)?;
+                    writeln!(f, "    Max thread time: {} ms", max_time)?;
+                    writeln!(f, "    Avg thread time: {:.0} ms", avg_time)?;
+                    writeln!(
+                        f,
+                        "    Time imbalance factor (max/avg): {:.2}x",
+                        time_imbalance
+                    )?;
 
-            // Calculate standard deviation
-            let variance = self
-                .merge_entry_num
-                .iter()
-                .map(|&x| {
-                    let diff = x as f64 - avg_entries;
-                    diff * diff
-                })
-                .sum::<f64>()
-                / self.merge_entry_num.len() as f64;
-            let std_dev = variance.sqrt();
-
-            // Calculate coefficient of variation (CV) as a percentage
-            let cv = if avg_entries > 0.0 {
-                (std_dev / avg_entries) * 100.0
-            } else {
-                0.0
-            };
-
-            // Calculate imbalance factor (max / avg)
-            let imbalance_factor = max_entries as f64 / avg_entries as f64;
-
-            writeln!(f, "    Partitions: {}", self.merge_entry_num.len())?;
-            writeln!(f, "    Total entries: {}", total_entries)?;
-            writeln!(f, "    Avg per partition: {:.0}", avg_entries)?;
-            writeln!(
-                f,
-                "    Min entries: {} ({:.1}% of avg)",
-                min_entries,
-                if avg_entries > 0.0 {
-                    (min_entries as f64 / avg_entries) * 100.0
-                } else {
-                    0.0
+                    // Show all thread times if not too many threads
+                    if merge_stat.per_thread_times_ms.len() <= 32 {
+                        writeln!(f, "    Thread times: {:?}", merge_stat.per_thread_times_ms)?;
+                    }
                 }
-            )?;
-            writeln!(
-                f,
-                "    Max entries: {} ({:.1}% of avg)",
-                max_entries,
-                if avg_entries > 0.0 {
-                    (max_entries as f64 / avg_entries) * 100.0
-                } else {
-                    0.0
-                }
-            )?;
-            writeln!(f, "    Std deviation: {:.0}", std_dev)?;
-            writeln!(f, "    Coefficient of variation: {:.1}%", cv)?;
-            writeln!(
-                f,
-                "    Imbalance factor (max/avg): {:.2}x",
-                imbalance_factor
-            )?;
+            }
+        }
 
-            // Show distribution if not too many partitions
-            if self.merge_entry_num.len() <= 32 {
-                writeln!(f, "    Distribution: {:?}", self.merge_entry_num)?;
+        // Display per-merge statistics if available (from multi-level merge)
+        if let Some(ref per_merge) = self.per_merge_stats {
+            if per_merge.len() > 1 {
+                writeln!(f, "  Multi-level merge details:")?;
+                writeln!(f, "    Total merge passes: {}", per_merge.len())?;
+
+                for (i, merge_stat) in per_merge.iter().enumerate() {
+                    writeln!(f, "    Merge pass {}:", i + 1)?;
+                    writeln!(f, "      Time: {} ms", merge_stat.time_ms)?;
+                    writeln!(f, "      Output runs: {}", merge_stat.output_runs)?;
+
+                    if let Some(ref io) = merge_stat.io_stats {
+                        writeln!(
+                            f,
+                            "      I/O: read={:.2} MB, write={:.2} MB",
+                            io.read_bytes as f64 / 1_000_000.0,
+                            io.write_bytes as f64 / 1_000_000.0
+                        )?;
+                    }
+
+                    if merge_stat.merge_entry_num.len() > 1 {
+                        let total: u64 = merge_stat.merge_entry_num.iter().sum();
+                        let avg = total as f64 / merge_stat.merge_entry_num.len() as f64;
+                        let max = *merge_stat.merge_entry_num.iter().max().unwrap_or(&0);
+                        let imbalance = max as f64 / avg;
+                        writeln!(
+                            f,
+                            "      Partitions: {}, imbalance: {:.2}x",
+                            merge_stat.merge_entry_num.len(),
+                            imbalance
+                        )?;
+                    }
+                }
             }
         }
 
@@ -209,6 +209,14 @@ pub struct MergeStats {
     pub merge_entry_num: Vec<u64>,
     pub time_ms: u128,
     pub io_stats: Option<IoStats>,
+    pub per_thread_times_ms: Vec<u128>,
+}
+
+/// Statistics from multi-level merge with fine-grained per-merge tracking
+#[derive(Clone, Debug)]
+pub struct MultiMergeStats {
+    /// Statistics for each individual merge operation
+    pub per_merge_stats: Vec<MergeStats>,
 }
 
 // Input implementation
@@ -262,10 +270,10 @@ impl SortOutput for InMemOutput {
                     file_size: 0, // No file for in-memory data
                 }],
                 run_generation_time_ms: None,
-                merge_entry_num: vec![],
                 merge_time_ms: None,
                 run_generation_io_stats: None,
                 merge_io_stats: None,
+                per_merge_stats: None,
             }
         })
     }

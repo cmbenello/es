@@ -1,6 +1,6 @@
 use crate::diskio::aligned_reader::AlignedReader;
 use crate::diskio::aligned_writer::AlignedWriter;
-use crate::diskio::constants::{PAGE_SIZE, align_down};
+use crate::diskio::constants::align_down;
 use crate::diskio::file::SharedFd;
 use crate::diskio::io_stats::IoStatsTracker;
 use crate::ovc::offset_value_coding::OVCFlag;
@@ -65,6 +65,10 @@ impl RunWithOVC {
 
     pub fn total_bytes(&self) -> usize {
         self.total_bytes
+    }
+
+    pub fn start_key(&self) -> Option<&[u8]> {
+        self.sparse_index.first().map(|entry| entry.key.as_slice())
     }
 
     fn find_start_position(&self, lower_bound: &[u8]) -> Option<(usize, Vec<u8>)> {
@@ -170,7 +174,7 @@ impl RunWithOVC {
         // Seek to the start position if needed
         if start_offset > 0 {
             // Align to page boundary for direct I/O
-            let aligned_offset = align_down(start_offset as u64, PAGE_SIZE as u64) as usize;
+            let aligned_offset = align_down(start_offset as u64, 4096) as usize;
             let skip_bytes = start_offset - aligned_offset;
 
             // Seek to aligned position

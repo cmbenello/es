@@ -14,8 +14,14 @@ pub struct BenchmarkStats {
     pub merge_read_mb: f64,
     pub merge_write_ops: u64,
     pub merge_write_mb: f64,
-    pub imbalance_sum: f64,
-    pub imbalance_count: usize,
+    /// Imbalance factors for each merge pass across all benchmark runs
+    /// Outer vec: merge pass index (0 = first merge, 1 = second merge, etc.)
+    /// Inner vec: imbalance factor for that merge pass in each benchmark run
+    pub per_merge_imbalances: Vec<Vec<f64>>,
+    /// Time (in seconds) for each merge pass across all benchmark runs
+    /// Outer vec: merge pass index (0 = first merge, 1 = second merge, etc.)
+    /// Inner vec: time for that merge pass in each benchmark run
+    pub per_merge_times: Vec<Vec<f64>>,
 }
 
 #[derive(Clone)]
@@ -110,17 +116,35 @@ impl BenchmarkStats {
             self.merge_write_mb += io.write_bytes as f64 / 1_000_000.0;
         }
 
-        if output.stats().merge_entry_num.len() > 1 {
-            let min_entries = *output.stats().merge_entry_num.iter().min().unwrap_or(&0);
-            let max_entries = *output.stats().merge_entry_num.iter().max().unwrap_or(&0);
-            if min_entries > 0 {
-                let imbalance = max_entries as f64 / min_entries as f64;
-                self.imbalance_sum += imbalance;
-                self.imbalance_count += 1;
+        // Accumulate per-merge imbalance factors and times
+        if let Some(ref per_merge) = output.stats().per_merge_stats {
+            for (merge_idx, merge_stat) in per_merge.iter().enumerate() {
+                // Ensure we have enough space in per_merge_imbalances and per_merge_times
+                while self.per_merge_imbalances.len() <= merge_idx {
+                    self.per_merge_imbalances.push(Vec::new());
+                }
+                while self.per_merge_times.len() <= merge_idx {
+                    self.per_merge_times.push(Vec::new());
+                }
+
+                // Calculate imbalance for this merge pass
+                let imbalance = if merge_stat.merge_entry_num.len() > 1 {
+                    let min_entries = *merge_stat.merge_entry_num.iter().min().unwrap_or(&0);
+                    let max_entries = *merge_stat.merge_entry_num.iter().max().unwrap_or(&0);
+                    if min_entries > 0 {
+                        max_entries as f64 / min_entries as f64
+                    } else {
+                        f64::INFINITY
+                    }
+                } else if merge_stat.merge_entry_num.len() == 1 {
+                    1.0
+                } else {
+                    1.0 // No partitions means no imbalance
+                };
+
+                self.per_merge_imbalances[merge_idx].push(imbalance);
+                self.per_merge_times[merge_idx].push(merge_stat.time_ms as f64 / 1000.0);
             }
-        } else if output.stats().merge_entry_num.len() == 1 {
-            self.imbalance_sum += 1.0;
-            self.imbalance_count += 1;
         }
     }
 
@@ -152,8 +176,19 @@ impl BenchmarkStats {
         let total_read_mb = rg_read_mb + m_read_mb;
         let total_write_mb = rg_write_mb + m_write_mb;
 
-        let avg_imbalance_factor = if self.imbalance_count > 0 {
-            self.imbalance_sum / self.imbalance_count as f64
+        // Calculate average imbalance factor across all merge passes and benchmark runs
+        let avg_imbalance_factor = if !self.per_merge_imbalances.is_empty() {
+            let total_imbalance: f64 = self
+                .per_merge_imbalances
+                .iter()
+                .flat_map(|v| v.iter())
+                .sum();
+            let count: usize = self.per_merge_imbalances.iter().map(|v| v.len()).sum();
+            if count > 0 {
+                total_imbalance / count as f64
+            } else {
+                1.0
+            }
         } else {
             1.0
         };
