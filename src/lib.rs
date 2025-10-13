@@ -46,6 +46,11 @@ impl std::fmt::Display for SortStats {
         let rg = &self.run_gen_stats;
         writeln!(f, "  Number of runs: {}", rg.num_runs)?;
         writeln!(f, "  (R) time: {} ms", rg.time_ms)?;
+        writeln!(
+            f,
+            "  (R) breakdown: load={} ms, sort={} ms, store={} ms",
+            rg.load_time_ms, rg.sort_time_ms, rg.store_time_ms
+        )?;
         if let Some(io) = &rg.io_stats {
             writeln!(f, "  (R) I/O stats: {}", io)?;
         }
@@ -187,6 +192,9 @@ pub struct RunGenerationStats {
     pub runs_info: Vec<RunInfo>,
     pub time_ms: u128,
     pub io_stats: Option<IoStats>,
+    pub load_time_ms: u128,
+    pub sort_time_ms: u128,
+    pub store_time_ms: u128,
 }
 
 /// Statistics from the merge phase

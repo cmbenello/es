@@ -404,6 +404,69 @@ fn print_detailed_io_statistics_table(result: &BenchmarkResult, max_merges: usiz
     println!("{}", "=".repeat(160));
 }
 
+/// Print run generation time breakdown table (total, load, sort, store)
+fn print_run_gen_breakdown_table(result: &BenchmarkResult) {
+    println!("\n{}", "=".repeat(100));
+    println!("Run Generation Time Breakdown");
+    println!("{}", "=".repeat(100));
+
+    // Header
+    println!(
+        "{:<20} {:<12} {:<12} {:<12} {:<12}",
+        "Config", "RG Total s", "Load s", "Sort s", "Store s"
+    );
+    println!("{}", "-".repeat(100));
+
+    // Per-run lines
+    for (run_idx, s) in result.stats.iter().enumerate() {
+        let name = format!("{}[{}]", result.config.config_name, run_idx + 1);
+        let total_s = s.run_gen_stats.time_ms as f64 / 1000.0;
+        let load_s = s.run_gen_stats.load_time_ms as f64 / 1000.0;
+        let sort_s = s.run_gen_stats.sort_time_ms as f64 / 1000.0;
+        let store_s = s.run_gen_stats.store_time_ms as f64 / 1000.0;
+
+        println!(
+            "{:<20} {:<12.2} {:<12} {:<12} {:<12}",
+            name, total_s, load_s, sort_s, store_s
+        );
+    }
+
+    // Aggregate line
+    println!("{}", "-".repeat(100));
+    let runs = result.stats.len().max(1) as f64;
+    let avg_total_s = result
+        .stats
+        .iter()
+        .map(|s| s.run_gen_stats.time_ms as f64 / 1000.0)
+        .sum::<f64>()
+        / runs;
+    let avg_load_s = result
+        .stats
+        .iter()
+        .map(|s| s.run_gen_stats.load_time_ms as f64 / 1000.0)
+        .sum::<f64>()
+        / runs;
+    let avg_sort_s = result
+        .stats
+        .iter()
+        .map(|s| s.run_gen_stats.sort_time_ms as f64 / 1000.0)
+        .sum::<f64>()
+        / runs;
+    let avg_store_s = result
+        .stats
+        .iter()
+        .map(|s| s.run_gen_stats.store_time_ms as f64 / 1000.0)
+        .sum::<f64>()
+        / runs;
+
+    let agg_name = format!("{}[avg]", result.config.config_name);
+    println!(
+        "{:<20} {:<12.2} {:<12.2} {:<12.2} {:<12.2}",
+        agg_name, avg_total_s, avg_load_s, avg_sort_s, avg_store_s
+    );
+    println!("{}", "=".repeat(100));
+}
+
 pub fn print_benchmark_summary(result: &BenchmarkResult) {
     println!("\n{}", "=".repeat(160));
     println!("Benchmark Results Summary");
@@ -547,6 +610,8 @@ pub fn print_benchmark_summary(result: &BenchmarkResult) {
         print_merge_operations_table(result, max_merges);
         print_detailed_io_statistics_table(result, max_merges);
     }
+    // Always print the run generation breakdown table
+    print_run_gen_breakdown_table(result);
 }
 
 pub fn bytes_to_human_readable(bytes: usize) -> String {

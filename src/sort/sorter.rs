@@ -246,6 +246,9 @@ impl ExternalSorter {
                     runs_info: vec![],
                     time_ms: 0,
                     io_stats: None,
+                    load_time_ms: 0,
+                    sort_time_ms: 0,
+                    store_time_ms: 0,
                 },
             ));
         }
@@ -261,6 +264,10 @@ impl ExternalSorter {
                 let mut local_runs = Vec::new();
                 let mut sort_buffer = SortBuffer::new(run_size);
                 let mut sketch = Sketch::new(sketch_size);
+                // Phase timing accumulators (in ms)
+                let mut load_time_ms: u128 = 0;
+                let mut sort_time_ms: u128 = 0;
+                let mut store_time_ms: u128 = 0;
 
                 let run_path = dir.join(format!("intermediate_{}.dat", thread_id));
                 let fd = Arc::new(
@@ -272,16 +279,27 @@ impl ExternalSorter {
                         .expect("Failed to create run writer"),
                 );
                 let mut cnt = 0;
+                let mut load_phase_start = Instant::now();
 
                 for (key, value) in scanner {
                     if !sort_buffer.has_space(&key, &value) {
+                        // Finish current load phase
+                        load_time_ms += load_phase_start.elapsed().as_millis();
+
+                        // Sort phase
+                        let sort_start = Instant::now();
+                        let iter = sort_buffer.sorted_iter();
+                        sort_time_ms += sort_start.elapsed().as_millis();
+
+                        // Store phase (includes run creation and finalize)
+                        let store_start = Instant::now();
                         let mut output_run = RunImpl::from_writer_with_indexing_interval(
                             run_writer.take().unwrap(),
                             run_indexing_interval,
                         )
                         .expect("Failed to create run");
 
-                        for (k, v) in sort_buffer.sorted_iter() {
+                        for (k, v) in iter {
                             if cnt % sketch_sampling_interval == 0 {
                                 sketch.update(k.clone());
                             }
@@ -291,6 +309,7 @@ impl ExternalSorter {
 
                         // Finalize the run and get writer back
                         run_writer = Some(output_run.finalize_write());
+                        store_time_ms += store_start.elapsed().as_millis();
 
                         // Create a read-only run with proper metadata
                         local_runs.push(MergeableRun::Single(output_run));
@@ -299,6 +318,8 @@ impl ExternalSorter {
                         if !sort_buffer.append(key, value) {
                             panic!("Failed to append data to sort buffer, it should have space");
                         }
+                        // Start next load phase
+                        load_phase_start = Instant::now();
                     } else {
                         sort_buffer.append(key, value);
                     }
@@ -306,13 +327,23 @@ impl ExternalSorter {
 
                 // Final buffer
                 if !sort_buffer.is_empty() {
+                    // Finish final load phase
+                    load_time_ms += load_phase_start.elapsed().as_millis();
+
+                    // Sort phase for final buffer
+                    let sort_start = Instant::now();
+                    let iter = sort_buffer.sorted_iter();
+                    sort_time_ms += sort_start.elapsed().as_millis();
+
+                    // Store phase for final buffer
+                    let store_start = Instant::now();
                     let mut output_run = RunImpl::from_writer_with_indexing_interval(
                         run_writer.take().unwrap(),
                         run_indexing_interval,
                     )
                     .expect("Failed to create run");
 
-                    for (k, v) in sort_buffer.sorted_iter() {
+                    for (k, v) in iter {
                         if cnt % sketch_sampling_interval == 0 {
                             sketch.update(k.clone());
                         }
@@ -322,6 +353,7 @@ impl ExternalSorter {
 
                     // Finalize the run and get writer back
                     run_writer = Some(output_run.finalize_write());
+                    store_time_ms += store_start.elapsed().as_millis();
 
                     // Create a read-only run with proper metadata
                     local_runs.push(MergeableRun::Single(output_run));
@@ -329,7 +361,17 @@ impl ExternalSorter {
 
                 drop(run_writer); // Ensure the writer is closed
 
-                (local_runs, sketch)
+                // Print per-thread breakdown for visibility
+                println!(
+                    "Run gen thread {} breakdown: load={} ms, sort={} ms, store={} ms",
+                    thread_id, load_time_ms, sort_time_ms, store_time_ms
+                );
+
+                (
+                    local_runs,
+                    sketch,
+                    (load_time_ms, sort_time_ms, store_time_ms),
+                )
             });
 
             handles.push(handle);
@@ -338,10 +380,18 @@ impl ExternalSorter {
         // Collect runs from all threads
         let mut output_runs = Vec::new();
         let mut sketch = Sketch::new(sketch_size); // Combine sketches from all threads
+        let mut total_load_ms: u128 = 0;
+        let mut total_sort_ms: u128 = 0;
+        let mut total_store_ms: u128 = 0;
+        let mut threads_count: u128 = 0;
         for handle in handles {
-            let (runs, thread_sketch) = handle.join().unwrap();
+            let (runs, thread_sketch, (load_ms, sort_ms, store_ms)) = handle.join().unwrap();
             output_runs.extend(runs);
             sketch.merge(&thread_sketch);
+            total_load_ms += load_ms;
+            total_sort_ms += sort_ms;
+            total_store_ms += store_ms;
+            threads_count += 1;
         }
 
         let initial_runs_count = output_runs.len();
@@ -366,6 +416,17 @@ impl ExternalSorter {
         // Capture run generation IO stats
         let run_generation_io_stats = Some(run_generation_io_tracker.get_detailed_stats());
 
+        // Average the per-thread times across threads
+        let (avg_load_ms, avg_sort_ms, avg_store_ms) = if threads_count > 0 {
+            (
+                total_load_ms / threads_count,
+                total_sort_ms / threads_count,
+                total_store_ms / threads_count,
+            )
+        } else {
+            (0, 0, 0)
+        };
+
         Ok((
             output_runs,
             sketch,
@@ -374,6 +435,9 @@ impl ExternalSorter {
                 runs_info: initial_runs_info,
                 time_ms: run_generation_time_ms,
                 io_stats: run_generation_io_stats,
+                load_time_ms: avg_load_ms,
+                sort_time_ms: avg_sort_ms,
+                store_time_ms: avg_store_ms,
             },
         ))
     }
