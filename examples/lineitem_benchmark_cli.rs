@@ -126,6 +126,10 @@ struct Args {
     /// Only estimate dataset size (MB) and exit
     #[arg(long, default_value = "false")]
     estimate_size: bool,
+
+    /// Cooldown seconds between runs
+    #[arg(long, default_value = "0")]
+    cooldown_seconds: u64,
 }
 
 fn parse_columns(column_str: &str) -> Vec<usize> {
@@ -177,6 +181,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         config_name: args.name,
         warmup_runs: args.warmup_runs,
         benchmark_runs: args.benchmark_runs,
+        cooldown_seconds: args.cooldown_seconds,
         verify: args.verify,
         ovc: args.ovc,
         temp_dir: args.dir,

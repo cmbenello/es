@@ -80,6 +80,10 @@ impl BenchmarkRunner {
         println!("Temporary directory: {:?}", self.config.temp_dir);
         println!("Warmup runs: {}", self.config.warmup_runs);
         println!("Runs per configuration: {}", self.config.benchmark_runs);
+        println!(
+            "Cooldown between runs (s): {}",
+            self.config.cooldown_seconds
+        );
         println!("Verify output: {}", self.config.verify);
         println!();
 
@@ -160,6 +164,15 @@ impl BenchmarkRunner {
             // Clean up
             std::fs::remove_dir_all(&temp_dir)?;
             self.sync_filesystem()?;
+
+            // Cooldown between warmup runs (except after the last warmup)
+            if self.config.cooldown_seconds > 0 && warmup < self.config.warmup_runs {
+                println!(
+                    "    Cooling down for {}s before next warmup...",
+                    self.config.cooldown_seconds
+                );
+                std::thread::sleep(std::time::Duration::from_secs(self.config.cooldown_seconds));
+            }
         }
 
         println!("  Warmup complete.\n");
@@ -217,6 +230,15 @@ impl BenchmarkRunner {
             // Clean up
             std::fs::remove_dir_all(&temp_dir)?;
             self.sync_filesystem()?;
+
+            // Cooldown between benchmark runs (except after the last run)
+            if self.config.cooldown_seconds > 0 && run < self.config.benchmark_runs {
+                println!(
+                    "  Cooling down for {}s before next run...",
+                    self.config.cooldown_seconds
+                );
+                std::thread::sleep(std::time::Duration::from_secs(self.config.cooldown_seconds));
+            }
         }
 
         Ok(per_run_stats)

@@ -27,6 +27,13 @@ MERGE_THREADS=32
 echo "Building yellow_taxi_benchmark_cli example (release)..."
 cargo build --release --example yellow_taxi_benchmark_cli >/dev/null
 
+# Cooldown between runs to prevent SSD thermal throttling
+COOLDOWN_SECONDS=${COOLDOWN_SECONDS:-60}
+cooldown() {
+  echo "Cooling down for ${COOLDOWN_SECONDS}s to let SSD rest..."
+  sleep "$COOLDOWN_SECONDS"
+}
+
 run_case() {
   local name="$1"; shift
   local run_size_mb="$1"; shift
@@ -60,6 +67,7 @@ run_case() {
     --merge-fanin "$merge_fanin" \
     --warmup-runs 1 \
     --benchmark-runs 3 \
+    --cooldown-seconds 60 \
     --dir "$temp_dir" \
     "${extra_flags[@]}" 2>&1 | tee -a "${OUT_DIR}/${name}.log"
 }
@@ -67,16 +75,26 @@ run_case() {
 # Requested configurations
 # Baseline (no OVC)
 run_case "Log_0.0"       "3.91"    20000
+cooldown
 run_case "Log_0.25"      "15.72"   20000
+cooldown
 run_case "Log_0.5"       "63.25"   20000
+cooldown
 run_case "Log_0.75"      "254.49"  20000
+cooldown
 run_case "Log_1.0"       "1024.00" 20000
+cooldown
 
 # With OVC
 run_case "Log_0.0_ovc"   "3.91"    20000 --ovc
+cooldown
 run_case "Log_0.25_ovc"  "15.72"   20000 --ovc
+cooldown
 run_case "Log_0.5_ovc"   "63.25"   20000 --ovc
+cooldown
 run_case "Log_0.75_ovc"  "254.49"  20000 --ovc
+cooldown
 run_case "Log_1.0_ovc"   "1024.00" 20000 --ovc
+cooldown
 
 echo "All runs completed. Logs at: ${OUT_DIR}"

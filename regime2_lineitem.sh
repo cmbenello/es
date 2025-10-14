@@ -29,6 +29,13 @@ mkdir -p "$OUT_DIR"
 echo "Building lineitem_benchmark_cli example (release)..."
 cargo build --release --example lineitem_benchmark_cli >/dev/null
 
+# Cooldown between runs to prevent SSD thermal throttling
+COOLDOWN_SECONDS=${COOLDOWN_SECONDS:-60}
+cooldown() {
+  echo "Cooling down for ${COOLDOWN_SECONDS}s to let SSD rest..."
+  sleep "$COOLDOWN_SECONDS"
+}
+
 run_case() {
   local name="$1"; shift
   local run_gen_threads="$1"; shift
@@ -62,6 +69,7 @@ run_case() {
     --merge-fanin "$merge_fanin" \
     --warmup-runs 1 \
     --benchmark-runs 3 \
+    --cooldown-seconds 60 \
     --dir "$temp_dir" \
     "${extra_flags[@]}" 2>&1 | tee -a "${OUT_DIR}/${name}.log"
 }
@@ -78,7 +86,9 @@ echo ""
 # Strategy 1: Use 12 threads for run generation (rounding down 12.6), 32 for merge
 # Run size = 81 MiB
 run_case "Strategy1_baseline" 12 32 81 20000
+cooldown
 run_case "Strategy1_ovc" 12 32 81 20000 --ovc
+cooldown
 
 echo ""
 echo "================================================================================"
@@ -92,7 +102,9 @@ echo ""
 # Strategy 2: Use 32 threads for run generation, 12 threads for merge (rounding down 12.6)
 # Run size = 32 MiB, merge fan-in calculated to give ~1297 runs in 1 pass
 run_case "Strategy2_baseline" 32 12 32 20000
+cooldown
 run_case "Strategy2_ovc" 32 12 32 20000 --ovc
+cooldown
 
 echo ""
 echo "================================================================================"
@@ -106,7 +118,9 @@ echo ""
 # Strategy 3: Use 20 threads for both phases (rounding 20.1)
 # Run size = 51 MiB, merge fan-in calculated to give ~815 runs in 1 pass
 run_case "Strategy3_baseline" 20 20 51 20000
+cooldown
 run_case "Strategy3_ovc" 20 20 51 20000 --ovc
+cooldown
 
 echo ""
 echo "================================================================================"
@@ -121,7 +135,9 @@ echo ""
 # Run size = 32 MiB, merge fan-in kept at 512 to give 3 operations
 # 1GiB / (32 threads * 64KiB) = 512-way merge, so 1297/512 = ~3 passes
 run_case "Strategy4_baseline" 32 32 32 512
+cooldown
 run_case "Strategy4_ovc" 32 32 32 512 --ovc
+cooldown
 
 echo ""
 echo "All runs completed. Logs at: ${OUT_DIR}"

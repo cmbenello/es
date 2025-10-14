@@ -12,6 +12,7 @@ pub struct BenchmarkConfig {
     pub config_name: String,
     pub warmup_runs: usize,
     pub benchmark_runs: usize,
+    pub cooldown_seconds: u64,
     pub verify: bool,
     pub ovc: bool,
     pub temp_dir: PathBuf,
