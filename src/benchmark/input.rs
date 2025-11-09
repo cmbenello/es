@@ -1,3 +1,4 @@
+use crate::input_reader::kvbin_input_direct::KvBinInputDirect;
 use crate::{CsvDirectConfig, CsvInputDirect, GenSortInputDirect, SortInput};
 use arrow::datatypes::{DataType, Field, Schema};
 use std::fs::File;
@@ -10,6 +11,34 @@ pub trait BenchmarkInputProvider {
     fn estimate_data_size_mb(&self) -> Result<f64, Box<dyn std::error::Error>>;
     fn get_entry_count(&self) -> Option<usize>;
     fn get_description(&self) -> String;
+}
+pub struct KvBinInputProvider {
+    pub path: PathBuf,
+}
+
+impl KvBinInputProvider {
+    pub fn new(path: PathBuf) -> Self {
+        Self { path }
+    }
+}
+
+impl BenchmarkInputProvider for KvBinInputProvider {
+    fn create_sort_input(&self) -> Result<Box<dyn SortInput>, Box<dyn std::error::Error>> {
+        Ok(Box::new(KvBinInputDirect::new(&self.path)?))
+    }
+
+    fn estimate_data_size_mb(&self) -> Result<f64, Box<dyn std::error::Error>> {
+        let meta = std::fs::metadata(&self.path)?;
+        Ok(meta.len() as f64 / (1024.0 * 1024.0))
+    }
+
+    fn get_entry_count(&self) -> Option<usize> {
+        None
+    }
+
+    fn get_description(&self) -> String {
+        format!("KVBin file: {}", self.path.display())
+    }
 }
 
 pub struct GenSortInputProvider {

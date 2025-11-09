@@ -293,6 +293,7 @@ pub mod benchmark;
 pub mod diskio;
 pub mod input_reader;
 pub mod kll;
+pub mod kvbin;
 pub mod order_preserving_encoding;
 pub mod ovc;
 pub mod rand;
