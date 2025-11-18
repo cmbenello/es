@@ -3,7 +3,9 @@ use crate::diskio::aligned_writer::AlignedWriter;
 use crate::diskio::constants::align_down;
 use crate::diskio::file::SharedFd;
 use crate::diskio::io_stats::IoStatsTracker;
+use std::fs;
 use std::io::{Read, Write};
+use std::path::PathBuf;
 use std::sync::Arc;
 
 // Sparse index entry
@@ -23,6 +25,8 @@ pub struct RunImpl {
     total_bytes: usize,
     sparse_index: Vec<IndexEntry>,
     indexing_interval: usize,
+    backing_path: Option<PathBuf>,
+    delete_on_drop: bool,
 }
 
 impl RunImpl {
@@ -46,11 +50,19 @@ impl RunImpl {
             total_bytes: 0,
             sparse_index: Vec::new(),
             indexing_interval,
+            backing_path: None,
+            delete_on_drop: false,
         })
     }
 
     pub fn finalize_write(&mut self) -> AlignedWriter {
         self.writer.take().unwrap()
+    }
+
+    /// Remember the on-disk backing file so we can delete it once the run is dropped.
+    pub fn enable_auto_cleanup<P: Into<PathBuf>>(&mut self, path: P) {
+        self.backing_path = Some(path.into());
+        self.delete_on_drop = true;
     }
 
     pub fn byte_range(&self) -> (usize, usize) {
@@ -93,6 +105,16 @@ impl RunImpl {
         }
 
         Some((best_entry.file_offset, best_entry.key.clone()))
+    }
+}
+
+impl Drop for RunImpl {
+    fn drop(&mut self) {
+        if self.delete_on_drop {
+            if let Some(path) = self.backing_path.take() {
+                let _ = fs::remove_file(path);
+            }
+        }
     }
 }
 

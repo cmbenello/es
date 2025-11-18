@@ -285,15 +285,27 @@ impl ExternalSorterWithOVC {
                 let mut sort_time_ms: u128 = 0;
                 let mut store_time_ms: u128 = 0;
 
-                let run_path = dir.join(format!("intermediate_{}.dat", thread_id));
-                let fd = Arc::new(
-                    SharedFd::new_from_path(&run_path)
-                        .expect("Failed to open run file with Direct I/O"),
-                );
-                let mut run_writer = Option::Some(
-                    AlignedWriter::from_fd_with_tracker(fd, Some((*io_tracker).clone()))
-                        .expect("Failed to create run writer"),
-                );
+                let mut run_sequence: usize = 0;
+                let mut next_run = || {
+                    let run_path = dir.join(format!("run_t{}_{}.dat", thread_id, run_sequence));
+                    run_sequence += 1;
+                    let fd = Arc::new(
+                        SharedFd::new_from_path(&run_path)
+                            .expect("Failed to open run file with Direct I/O"),
+                    );
+                    let writer = AlignedWriter::from_fd_with_tracker(
+                        fd,
+                        Some((*io_tracker).clone()),
+                    )
+                    .expect("Failed to create run writer");
+                    let mut run = RunWithOVC::from_writer_with_indexing_interval(
+                        writer,
+                        run_indexing_interval,
+                    )
+                    .expect("Failed to create run");
+                    run.enable_auto_cleanup(run_path);
+                    run
+                };
                 let mut cnt = 0;
                 let mut load_phase_start = Instant::now();
 
@@ -309,11 +321,7 @@ impl ExternalSorterWithOVC {
 
                         // Store phase (includes run creation and finalize)
                         let store_start = Instant::now();
-                        let mut output_run = RunWithOVC::from_writer_with_indexing_interval(
-                            run_writer.take().unwrap(),
-                            run_indexing_interval,
-                        )
-                        .expect("Failed to create run");
+                        let mut output_run = next_run();
 
                         for (ovc, key, value) in iter {
                             if cnt % sketch_sampling_interval == 0 {
@@ -323,8 +331,9 @@ impl ExternalSorterWithOVC {
                             output_run.append(ovc, key, value);
                         }
 
-                        // Finalize the run and get writer back
-                        run_writer = Some(output_run.finalize_write());
+                        // Finalize run and ensure data is flushed
+                        let writer = output_run.finalize_write();
+                        drop(writer);
                         store_time_ms += store_start.elapsed().as_millis();
 
                         // Create a read-only run with proper metadata
@@ -353,11 +362,7 @@ impl ExternalSorterWithOVC {
 
                     // Store phase for final buffer
                     let store_start = Instant::now();
-                    let mut output_run = RunWithOVC::from_writer_with_indexing_interval(
-                        run_writer.take().unwrap(),
-                        run_indexing_interval,
-                    )
-                    .expect("Failed to create run");
+                    let mut output_run = next_run();
 
                     for (ovc, key, value) in iter {
                         if cnt % sketch_sampling_interval == 0 {
@@ -367,15 +372,14 @@ impl ExternalSorterWithOVC {
                         output_run.append(ovc, key, value);
                     }
 
-                    // Finalize the run and get writer back
-                    run_writer = Some(output_run.finalize_write());
+                    // Finalize run and ensure data is flushed
+                    let writer = output_run.finalize_write();
+                    drop(writer);
                     store_time_ms += store_start.elapsed().as_millis();
 
                     // Create a read-only run with proper metadata
                     local_runs.push(MergeableRunWithOVC::Single(output_run));
                 }
-
-                drop(run_writer); // Ensure the writer is closed
 
                 // Print per-thread breakdown for visibility
                 println!(
@@ -669,6 +673,7 @@ impl ExternalSorterWithOVC {
                     .expect("Failed to create run writer");
                 let mut output_run =
                     RunWithOVC::from_writer(writer).expect("Failed to create merge output run");
+                output_run.enable_auto_cleanup(run_path);
 
                 // Merge this range directly into the output run
                 let merge_iter = MergeWithOVC::new(iterators);
