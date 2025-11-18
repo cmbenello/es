@@ -3,6 +3,7 @@ use crate::diskio::aligned_writer::AlignedWriter;
 use crate::diskio::constants::align_down;
 use crate::diskio::file::SharedFd;
 use crate::diskio::io_stats::IoStatsTracker;
+use crate::sort::core::engine::RunSummary;
 use std::io::{Read, Write};
 use std::sync::Arc;
 
@@ -202,6 +203,16 @@ struct RunIterator {
     total_bytes: usize,
     skip_bytes: usize,   // Bytes to skip after seeking to aligned position
     actual_start: usize, // Where this run actually starts in the file
+}
+
+impl RunSummary for RunImpl {
+    fn total_entries(&self) -> usize {
+        self.total_entries
+    }
+
+    fn total_bytes(&self) -> usize {
+        self.total_bytes
+    }
 }
 
 impl Iterator for RunIterator {

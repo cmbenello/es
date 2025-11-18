@@ -2,8 +2,8 @@ use super::input::BenchmarkInputProvider;
 use super::types::{BenchmarkConfig, BenchmarkResult};
 use super::verification::OutputVerifier;
 use crate::{
-    ExternalSorter, ExternalSorterWithOVC, RunGenerationAlgorithm, RunsOutput,
-    RunsOutputWithOVC, SortInput, SortOutput, SortStats,
+    ExternalSorter, ExternalSorterWithOVC, RunGenerationAlgorithm, RunsOutput, RunsOutputWithOVC,
+    SortInput, SortOutput, SortStats,
 };
 use std::fs::File;
 use std::os::fd::AsRawFd;

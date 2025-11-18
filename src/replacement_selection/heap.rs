@@ -1,10 +1,8 @@
 use std::cmp::Ordering;
 use std::collections::BinaryHeap;
 
-use super::{
-    ReplacementScanner, ReplacementSelectionSink, ReplacementSelectionStats, ensure_entry_fits,
-    next_record,
-};
+use super::{ReplacementScanner, ReplacementSelectionStats, ensure_entry_fits, next_record};
+use crate::sort::run_sink::RunSink;
 
 const ENTRY_METADATA_SIZE: usize = std::mem::size_of::<u32>() * 2;
 
@@ -15,7 +13,7 @@ pub fn run_replacement_selection<S>(
     memory_limit: usize,
 ) -> ReplacementSelectionStats
 where
-    S: ReplacementSelectionSink,
+    S: RunSink,
 {
     BinaryHeapReplacementSelection::new(scanner, memory_limit).run(sink)
 }
@@ -35,7 +33,7 @@ impl BinaryHeapReplacementSelection {
 
     fn run<S>(mut self, sink: &mut S) -> ReplacementSelectionStats
     where
-        S: ReplacementSelectionSink,
+        S: RunSink,
     {
         let mut current_heap = BinaryHeap::<HeapRecord>::new();
         let mut future_heap = BinaryHeap::<HeapRecord>::new();
@@ -43,11 +41,7 @@ impl BinaryHeapReplacementSelection {
         let mut records_emitted = 0usize;
         let mut memory_used = 0usize;
 
-        self.fill_heap(
-            &mut current_heap,
-            &mut memory_used,
-            &mut pending_record,
-        );
+        self.fill_heap(&mut current_heap, &mut memory_used, &mut pending_record);
 
         if current_heap.is_empty() {
             return ReplacementSelectionStats::default();
@@ -58,11 +52,7 @@ impl BinaryHeapReplacementSelection {
         loop {
             if current_heap.is_empty() {
                 if future_heap.is_empty() {
-                    self.fill_heap(
-                        &mut current_heap,
-                        &mut memory_used,
-                        &mut pending_record,
-                    );
+                    self.fill_heap(&mut current_heap, &mut memory_used, &mut pending_record);
                     if current_heap.is_empty() {
                         break;
                     }
@@ -96,9 +86,7 @@ impl BinaryHeapReplacementSelection {
             // no-op to silence warnings during tests
         }
 
-        ReplacementSelectionStats {
-            records_emitted,
-        }
+        ReplacementSelectionStats { records_emitted }
     }
 
     fn fill_heap(
@@ -198,6 +186,24 @@ impl PartialOrd for HeapRecord {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::kll::Sketch;
+    use crate::sort::core::engine::RunSummary;
+    use crate::sort::run_sink::RunSink;
+
+    #[derive(Default)]
+    struct TestRun {
+        entries: Vec<(Vec<u8>, Vec<u8>)>,
+    }
+
+    impl RunSummary for TestRun {
+        fn total_entries(&self) -> usize {
+            self.entries.len()
+        }
+
+        fn total_bytes(&self) -> usize {
+            self.entries.iter().map(|(k, v)| k.len() + v.len()).sum()
+        }
+    }
 
     struct CollectingSink {
         runs: Vec<Vec<(Vec<u8>, Vec<u8>)>>,
@@ -213,7 +219,9 @@ mod tests {
         }
     }
 
-    impl ReplacementSelectionSink for CollectingSink {
+    impl RunSink for CollectingSink {
+        type MergeableRun = TestRun;
+
         fn start_run(&mut self) {
             self.current_run.clear();
         }
@@ -226,6 +234,15 @@ mod tests {
             if !self.current_run.is_empty() {
                 self.runs.push(std::mem::take(&mut self.current_run));
             }
+        }
+
+        fn finalize(self) -> (Vec<Self::MergeableRun>, Sketch<Vec<u8>>) {
+            let runs = self
+                .runs
+                .into_iter()
+                .map(|entries| TestRun { entries })
+                .collect();
+            (runs, Sketch::new(0))
         }
     }
 

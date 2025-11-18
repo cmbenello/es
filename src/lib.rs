@@ -296,10 +296,9 @@ pub mod kll;
 pub mod order_preserving_encoding;
 pub mod ovc;
 pub mod rand;
-pub mod rs;
+pub mod replacement_selection;
 pub mod sort;
 pub mod sort_stats;
-pub mod sort_with_ovc;
 
 use std::path::{Path, PathBuf};
 
@@ -310,6 +309,7 @@ pub use diskio::file::{file_size_fd, pread_fd, pwrite_fd}; // , GlobalFileManage
 pub use diskio::io_stats::{IoStats, IoStatsTracker};
 pub use input_reader::csv_input_direct::{CsvDirectConfig, CsvInputDirect};
 pub use input_reader::gensort_input_direct::GenSortInputDirect;
-pub use sort::run::RunImpl;
-pub use sort::sorter::{ExternalSorter, RunGenerationAlgorithm, RunsOutput};
-pub use sort_with_ovc::sorter_with_ovc::{ExternalSorterWithOVC, RunsOutputWithOVC};
+pub use sort::engine::RunGenerationAlgorithm;
+pub use sort::ovc::sorter::{ExternalSorterWithOVC, RunsOutputWithOVC};
+pub use sort::plain::run::RunImpl;
+pub use sort::sorter::{ExternalSorter, RunsOutput};

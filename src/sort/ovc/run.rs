@@ -5,6 +5,7 @@ use crate::diskio::file::SharedFd;
 use crate::diskio::io_stats::IoStatsTracker;
 use crate::ovc::offset_value_coding::OVCFlag;
 use crate::ovc::offset_value_coding_u64::OVCU64;
+use crate::sort::core::engine::RunSummary;
 use std::io::{Read, Write};
 use std::sync::Arc;
 
@@ -310,12 +311,22 @@ impl Iterator for RunIteratorWithOVC {
     }
 }
 
+impl RunSummary for RunWithOVC {
+    fn total_entries(&self) -> usize {
+        self.total_entries
+    }
+
+    fn total_bytes(&self) -> usize {
+        self.total_bytes
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::diskio::aligned_writer::AlignedWriter;
     use crate::diskio::file::SharedFd;
-    use crate::sort_with_ovc::sort_buffer_with_ovc::SortBufferOVC;
+    use crate::sort::ovc::sort_buffer_with_ovc::SortBufferOVC;
     use std::fs;
     use std::path::PathBuf;
 

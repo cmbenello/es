@@ -4,16 +4,6 @@ use crate::ovc::offset_value_coding_u64::OVCU64;
 
 pub type ReplacementScanner = Box<dyn Iterator<Item = (Vec<u8>, Vec<u8>)> + Send>;
 
-/// Sink that receives events from the replacement selection driver.
-pub trait ReplacementSelectionSink {
-    /// Called before the driver emits records for a new run.
-    fn start_run(&mut self);
-    /// Called for every sorted record that should be appended to the current run.
-    fn push_record(&mut self, key: &[u8], value: &[u8]);
-    /// Called after the driver finishes producing a run.
-    fn finish_run(&mut self);
-}
-
 /// Timing information produced by the replacement selection driver.
 #[derive(Default)]
 pub struct ReplacementSelectionStats {
