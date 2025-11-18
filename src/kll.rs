@@ -541,7 +541,7 @@ where
         self.0.len()
     }
 
-    fn iter(&self) -> std::slice::Iter<T> {
+    fn iter(&self) -> std::slice::Iter<'_, T> {
         self.0.iter()
     }
 

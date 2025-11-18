@@ -1,7 +1,7 @@
 mod common;
 use common::test_dir;
 
-use es::{ExternalSorter, InMemInput, Sorter};
+use es::{ExternalSorter, InMemInput, RunGenerationAlgorithm, Sorter};
 use std::collections::HashMap;
 use std::thread;
 
@@ -23,6 +23,33 @@ fn test_basic_functionality() {
     assert_eq!(results[0], (b"a".to_vec(), b"1".to_vec()));
     assert_eq!(results[1], (b"m".to_vec(), b"13".to_vec()));
     assert_eq!(results[2], (b"z".to_vec(), b"26".to_vec()));
+}
+
+#[test]
+fn test_quicksort_run_generation_path() {
+    use rand::seq::SliceRandom;
+
+    let mut sorter = ExternalSorter::new(2, 4 * 1024, 2, 10000, test_dir());
+    sorter.set_run_generation_algorithm(RunGenerationAlgorithm::LoadSortStore);
+
+    let mut data = Vec::new();
+    for i in 0..500 {
+        let key = format!("{:06}", 500 - i).into_bytes();
+        let value = format!("value_{:06}", i).into_bytes();
+        data.push((key, value));
+    }
+
+    let mut rng = rand::rng();
+    data.shuffle(&mut rng);
+
+    let input = InMemInput { data };
+    let output = sorter.sort(Box::new(input)).unwrap();
+
+    let results: Vec<_> = output.iter().collect();
+    assert_eq!(results.len(), 500);
+    for i in 1..results.len() {
+        assert!(results[i - 1].0 <= results[i].0);
+    }
 }
 
 #[test]
@@ -129,6 +156,28 @@ fn test_duplicate_keys_and_stability() {
 }
 
 #[test]
+fn test_run_generation_stats_with_small_buffer() {
+    let mut sorter = ExternalSorter::new(1, 30, 1, 10000, test_dir());
+
+    let mut data = Vec::new();
+    for i in (0..10).rev() {
+        let key = format!("{:02}", i).into_bytes();
+        data.push((key, vec![i as u8]));
+    }
+
+    let input = InMemInput { data };
+    let output = sorter.sort(Box::new(input)).unwrap();
+    let stats = output.stats();
+    let run_lengths: Vec<_> = stats
+        .run_gen_stats
+        .runs_info
+        .iter()
+        .map(|info| info.entries)
+        .collect();
+    assert_eq!(run_lengths, vec![2, 2, 2, 2, 2]);
+}
+
+#[test]
 fn test_variable_sized_data() {
     let mut sorter = ExternalSorter::new(2, 1024 * 1024, 2, 10000, test_dir());
 
@@ -218,7 +267,6 @@ fn test_buffer_boundary_edge_cases() {
 }
 
 #[test]
-#[should_panic]
 fn test_entry_too_large_panics() {
     let mut sorter = ExternalSorter::new(1, 50, 1, 10000, test_dir());
 
@@ -229,7 +277,12 @@ fn test_entry_too_large_panics() {
     let data = vec![(key, value)];
     let input = InMemInput { data };
 
-    let _ = sorter.sort(Box::new(input));
+    // Should fail because entry is too large for buffer
+    let result = sorter.sort(Box::new(input));
+    assert!(
+        result.is_err(),
+        "Expected error for entry larger than buffer"
+    );
 }
 
 #[test]

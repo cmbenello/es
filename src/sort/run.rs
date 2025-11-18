@@ -97,7 +97,7 @@ impl RunImpl {
 }
 
 impl RunImpl {
-    pub fn append(&mut self, key: Vec<u8>, value: Vec<u8>) {
+    pub fn append(&mut self, key: &[u8], value: &[u8]) {
         let writer = self
             .writer
             .as_mut()
@@ -106,7 +106,7 @@ impl RunImpl {
         // Use sampling interval for sparse index
         if self.total_entries % self.indexing_interval == 0 {
             let index_entry = IndexEntry {
-                key: key.clone(),
+                key: key.to_vec(),
                 file_offset: self.total_bytes,
                 entry_number: self.total_entries,
             };
@@ -309,9 +309,9 @@ mod tests {
         let mut run = RunImpl::from_writer(writer).unwrap();
 
         // Append some entries
-        run.append(b"key1".to_vec(), b"value1".to_vec());
-        run.append(b"key2".to_vec(), b"value2".to_vec());
-        run.append(b"key3".to_vec(), b"value3".to_vec());
+        run.append(b"key1", b"value1");
+        run.append(b"key2", b"value2");
+        run.append(b"key3", b"value3");
         run.finalize_write();
 
         let mut iter = run.scan_range(&[], &[]);
@@ -342,11 +342,11 @@ mod tests {
         let mut run = RunImpl::from_writer(writer).unwrap();
 
         // Append entries
-        run.append(b"a".to_vec(), b"1".to_vec());
-        run.append(b"b".to_vec(), b"2".to_vec());
-        run.append(b"c".to_vec(), b"3".to_vec());
-        run.append(b"d".to_vec(), b"4".to_vec());
-        run.append(b"e".to_vec(), b"5".to_vec());
+        run.append(b"a", b"1");
+        run.append(b"b", b"2");
+        run.append(b"c", b"3");
+        run.append(b"d", b"4");
+        run.append(b"e", b"5");
         run.finalize_write();
 
         // Test inclusive lower bound
@@ -380,8 +380,8 @@ mod tests {
         let large_key = vec![b'k'; 1000];
         let large_value = vec![b'v'; 10000];
 
-        run.append(large_key.clone(), large_value.clone());
-        run.append(b"small".to_vec(), b"val".to_vec());
+        run.append(&large_key, &large_value);
+        run.append(b"small", b"val");
         run.finalize_write();
 
         let mut iter = run.scan_range(&[], &[]);
@@ -408,7 +408,7 @@ mod tests {
             let key = format!("key_{:04}", i).into_bytes();
             let value = format!("value_{:04}", i).into_bytes();
             entries.push((key.clone(), value.clone()));
-            run.append(key, value);
+            run.append(&key, &value);
         }
         run.finalize_write();
 
@@ -428,9 +428,9 @@ mod tests {
         let writer = get_test_writer("multi_scan");
         let mut run = RunImpl::from_writer(writer).unwrap();
 
-        run.append(b"a".to_vec(), b"1".to_vec());
-        run.append(b"b".to_vec(), b"2".to_vec());
-        run.append(b"c".to_vec(), b"3".to_vec());
+        run.append(b"a", b"1");
+        run.append(b"b", b"2");
+        run.append(b"c", b"3");
         run.finalize_write();
 
         // First scan
@@ -465,7 +465,7 @@ mod tests {
             let key = format!("key_{:02}", i).into_bytes();
             let value = format!("value_{:02}", i).into_bytes();
             expected_bytes += 8 + key.len() + value.len();
-            run.append(key, value);
+            run.append(&key, &value);
         }
 
         // Verify in-memory tracking
@@ -484,8 +484,10 @@ mod tests {
         let binary_key = vec![0, 1, 2, 3, 255, 254, 253, 252];
         let binary_value = vec![0; 100]; // 100 null bytes
 
-        run.append(binary_key.clone(), binary_value.clone());
-        run.append(vec![255; 5], vec![128; 10]);
+        run.append(&binary_key, &binary_value);
+        let key2 = vec![255; 5];
+        let value2 = vec![128; 10];
+        run.append(&key2, &value2);
         run.finalize_write();
 
         let mut iter = run.scan_range(&[], &[]);
@@ -524,12 +526,12 @@ mod tests {
             }
 
             entries.push((key.clone(), value.clone()));
-            run.append(key, value);
+            run.append(&key, &value);
             total_bytes += entry_size;
         }
 
         // Add one more entry to trigger flush
-        run.append(b"trigger".to_vec(), b"flush".to_vec());
+        run.append(b"trigger", b"flush");
         entries.push((b"trigger".to_vec(), b"flush".to_vec()));
         run.finalize_write();
 
@@ -548,7 +550,7 @@ mod tests {
         let writer = get_test_writer("finalize_idempotent");
         let mut run = RunImpl::from_writer(writer).unwrap();
 
-        run.append(b"key".to_vec(), b"value".to_vec());
+        run.append(b"key", b"value");
         run.finalize_write();
 
         // Can still scan after multiple finalizes
@@ -571,7 +573,7 @@ mod tests {
         ];
 
         for (key, value) in &test_cases {
-            run.append(key.as_bytes().to_vec(), value.as_bytes().to_vec());
+            run.append(key.as_bytes(), value.as_bytes());
         }
         run.finalize_write();
 
@@ -593,7 +595,7 @@ mod tests {
         for i in 0..10 {
             let key = format!("{:02}", i).into_bytes();
             let value = format!("v{}", i).into_bytes();
-            run.append(key, value);
+            run.append(&key, &value);
         }
         run.finalize_write();
 
@@ -617,16 +619,20 @@ mod tests {
         let mut run = RunImpl::from_writer(writer).unwrap();
 
         // Test empty key with non-empty value
-        run.append(vec![], b"value_for_empty_key".to_vec());
+        let empty_key = vec![];
+        run.append(&empty_key, b"value_for_empty_key");
 
         // Test non-empty key with empty value
-        run.append(b"key_with_empty_value".to_vec(), vec![]);
+        let empty_value = vec![];
+        run.append(b"key_with_empty_value", &empty_value);
 
         // Test both empty
-        run.append(vec![], vec![]);
+        let empty_key2 = vec![];
+        let empty_value2 = vec![];
+        run.append(&empty_key2, &empty_value2);
 
         // Test normal entry
-        run.append(b"normal".to_vec(), b"entry".to_vec());
+        run.append(b"normal", b"entry");
 
         run.finalize_write();
 
@@ -661,7 +667,7 @@ mod tests {
         for i in 0..count {
             let key = format!("{:05}", i).into_bytes();
             let value = b"v".to_vec();
-            run.append(key, value);
+            run.append(&key, &value);
         }
 
         run.finalize_write();
@@ -694,7 +700,7 @@ mod tests {
                 for j in 0..100 {
                     let key = format!("thread{}_{:03}", i, j).into_bytes();
                     let value = format!("value_{}", j).into_bytes();
-                    run.append(key, value);
+                    run.append(&key, &value);
                 }
 
                 run.finalize_write();
@@ -720,8 +726,8 @@ mod tests {
         let max_key = vec![b'k'; 1_000_000]; // 1MB key
         let max_value = vec![b'v'; 5_000_000]; // 5MB value
 
-        run.append(max_key.clone(), max_value.clone());
-        run.append(b"small".to_vec(), b"entry".to_vec());
+        run.append(&max_key, &max_value);
+        run.append(b"small", b"entry");
         run.finalize_write();
 
         let mut iter = run.scan_range(&[], &[]);
@@ -745,12 +751,12 @@ mod tests {
                 // Large entry
                 let key = format!("{:03}_large", i).into_bytes();
                 let value = vec![b'L'; 10_000];
-                run.append(key, value);
+                run.append(&key, &value);
             } else {
                 // Small entry
                 let key = format!("{:03}_small", i).into_bytes();
                 let value = b"s".to_vec();
-                run.append(key, value);
+                run.append(&key, &value);
             }
         }
         run.finalize_write();
@@ -776,7 +782,7 @@ mod tests {
         // Create a run with data
         let mut run = RunImpl::from_writer(writer).unwrap();
         for i in 0..10 {
-            run.append(format!("{:02}", i).into_bytes(), b"value".to_vec());
+            run.append(&format!("{:02}", i).into_bytes(), b"value");
         }
         run.finalize_write();
 
@@ -794,9 +800,9 @@ mod tests {
         let writer = get_test_writer("equal_bounds");
         let mut run = RunImpl::from_writer(writer).unwrap();
 
-        run.append(b"a".to_vec(), b"1".to_vec());
-        run.append(b"b".to_vec(), b"2".to_vec());
-        run.append(b"c".to_vec(), b"3".to_vec());
+        run.append(b"a", b"1");
+        run.append(b"b", b"2");
+        run.append(b"c", b"3");
         run.finalize_write();
 
         // Scan with equal lower and upper bounds - should return nothing
@@ -811,10 +817,10 @@ mod tests {
         let mut run = RunImpl::from_writer(writer).unwrap();
 
         // Add duplicate keys
-        run.append(b"key".to_vec(), b"value1".to_vec());
-        run.append(b"key".to_vec(), b"value2".to_vec());
-        run.append(b"key".to_vec(), b"value3".to_vec());
-        run.append(b"other".to_vec(), b"value".to_vec());
+        run.append(b"key", b"value1");
+        run.append(b"key", b"value2");
+        run.append(b"key", b"value3");
+        run.append(b"other", b"value");
         run.finalize_write();
 
         let iter = run.scan_range(&[], &[]);
@@ -851,7 +857,7 @@ mod tests {
             let key = format!("key_{:08}", i).into_bytes();
             let value = format!("value_data_{:08}", i).into_bytes();
             expected_logical_bytes += 8 + key.len() + value.len(); // 4 bytes key_len + 4 bytes value_len + key + value
-            run.append(key, value);
+            run.append(&key, &value);
         }
 
         // Finalize to ensure all data is written and flush to disk
@@ -902,7 +908,7 @@ mod tests {
             let key = format!("key_{:08}", i).into_bytes();
             let value = format!("value_data_{:08}", i).into_bytes();
             expected_logical_bytes += 8 + key.len() + value.len();
-            run.append(key, value);
+            run.append(&key, &value);
         }
 
         // Finalize write without tracking and flush to ensure data is on disk
@@ -985,7 +991,7 @@ mod tests {
         for i in 0..num_records {
             let key = format!("key_{:08}", i).into_bytes();
             let value = format!("value_data_{:08}", i).into_bytes();
-            run.append(key, value);
+            run.append(&key, &value);
         }
 
         let mut writer = run.finalize_write();
@@ -1052,7 +1058,7 @@ mod tests {
             let key = format!("key_{:08}", i).into_bytes();
             let value = format!("value_data_{:08}", i).into_bytes();
             run1_logical_bytes += 8 + key.len() + value.len();
-            run1.append(key, value);
+            run1.append(&key, &value);
         }
         let mut writer1 = run1.finalize_write();
         writer1.flush().unwrap();
@@ -1066,7 +1072,7 @@ mod tests {
             let key = format!("key_{:08}", i).into_bytes();
             let value = format!("value_data_{:08}", i).into_bytes();
             run2_logical_bytes += 8 + key.len() + value.len();
-            run2.append(key, value);
+            run2.append(&key, &value);
         }
         let mut writer2 = run2.finalize_write();
         writer2.flush().unwrap();
@@ -1142,7 +1148,7 @@ mod tests {
         for i in 0..50000 {
             let key = format!("{:05}", i).into_bytes();
             let value = vec![b'v'; 50]; // 50 byte value
-            run.append(key, value);
+            run.append(&key, &value);
         }
         let writer = run.finalize_write();
         drop(writer); // Ensure all data is written
@@ -1206,7 +1212,7 @@ mod tests {
         for i in 0..5000 {
             let key = format!("{:04}", i).into_bytes();
             let value = vec![b'x'; 50];
-            run.append(key, value);
+            run.append(&key, &value);
         }
         run.finalize_write();
 
@@ -1237,31 +1243,31 @@ mod tests {
 
         // Add 100 'a' entries
         for i in 0..100 {
-            run.append(b"a".to_vec(), format!("a_value_{}", i).into_bytes());
+            run.append(b"a", &format!("a_value_{}", i).into_bytes());
         }
         expected_counts.insert(b"a".to_vec(), 100);
 
         // Add 200 'b' entries
         for i in 0..200 {
-            run.append(b"b".to_vec(), format!("b_value_{}", i).into_bytes());
+            run.append(b"b", &format!("b_value_{}", i).into_bytes());
         }
         expected_counts.insert(b"b".to_vec(), 200);
 
         // Add 150 'c' entries
         for i in 0..150 {
-            run.append(b"c".to_vec(), format!("c_value_{}", i).into_bytes());
+            run.append(b"c", &format!("c_value_{}", i).into_bytes());
         }
         expected_counts.insert(b"c".to_vec(), 150);
 
         // Add 100 'd' entries
         for i in 0..100 {
-            run.append(b"d".to_vec(), format!("d_value_{}", i).into_bytes());
+            run.append(b"d", &format!("d_value_{}", i).into_bytes());
         }
         expected_counts.insert(b"d".to_vec(), 100);
 
         // Add 50 'e' entries
         for i in 0..50 {
-            run.append(b"e".to_vec(), format!("e_value_{}", i).into_bytes());
+            run.append(b"e", &format!("e_value_{}", i).into_bytes());
         }
         expected_counts.insert(b"e".to_vec(), 50);
 
@@ -1330,14 +1336,17 @@ mod tests {
         // 64KB / 108 ≈ 600 entries per index interval
 
         // Add 1000 entries each of 'aaa', 'bbb', 'ccc' to ensure sparse index has entries
+        let val_x = vec![b'x'; 97];
+        let val_y = vec![b'y'; 97];
+        let val_z = vec![b'z'; 97];
         for _ in 0..10000 {
-            run.append(b"aaa".to_vec(), vec![b'x'; 97]); // ~100 byte value
+            run.append(b"aaa", &val_x); // ~100 byte value
         }
         for _ in 0..10000 {
-            run.append(b"bbb".to_vec(), vec![b'y'; 97]);
+            run.append(b"bbb", &val_y);
         }
         for _ in 0..10000 {
-            run.append(b"ccc".to_vec(), vec![b'z'; 97]);
+            run.append(b"ccc", &val_z);
         }
 
         run.finalize_write();
@@ -1385,7 +1394,7 @@ mod tests {
         for i in 0..10 {
             let key = format!("{:02}", i).into_bytes();
             let value = format!("run1_val_{}", i).into_bytes();
-            run1.append(key, value);
+            run1.append(&key, &value);
         }
 
         // Take the writer to reuse it
@@ -1399,7 +1408,7 @@ mod tests {
         for i in 10..20 {
             let key = format!("{:02}", i).into_bytes();
             let value = format!("run2_val_{}", i).into_bytes();
-            run2.append(key, value);
+            run2.append(&key, &value);
         }
 
         // Take the writer again
@@ -1412,7 +1421,7 @@ mod tests {
         for i in 20..30 {
             let key = format!("{:02}", i).into_bytes();
             let value = format!("run3_val_{}", i).into_bytes();
-            run3.append(key, value);
+            run3.append(&key, &value);
         }
 
         // Verify byte ranges

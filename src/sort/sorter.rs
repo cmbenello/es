@@ -1,17 +1,24 @@
 use std::path::Path;
 use std::sync::Arc;
 use std::thread;
-use std::time::{Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+
+use rand::Rng;
 
 use crate::diskio::aligned_writer::AlignedWriter;
 use crate::diskio::file::SharedFd;
 use crate::diskio::io_stats::IoStatsTracker;
 use crate::kll::Sketch;
+use crate::rand::small_thread_rng;
+use crate::rs::replacement_selection::{ReplacementSelectionSink, run_replacement_selection};
 use crate::sort::merge::MergeIterator;
 use crate::sort::run::RunImpl;
 use crate::sort::sort_buffer::SortBuffer;
+use crate::sort::run_generation::{
+    RunGenerationThreadResult, RunSummary, Scanner, execute_run_generation,
+};
 use crate::{
-    MergeStats, RunGenerationStats, RunInfo, SortInput, SortOutput, SortStats, Sorter, TempDirInfo,
+    MergeStats, RunGenerationStats, SortInput, SortOutput, SortStats, Sorter, TempDirInfo,
 };
 
 // Abstraction for inputs to the merge function
@@ -116,6 +123,30 @@ impl MergeableRun {
     }
 }
 
+impl RunSummary for MergeableRun {
+    fn total_entries(&self) -> usize {
+        match self {
+            MergeableRun::Single(run) => run.total_entries(),
+            MergeableRun::RangePartitioned(runs) => runs.iter().map(|r| r.total_entries()).sum(),
+        }
+    }
+
+    fn total_bytes(&self) -> usize {
+        match self {
+            MergeableRun::Single(run) => run.total_bytes(),
+            MergeableRun::RangePartitioned(runs) => runs.iter().map(|r| r.total_bytes()).sum(),
+        }
+    }
+}
+
+pub(crate) const ENTRY_METADATA_SIZE: usize = std::mem::size_of::<u32>() * 2;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RunGenerationAlgorithm {
+    ReplacementSelection,
+    LoadSortStore,
+}
+
 // Helper iterator that chains multiple iterators for range-partitioned runs
 struct ChainedRangeIterator {
     iterators: Vec<Box<dyn Iterator<Item = (Vec<u8>, Vec<u8>)> + Send>>,
@@ -161,6 +192,127 @@ impl SortOutput for RunsOutput {
     }
 }
 
+struct RunWriterSink {
+    run_writer: Option<AlignedWriter>,
+    run_indexing_interval: usize,
+    sketch: Sketch<Vec<u8>>,
+    sketch_sampling_interval: usize,
+    records_seen: u64,
+    current_run: Option<RunImpl>,
+    runs: Vec<MergeableRun>,
+}
+
+impl RunWriterSink {
+    fn new(
+        run_writer: AlignedWriter,
+        run_indexing_interval: usize,
+        sketch_size: usize,
+        sketch_sampling_interval: usize,
+    ) -> Self {
+        Self {
+            run_writer: Some(run_writer),
+            run_indexing_interval,
+            sketch: Sketch::new(sketch_size),
+            sketch_sampling_interval,
+            records_seen: 0,
+            current_run: None,
+            runs: Vec::new(),
+        }
+    }
+
+    fn finalize_active_run(&mut self) {
+        if let Some(mut run) = self.current_run.take() {
+            let writer = run.finalize_write();
+            self.run_writer = Some(writer);
+            self.runs.push(MergeableRun::Single(run));
+        }
+    }
+
+    fn into_parts(mut self) -> (Vec<MergeableRun>, Sketch<Vec<u8>>) {
+        self.finalize_active_run();
+        self.run_writer.take();
+        (self.runs, self.sketch)
+    }
+}
+
+impl ReplacementSelectionSink for RunWriterSink {
+    fn start_run(&mut self) {
+        if self.current_run.is_some() {
+            return;
+        }
+
+        let writer = self
+            .run_writer
+            .take()
+            .expect("Run writer should be available when starting a run");
+        let run = RunImpl::from_writer_with_indexing_interval(writer, self.run_indexing_interval)
+            .expect("Failed to create run");
+        self.current_run = Some(run);
+    }
+
+    fn push_record(&mut self, key: &[u8], value: &[u8]) {
+        let run = self
+            .current_run
+            .as_mut()
+            .expect("run must be started before pushing records");
+
+        if self.records_seen % self.sketch_sampling_interval as u64 == 0 {
+            self.sketch.update(key.to_vec());
+        }
+        self.records_seen += 1;
+
+        run.append(key, value);
+    }
+
+    fn finish_run(&mut self) {
+        self.finalize_active_run();
+    }
+}
+
+pub(crate) fn append_record_to_buffer(
+    buffer: &mut SortBuffer,
+    key: Vec<u8>,
+    value: Vec<u8>,
+    run_size: usize,
+) -> Result<(), (Vec<u8>, Vec<u8>)> {
+    if buffer.has_space(&key, &value) {
+        let appended = buffer.append(key, value);
+        debug_assert!(appended, "SortBuffer reported space but append failed");
+        Ok(())
+    } else {
+        if buffer.is_empty() {
+            let entry_size = key.len() + value.len() + ENTRY_METADATA_SIZE;
+            panic!(
+                "Record of size {} bytes exceeds quicksort run size limit {} bytes",
+                entry_size, run_size
+            );
+        }
+        Err((key, value))
+    }
+}
+
+pub(crate) fn fill_sort_buffer(
+    buffer: &mut SortBuffer,
+    scanner: &mut dyn Iterator<Item = (Vec<u8>, Vec<u8>)>,
+    pending_record: &mut Option<(Vec<u8>, Vec<u8>)>,
+    run_size: usize,
+) {
+    if let Some((key, value)) = pending_record.take() {
+        append_record_to_buffer(buffer, key, value, run_size)
+            .expect("pending record must fit inside an empty buffer");
+    }
+
+    while let Some((key, value)) = scanner.next() {
+        match append_record_to_buffer(buffer, key, value, run_size) {
+            Ok(()) => {}
+            Err(record) => {
+                *pending_record = Some(record);
+                break;
+            }
+        }
+    }
+}
+
 // External sorter following sorter.rs pattern
 pub struct ExternalSorter {
     run_gen_threads: usize,
@@ -172,6 +324,7 @@ pub struct ExternalSorter {
     run_indexing_interval: usize,
     imbalance_factor: f64,
     temp_dir_info: Arc<TempDirInfo>,
+    run_gen_algorithm: RunGenerationAlgorithm,
 }
 
 impl ExternalSorter {
@@ -190,11 +343,11 @@ impl ExternalSorter {
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_nanos();
-        let temp_dir = base_dir.as_ref().join(format!(
-            "external_sort_{}_{}",
-            std::process::id(),
-            timestamp
-        ));
+        let random = small_thread_rng().random::<u32>();
+
+        let temp_dir = base_dir
+            .as_ref()
+            .join(format!("external_sort_{}_{}", random, timestamp));
         std::fs::create_dir_all(&temp_dir).unwrap();
 
         Self {
@@ -210,7 +363,16 @@ impl ExternalSorter {
                 should_delete: true,
             }),
             imbalance_factor: 1.0,
+            run_gen_algorithm: RunGenerationAlgorithm::ReplacementSelection,
         }
+    }
+
+    pub fn set_run_generation_algorithm(&mut self, algorithm: RunGenerationAlgorithm) {
+        self.run_gen_algorithm = algorithm;
+    }
+
+    pub fn run_generation_algorithm(&self) -> RunGenerationAlgorithm {
+        self.run_gen_algorithm
     }
 
     pub fn run_generation(
@@ -221,225 +383,134 @@ impl ExternalSorter {
         sketch_sampling_interval: usize,
         run_indexing_interval: usize,
         dir: impl AsRef<Path>,
+        algorithm: RunGenerationAlgorithm,
     ) -> Result<(Vec<MergeableRun>, Sketch<Vec<u8>>, RunGenerationStats), String> {
-        // Start timing for run generation
-        let run_generation_start = Instant::now();
+        match algorithm {
+            RunGenerationAlgorithm::ReplacementSelection => {
+                let worker = move |thread_id: usize,
+                                   scanner: Scanner,
+                                   io_tracker: Arc<IoStatsTracker>,
+                                   dir: std::path::PathBuf| {
+                    let run_path = dir.join(format!("intermediate_{}.dat", thread_id));
+                    let fd = Arc::new(
+                        SharedFd::new_from_path(&run_path)
+                            .expect("Failed to open run file with Direct I/O"),
+                    );
+                    let run_writer =
+                        AlignedWriter::from_fd_with_tracker(fd, Some((*io_tracker).clone()))
+                            .expect("Failed to create run writer");
 
-        // Create IO tracker for run generation phase
-        let run_generation_io_tracker = Arc::new(IoStatsTracker::new());
-
-        // Create parallel scanners for input data with IO tracking
-        let scanners = sort_input
-            .create_parallel_scanners(num_threads, Some((*run_generation_io_tracker).clone()));
-
-        println!(
-            "Starting sort with {} parallel scanners for run generation",
-            scanners.len()
-        );
-
-        if scanners.is_empty() {
-            return Ok((
-                vec![],
-                Sketch::new(sketch_size),
-                RunGenerationStats {
-                    num_runs: 0,
-                    runs_info: vec![],
-                    time_ms: 0,
-                    io_stats: None,
-                    load_time_ms: 0,
-                    sort_time_ms: 0,
-                    store_time_ms: 0,
-                },
-            ));
-        }
-
-        // Run Generation Phase (following sorter.rs pattern)
-        let mut handles = vec![];
-
-        for (thread_id, scanner) in scanners.into_iter().enumerate() {
-            let io_tracker = Arc::clone(&run_generation_io_tracker);
-            let dir = dir.as_ref().to_path_buf();
-
-            let handle = thread::spawn(move || {
-                let mut local_runs = Vec::new();
-                let mut sort_buffer = SortBuffer::new(run_size);
-                let mut sketch = Sketch::new(sketch_size);
-                // Phase timing accumulators (in ms)
-                let mut load_time_ms: u128 = 0;
-                let mut sort_time_ms: u128 = 0;
-                let mut store_time_ms: u128 = 0;
-
-                let run_path = dir.join(format!("intermediate_{}.dat", thread_id));
-                let fd = Arc::new(
-                    SharedFd::new_from_path(&run_path)
-                        .expect("Failed to open run file with Direct I/O"),
-                );
-                let mut run_writer = Option::Some(
-                    AlignedWriter::from_fd_with_tracker(fd, Some((*io_tracker).clone()))
-                        .expect("Failed to create run writer"),
-                );
-                let mut cnt = 0;
-                let mut load_phase_start = Instant::now();
-
-                for (key, value) in scanner {
-                    if !sort_buffer.has_space(&key, &value) {
-                        // Finish current load phase
-                        load_time_ms += load_phase_start.elapsed().as_millis();
-
-                        // Sort phase
-                        let sort_start = Instant::now();
-                        let iter = sort_buffer.sorted_iter();
-                        sort_time_ms += sort_start.elapsed().as_millis();
-
-                        // Store phase (includes run creation and finalize)
-                        let store_start = Instant::now();
-                        let mut output_run = RunImpl::from_writer_with_indexing_interval(
-                            run_writer.take().unwrap(),
-                            run_indexing_interval,
-                        )
-                        .expect("Failed to create run");
-
-                        for (k, v) in iter {
-                            if cnt % sketch_sampling_interval == 0 {
-                                sketch.update(k.clone());
-                            }
-                            cnt += 1;
-                            output_run.append(k, v);
-                        }
-
-                        // Finalize the run and get writer back
-                        run_writer = Some(output_run.finalize_write());
-                        store_time_ms += store_start.elapsed().as_millis();
-
-                        // Create a read-only run with proper metadata
-                        local_runs.push(MergeableRun::Single(output_run));
-
-                        sort_buffer.reset();
-                        if !sort_buffer.append(key, value) {
-                            panic!("Failed to append data to sort buffer, it should have space");
-                        }
-                        // Start next load phase
-                        load_phase_start = Instant::now();
-                    } else {
-                        sort_buffer.append(key, value);
-                    }
-                }
-
-                // Final buffer
-                if !sort_buffer.is_empty() {
-                    // Finish final load phase
-                    load_time_ms += load_phase_start.elapsed().as_millis();
-
-                    // Sort phase for final buffer
-                    let sort_start = Instant::now();
-                    let iter = sort_buffer.sorted_iter();
-                    sort_time_ms += sort_start.elapsed().as_millis();
-
-                    // Store phase for final buffer
-                    let store_start = Instant::now();
-                    let mut output_run = RunImpl::from_writer_with_indexing_interval(
-                        run_writer.take().unwrap(),
+                    let mut sink = RunWriterSink::new(
+                        run_writer,
                         run_indexing_interval,
-                    )
-                    .expect("Failed to create run");
+                        sketch_size,
+                        sketch_sampling_interval,
+                    );
+                    let thread_start = Instant::now();
+                    let _ = run_replacement_selection(scanner, &mut sink, run_size);
+                    let (local_runs, sketch) = sink.into_parts();
+                    let total_time_ms = thread_start.elapsed().as_millis();
 
-                    for (k, v) in iter {
-                        if cnt % sketch_sampling_interval == 0 {
-                            sketch.update(k.clone());
+                    println!(
+                        "Run gen thread {} ({:?}) breakdown: sort={} ms",
+                        thread_id,
+                        RunGenerationAlgorithm::ReplacementSelection,
+                        total_time_ms
+                    );
+
+                    RunGenerationThreadResult {
+                        runs: local_runs,
+                        sketch,
+                        load_ms: 0,
+                        sort_ms: total_time_ms,
+                        store_ms: 0,
+                    }
+                };
+
+                execute_run_generation(sort_input, num_threads, sketch_size, dir, worker)
+            }
+            RunGenerationAlgorithm::LoadSortStore => {
+                let worker = move |thread_id: usize,
+                                   scanner: Scanner,
+                                   io_tracker: Arc<IoStatsTracker>,
+                                   dir: std::path::PathBuf| {
+                    let run_path = dir.join(format!("intermediate_{}.dat", thread_id));
+                    let fd = Arc::new(
+                        SharedFd::new_from_path(&run_path)
+                            .expect("Failed to open run file with Direct I/O"),
+                    );
+                    let run_writer =
+                        AlignedWriter::from_fd_with_tracker(fd, Some((*io_tracker).clone()))
+                            .expect("Failed to create run writer");
+
+                    let mut sink = RunWriterSink::new(
+                        run_writer,
+                        run_indexing_interval,
+                        sketch_size,
+                        sketch_sampling_interval,
+                    );
+                    let mut scanner = scanner;
+                    let mut buffer = SortBuffer::new(run_size);
+                    let mut pending_record: Option<(Vec<u8>, Vec<u8>)> = None;
+                    let mut load_duration = Duration::default();
+                    let mut sort_duration = Duration::default();
+                    let mut store_duration = Duration::default();
+
+                    loop {
+                        let load_start = Instant::now();
+                        fill_sort_buffer(
+                            &mut buffer,
+                            scanner.as_mut(),
+                            &mut pending_record,
+                            run_size,
+                        );
+                        load_duration += load_start.elapsed();
+
+                        if buffer.is_empty() {
+                            break;
                         }
-                        cnt += 1;
-                        output_run.append(k, v);
+
+                        let sort_start = Instant::now();
+                        let mut sorted_iter = buffer.sorted_iter();
+                        sort_duration += sort_start.elapsed();
+
+                        sink.start_run();
+                        let store_start = Instant::now();
+                        for (key, value) in sorted_iter {
+                            sink.push_record(&key, &value);
+                        }
+                        sink.finish_run();
+                        store_duration += store_start.elapsed();
+
+                        buffer.reset();
                     }
 
-                    // Finalize the run and get writer back
-                    run_writer = Some(output_run.finalize_write());
-                    store_time_ms += store_start.elapsed().as_millis();
+                    let (local_runs, sketch) = sink.into_parts();
+                    let load_ms = load_duration.as_millis();
+                    let sort_ms = sort_duration.as_millis();
+                    let store_ms = store_duration.as_millis();
 
-                    // Create a read-only run with proper metadata
-                    local_runs.push(MergeableRun::Single(output_run));
-                }
+                    println!(
+                        "Run gen thread {} ({:?}) breakdown: load={} ms, sort={} ms, store={} ms",
+                        thread_id,
+                        RunGenerationAlgorithm::LoadSortStore,
+                        load_ms,
+                        sort_ms,
+                        store_ms
+                    );
 
-                drop(run_writer); // Ensure the writer is closed
+                    RunGenerationThreadResult {
+                        runs: local_runs,
+                        sketch,
+                        load_ms,
+                        sort_ms,
+                        store_ms,
+                    }
+                };
 
-                // Print per-thread breakdown for visibility
-                println!(
-                    "Run gen thread {} breakdown: load={} ms, sort={} ms, store={} ms",
-                    thread_id, load_time_ms, sort_time_ms, store_time_ms
-                );
-
-                (
-                    local_runs,
-                    sketch,
-                    (load_time_ms, sort_time_ms, store_time_ms),
-                )
-            });
-
-            handles.push(handle);
+                execute_run_generation(sort_input, num_threads, sketch_size, dir, worker)
+            }
         }
-
-        // Collect runs from all threads
-        let mut output_runs = Vec::new();
-        let mut sketch = Sketch::new(sketch_size); // Combine sketches from all threads
-        let mut total_load_ms: u128 = 0;
-        let mut total_sort_ms: u128 = 0;
-        let mut total_store_ms: u128 = 0;
-        let mut threads_count: u128 = 0;
-        for handle in handles {
-            let (runs, thread_sketch, (load_ms, sort_ms, store_ms)) = handle.join().unwrap();
-            output_runs.extend(runs);
-            sketch.merge(&thread_sketch);
-            total_load_ms += load_ms;
-            total_sort_ms += sort_ms;
-            total_store_ms += store_ms;
-            threads_count += 1;
-        }
-
-        let initial_runs_count = output_runs.len();
-
-        // Capture run generation time
-        let run_generation_time = run_generation_start.elapsed();
-        let run_generation_time_ms = run_generation_time.as_millis();
-        println!(
-            "Generated {} runs in {} ms",
-            initial_runs_count, run_generation_time_ms
-        );
-
-        // Capture initial run info (before any merging)
-        let initial_runs_info: Vec<RunInfo> = output_runs
-            .iter()
-            .map(|run| RunInfo {
-                entries: run.total_entries(),
-                file_size: run.total_bytes() as u64,
-            })
-            .collect();
-
-        // Capture run generation IO stats
-        let run_generation_io_stats = Some(run_generation_io_tracker.get_detailed_stats());
-
-        // Average the per-thread times across threads
-        let (avg_load_ms, avg_sort_ms, avg_store_ms) = if threads_count > 0 {
-            (
-                total_load_ms / threads_count,
-                total_sort_ms / threads_count,
-                total_store_ms / threads_count,
-            )
-        } else {
-            (0, 0, 0)
-        };
-
-        Ok((
-            output_runs,
-            sketch,
-            RunGenerationStats {
-                num_runs: initial_runs_count,
-                runs_info: initial_runs_info,
-                time_ms: run_generation_time_ms,
-                io_stats: run_generation_io_stats,
-                load_time_ms: avg_load_ms,
-                sort_time_ms: avg_sort_ms,
-                store_time_ms: avg_store_ms,
-            },
-        ))
     }
 
     /// Performs multi-level merge if needed based on memory constraints
@@ -639,7 +710,7 @@ impl ExternalSorter {
                 let merge_iter = MergeIterator::new(iterators);
 
                 for (key, value) in merge_iter {
-                    output_run.append(key, value);
+                    output_run.append(&key, &value);
                 }
 
                 // Finalize to flush
@@ -731,6 +802,7 @@ impl Sorter for ExternalSorter {
             self.sketch_sampling_interval,
             self.run_indexing_interval,
             self.temp_dir_info.as_ref(),
+            self.run_gen_algorithm,
         )?;
 
         // Use multi-level merge with memory-aware policy
@@ -772,7 +844,7 @@ mod tests {
         for i in 0..100 {
             let key = format!("a{:02}", i).into_bytes();
             let value = format!("value_{}", i).into_bytes();
-            run0.append(key, value);
+            run0.append(&key, &value);
         }
         run0.finalize_write();
 
@@ -784,7 +856,7 @@ mod tests {
         for i in 0..100 {
             let key = format!("b{:02}", i).into_bytes();
             let value = format!("value_{}", i + 100).into_bytes();
-            run1.append(key, value);
+            run1.append(&key, &value);
         }
         run1.finalize_write();
 
@@ -796,7 +868,7 @@ mod tests {
         for i in 0..100 {
             let key = format!("c{:02}", i).into_bytes();
             let value = format!("value_{}", i + 200).into_bytes();
-            run2.append(key, value);
+            run2.append(&key, &value);
         }
         run2.finalize_write();
 
@@ -883,6 +955,7 @@ mod tests {
             sketch_sampling_interval,
             run_indexing_interval,
             temp_dir.path(),
+            RunGenerationAlgorithm::ReplacementSelection,
         )
         .unwrap();
 

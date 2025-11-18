@@ -11,7 +11,7 @@ fn test_dir() -> PathBuf {
     PathBuf::from("./test_runs_ovc")
 }
 
-use es::{ExternalSorterWithOVC, InMemInput, Sorter};
+use es::{ExternalSorterWithOVC, InMemInput, RunGenerationAlgorithm, Sorter};
 
 #[test]
 fn test_basic_sort_with_ovc() {
@@ -34,6 +34,33 @@ fn test_basic_sort_with_ovc() {
     assert_eq!(results[1].1, b"2");
     assert_eq!(results[2].0, b"c");
     assert_eq!(results[2].1, b"3");
+}
+
+#[test]
+fn test_load_sort_store_run_generation_with_ovc() {
+    use rand::seq::SliceRandom;
+
+    let mut sorter = ExternalSorterWithOVC::new(2, 4 * 1024, 2, 10000, test_dir());
+    sorter.set_run_generation_algorithm(RunGenerationAlgorithm::LoadSortStore);
+
+    let mut data = Vec::new();
+    for i in 0..400 {
+        let key = format!("{:06}", 400 - i).into_bytes();
+        let value = format!("value_{:06}", i).into_bytes();
+        data.push((key, value));
+    }
+
+    let mut rng = rand::rng();
+    data.shuffle(&mut rng);
+
+    let input = InMemInput { data };
+    let output = sorter.sort(Box::new(input)).unwrap();
+
+    let results: Vec<_> = output.iter().collect();
+    assert_eq!(results.len(), 400);
+    for i in 1..results.len() {
+        assert!(results[i - 1].0 <= results[i].0);
+    }
 }
 
 #[test]
@@ -199,6 +226,28 @@ fn test_sort_stats_with_ovc() {
         let total_merge_time: u128 = stats.per_merge_stats.iter().map(|m| m.time_ms).sum();
         assert!(total_merge_time > 0);
     }
+}
+
+#[test]
+fn test_ovc_run_generation_stats_with_small_buffer() {
+    let mut sorter = ExternalSorterWithOVC::new(1, 30, 1, 10000, test_dir());
+
+    let mut data = Vec::new();
+    for i in (0..10).rev() {
+        let key = format!("{:02}", i).into_bytes();
+        data.push((key, vec![i as u8]));
+    }
+
+    let input = InMemInput { data };
+    let output = sorter.sort(Box::new(input)).unwrap();
+    let stats = output.stats();
+    let run_lengths: Vec<_> = stats
+        .run_gen_stats
+        .runs_info
+        .iter()
+        .map(|info| info.entries)
+        .collect();
+    assert_eq!(run_lengths, vec![2, 2, 2, 2, 2]);
 }
 
 #[test]
