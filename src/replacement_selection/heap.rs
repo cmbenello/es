@@ -65,18 +65,19 @@ impl BinaryHeapReplacementSelection {
             }
 
             let record = current_heap.pop().expect("heap shouldn't be empty");
-            memory_used = memory_used.saturating_sub(record.size);
+            memory_used = memory_used.saturating_sub(record.size());
 
             sink.push_record(&record.key, &record.value);
             records_emitted += 1;
 
-            self.try_insert_next(
+            // Fill freed memory with as many records as possible
+            while self.try_insert_next(
                 &mut current_heap,
                 &mut future_heap,
                 &mut memory_used,
                 &mut pending_record,
                 &record.key,
-            );
+            ) {}
         }
 
         sink.finish_run();
@@ -110,7 +111,7 @@ impl BinaryHeapReplacementSelection {
             }
 
             *memory_used += size;
-            heap.push(HeapRecord::with_size(key, value, size));
+            heap.push(HeapRecord::new(key, value));
 
             if *memory_used >= self.memory_limit {
                 break;
@@ -118,6 +119,9 @@ impl BinaryHeapReplacementSelection {
         }
     }
 
+    /// Tries to insert the next record from input into the appropriate heap.
+    /// Returns `true` if a record was successfully inserted, `false` if no record
+    /// was available or if the memory limit would be exceeded.
     #[allow(clippy::too_many_arguments)]
     fn try_insert_next(
         &mut self,
@@ -126,10 +130,10 @@ impl BinaryHeapReplacementSelection {
         memory_used: &mut usize,
         pending_record: &mut Option<(Vec<u8>, Vec<u8>)>,
         last_output_key: &[u8],
-    ) {
+    ) -> bool {
         let maybe_record = next_record(pending_record, self.scanner.as_mut());
         let Some((key, value)) = maybe_record else {
-            return;
+            return false;
         };
 
         let size = key.len() + value.len() + ENTRY_METADATA_SIZE;
@@ -137,7 +141,7 @@ impl BinaryHeapReplacementSelection {
 
         if *memory_used + size > self.memory_limit {
             *pending_record = Some((key, value));
-            return;
+            return false;
         }
 
         *memory_used += size;
@@ -147,7 +151,8 @@ impl BinaryHeapReplacementSelection {
             current_heap
         };
 
-        target_heap.push(HeapRecord::with_size(key, value, size));
+        target_heap.push(HeapRecord::new(key, value));
+        true
     }
 }
 
@@ -155,12 +160,15 @@ impl BinaryHeapReplacementSelection {
 struct HeapRecord {
     key: Vec<u8>,
     value: Vec<u8>,
-    size: usize,
 }
 
 impl HeapRecord {
-    fn with_size(key: Vec<u8>, value: Vec<u8>, size: usize) -> Self {
-        Self { key, value, size }
+    fn new(key: Vec<u8>, value: Vec<u8>) -> Self {
+        Self { key, value }
+    }
+
+    fn size(&self) -> usize {
+        self.key.len() + self.value.len() + ENTRY_METADATA_SIZE
     }
 }
 
