@@ -1,4 +1,5 @@
 use clap::Parser;
+use es::benchmark::input::KvBinInputProvider;
 use es::benchmark::{
     BenchmarkConfig, BenchmarkInputProvider, BenchmarkResult, BenchmarkRunner,
     LineitemCsvInputProvider, LineitemCsvVerifier, print_benchmark_summary,
@@ -46,12 +47,13 @@ use std::path::PathBuf;
 
 #[derive(Parser)]
 #[command(name = "lineitem_benchmark")]
-#[command(about = "TPC-H Lineitem CSV Sort Benchmark")]
+#[command(about = "TPC-H Lineitem Sort Benchmark (CSV or KVBin)")]
 struct Args {
+    /// Friendly name recorded in results
     #[arg(short, default_value = "no_name")]
     name: String,
 
-    /// Input CSV file path
+    /// Input file path (.csv or .kvbin)
     #[arg(short, long)]
     input: PathBuf,
 
@@ -75,11 +77,11 @@ struct Args {
     #[arg(long, default_value = "1.0")]
     imbalance_factor: f64,
 
-    /// Key column indices (comma-separated)
+    /// Key column indices (CSV only; comma-separated)
     #[arg(short = 'k', long, default_value = "8,9,13,14,15")]
     key_columns: String,
 
-    /// Value column indices (comma-separated)
+    /// Value column indices (CSV only; comma-separated)
     #[arg(short = 'v', long, default_value = "0,3")]
     value_columns: String,
 
@@ -103,15 +105,15 @@ struct Args {
     #[arg(short, long, default_value = ".")]
     dir: PathBuf,
 
-    /// CSV delimiter character
+    /// CSV delimiter character (CSV only)
     #[arg(long, default_value = ",")]
     delimiter: char,
 
-    /// CSV has headers
+    /// CSV has headers (CSV only)
     #[arg(long, default_value = "true")]
     headers: bool,
 
-    /// Verify sorted output
+    /// Verify sorted output (CSV verifier)
     #[arg(long, default_value = "false")]
     verify: bool,
 
@@ -142,27 +144,40 @@ fn parse_columns(column_str: &str) -> Vec<usize> {
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args = Args::parse();
 
-    // Parse column indices
-    let key_columns = parse_columns(&args.key_columns);
-    let value_columns = parse_columns(&args.value_columns);
+    // Decide CSV vs KVBin by extension
+    let ext = args
+        .input
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("")
+        .to_ascii_lowercase();
 
-    // Create input provider for CSV files
-    let input_provider = LineitemCsvInputProvider::new(
-        args.input,
-        key_columns.clone(),
-        value_columns,
-        args.delimiter,
-        args.headers,
-    );
+    // Build provider
+    let input_provider: Box<dyn BenchmarkInputProvider> = if ext == "kvbin" {
+        Box::new(KvBinInputProvider {
+            path: args.input.clone(),
+        })
+    } else {
+        let key_columns = parse_columns(&args.key_columns);
+        let value_columns = parse_columns(&args.value_columns);
 
-    // If only estimating size, compute and print, then exit
+        Box::new(LineitemCsvInputProvider::new(
+            args.input.clone(),
+            key_columns.clone(),
+            value_columns,
+            args.delimiter,
+            args.headers,
+        ))
+    };
+
+    // Estimate-only mode
     if args.estimate_size {
         let estimated_mb = input_provider.estimate_data_size_mb()?;
         println!("Estimated data size: {:.2} MB", estimated_mb);
         return Ok(());
     }
 
-    // Unwrap required args (clap enforces presence when not estimating)
+    // Required params for full run
     let run_gen_threads = args
         .run_gen_threads
         .expect("--run-gen-threads required unless --estimate-size");
@@ -176,7 +191,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .merge_fanin
         .expect("--merge-fanin required unless --estimate-size");
 
-    // Create benchmark configuration
+    // Benchmark config
     let config = BenchmarkConfig {
         config_name: args.name,
         warmup_runs: args.warmup_runs,
@@ -199,22 +214,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         imbalance_factor: args.imbalance_factor,
     };
 
-    let input_provider = Box::new(input_provider);
-
-    // Create benchmark runner
+    // Runner
     let mut runner = BenchmarkRunner::new(config, input_provider);
 
-    // Set up verification if requested
-    if args.verify {
+    // CSV-only verification
+    if args.verify && ext != "kvbin" {
+        let key_columns = parse_columns(&args.key_columns);
         let verifier = LineitemCsvVerifier::new(key_columns);
         runner.set_verifier(Box::new(verifier));
     }
 
-    // Run single benchmark configuration
+    // Run and summarize
     let result: BenchmarkResult = runner.run_configuration()?;
-
-    // Print comprehensive summary
     print_benchmark_summary(&result);
-
     Ok(())
 }
