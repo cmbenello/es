@@ -1,9 +1,12 @@
 use clap::Parser;
+use es::benchmark::input::KvBinInputProvider;
 use es::benchmark::{
     BenchmarkConfig, BenchmarkInputProvider, BenchmarkResult, BenchmarkRunner,
     YellowTaxiCsvInputProvider, YellowTaxiCsvVerifier, print_benchmark_summary,
 };
 use es::diskio::constants::DEFAULT_BUFFER_SIZE;
+use es::input_reader::kvbin_input_direct::KvBinInputDirect;
+use es::kvbin::{binary_file_name, create_kvbin_from_input};
 use std::path::PathBuf;
 
 // NYC Yellow Taxi Dataset Column Reference
@@ -60,6 +63,10 @@ struct Args {
     /// Input CSV file path
     #[arg(short, long)]
     input: PathBuf,
+
+    /// Use KVBin binary format for input. Create if not existing.
+    #[arg(long, default_value = "true")]
+    use_binary_format: bool,
 
     /// Only estimate dataset size (MB) and exit
     #[arg(long, default_value = "false")]
@@ -159,13 +166,43 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let value_columns = parse_columns(&args.value_columns);
 
     // Create input provider for CSV files
-    let input_provider = YellowTaxiCsvInputProvider::new(
-        args.input,
-        key_columns.clone(),
-        value_columns,
-        args.delimiter,
-        args.headers,
-    );
+    let input_provider = if args.use_binary_format {
+        let (data_path, idx_path) = binary_file_name(&args.input, &key_columns, &value_columns)?;
+        if data_path.exists() && idx_path.exists() {
+            println!("Using existing KVBin file: {:?}", data_path);
+            Box::new(KvBinInputProvider::new(data_path, idx_path))
+                as Box<dyn BenchmarkInputProvider>
+        } else {
+            println!("Creating KVBin file: {:?}", data_path);
+            let start = std::time::Instant::now();
+            // Create KVBin input provider by converting from CSV
+            let csv_provider = YellowTaxiCsvInputProvider::new(
+                args.input,
+                key_columns.clone(),
+                value_columns,
+                args.delimiter,
+                args.headers,
+            );
+            create_kvbin_from_input(
+                csv_provider.create_sort_input()?,
+                &data_path,
+                &idx_path,
+                args.run_indexing_interval,
+            )?;
+            let duration = start.elapsed();
+            println!("KVBin file created in {:.2?}", duration);
+            Box::new(KvBinInputProvider::new(data_path, idx_path))
+                as Box<dyn BenchmarkInputProvider>
+        }
+    } else {
+        Box::new(YellowTaxiCsvInputProvider::new(
+            args.input,
+            key_columns.clone(),
+            value_columns,
+            args.delimiter,
+            args.headers,
+        ))
+    };
 
     // If only estimating size, compute and print, then exit
     if args.estimate_size {
@@ -210,8 +247,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             * (DEFAULT_BUFFER_SIZE as f64 / 1024.0 / 1024.0),
         imbalance_factor: args.imbalance_factor,
     };
-
-    let input_provider = Box::new(input_provider);
 
     // Create benchmark runner
     let mut runner = BenchmarkRunner::new(config, input_provider);

@@ -13,22 +13,29 @@ pub trait BenchmarkInputProvider {
     fn get_description(&self) -> String;
 }
 pub struct KvBinInputProvider {
-    pub path: PathBuf,
+    pub data_path: PathBuf,
+    pub index_path: PathBuf,
 }
 
 impl KvBinInputProvider {
-    pub fn new(path: PathBuf) -> Self {
-        Self { path }
+    pub fn new(data_path: PathBuf, index_path: PathBuf) -> Self {
+        Self {
+            data_path,
+            index_path,
+        }
     }
 }
 
 impl BenchmarkInputProvider for KvBinInputProvider {
     fn create_sort_input(&self) -> Result<Box<dyn SortInput>, Box<dyn std::error::Error>> {
-        Ok(Box::new(KvBinInputDirect::new(&self.path)?))
+        Ok(Box::new(KvBinInputDirect::new(
+            self.data_path.clone(),
+            self.index_path.clone(),
+        )?))
     }
 
     fn estimate_data_size_mb(&self) -> Result<f64, Box<dyn std::error::Error>> {
-        let meta = std::fs::metadata(&self.path)?;
+        let meta = std::fs::metadata(&self.data_path)?;
         Ok(meta.len() as f64 / (1024.0 * 1024.0))
     }
 
@@ -37,7 +44,11 @@ impl BenchmarkInputProvider for KvBinInputProvider {
     }
 
     fn get_description(&self) -> String {
-        format!("KVBin file: {}", self.path.display())
+        format!(
+            "KVBin data: {}, index: {}",
+            self.data_path.display(),
+            self.index_path.display()
+        )
     }
 }
 

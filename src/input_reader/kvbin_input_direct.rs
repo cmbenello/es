@@ -12,55 +12,59 @@ use crate::{IoStatsTracker, SortInput};
 pub struct KvBinInputDirect {
     fd: Arc<SharedFd>,
     file_size: u64,
-    checkpoints: Vec<u64>,
+    index: Vec<u64>,
 }
 
 impl KvBinInputDirect {
-    pub fn new(path: impl AsRef<Path>) -> Result<Self, String> {
-        let path = path.as_ref();
-        let fd = Arc::new(SharedFd::new_from_path(path).map_err(|e| e.to_string())?);
+    pub fn new(data_path: impl AsRef<Path>, idx_path: impl AsRef<Path>) -> Result<Self, String> {
+        let fd = Arc::new(SharedFd::new_from_path(&data_path).map_err(|e| e.to_string())?);
         let file_size = file_size_fd(fd.as_raw_fd()).map_err(|e| e.to_string())?;
-        let checkpoints = Self::load_checkpoints(path, file_size);
+        let index = Self::load_index(&idx_path, file_size)?;
 
-        if checkpoints.len() <= 2 {
-            panic!("No valid index found for '{}'", path.display());
+        if index.len() <= 2 {
+            return Err(format!(
+                "Index file '{}' has insufficient checkpoints (found {}, need at least 2)",
+                idx_path.as_ref().display(),
+                index.len()
+            ));
         }
 
-        Ok(Self { fd, file_size, checkpoints })
+        Ok(Self {
+            fd,
+            file_size,
+            index,
+        })
     }
 
-    fn load_checkpoints(path: &Path, file_size: u64) -> Vec<u64> {
-        let candidates = [
-            PathBuf::from(format!("{}.idx", path.display())),
-            path.parent()
-                .and_then(|p| path.file_stem().map(|s| p.join(s).with_extension("idx")))
-                .unwrap_or_default(),
-        ];
+    fn load_index(index_file: impl AsRef<Path>, file_size: u64) -> Result<Vec<u64>, String> {
+        let mut index_points = vec![0];
 
-        let mut cps = vec![0];
+        let mut index_file = File::open(index_file)
+            .map_err(|e| format!("Failed to open index file: {e}"))?;
+        let size = index_file.metadata().map_err(|e| format!("Failed to get index file metadata: {e}"))?.len();
 
-        for p in candidates.iter().filter(|p| p.as_os_str().len() > 0) {
-            if let Ok(mut f) = File::open(p).map(BufReader::new) {
-                let mut buf = Vec::new();
-                if f.read_to_end(&mut buf).is_ok() && buf.len() % 8 == 0 {
-                    cps.extend(
-                        buf.chunks_exact(8)
-                            .map(|c| u64::from_le_bytes(c.try_into().unwrap()))
-                            .filter(|&off| off > 0 && off < file_size),
-                    );
-                    break;
-                }
-            }
+        let mut buf = Vec::with_capacity(size as usize);
+        unsafe {
+            buf.set_len(size as usize);
         }
+        index_file
+            .read_exact(&mut buf)
+            .map_err(|e| format!("Failed to read index file: {e}"))?;
 
-        cps.push(file_size);
-        cps.sort_unstable();
-        cps.dedup();
-        cps
+        index_points.extend(
+            buf.chunks_exact(8)
+                .map(|c| u64::from_le_bytes(c.try_into().unwrap()))
+                .filter(|&off| off > 0 && off < file_size),
+        );
+
+        index_points.push(file_size);
+        index_points.sort_unstable();
+        index_points.dedup();
+        Ok(index_points)
     }
 
     fn partition_ranges(&self, want: usize) -> Vec<(u64, u64)> {
-        let n_blocks = self.checkpoints.len().saturating_sub(1);
+        let n_blocks = self.index.len().saturating_sub(1);
 
         if n_blocks == 0 || want <= 1 {
             return vec![(0, self.file_size)];
@@ -73,13 +77,13 @@ impl KvBinInputDirect {
         let mut block_idx = 0;
 
         for i in 0..parts {
-            let start = self.checkpoints[block_idx];
+            let start = self.index[block_idx];
             // Distribute remaining blocks evenly among remaining partitions
             let remaining_blocks = n_blocks - block_idx;
             let remaining_parts = parts - i;
             let num_blocks = (remaining_blocks + remaining_parts - 1) / remaining_parts;
             block_idx += num_blocks;
-            let end = self.checkpoints[block_idx];
+            let end = self.index[block_idx];
             ranges.push((start, end));
         }
 
@@ -102,8 +106,11 @@ impl SortInput for KvBinInputDirect {
                     io_tracker.clone(),
                 )
                 .expect("failed to open reader");
-                Box::new(KvBinScanner { rdr, end, done: false })
-                    as Box<dyn Iterator<Item = (Vec<u8>, Vec<u8>)> + Send>
+                Box::new(KvBinScanner {
+                    rdr,
+                    end,
+                    done: false,
+                }) as Box<dyn Iterator<Item = (Vec<u8>, Vec<u8>)> + Send>
             })
             .collect()
     }
@@ -120,7 +127,10 @@ impl KvBinScanner {
     #[inline(always)]
     fn read_u32(&mut self) -> Option<u32> {
         let mut b = [0u8; 4];
-        self.rdr.read_exact(&mut b).ok().map(|_| u32::from_le_bytes(b))
+        self.rdr
+            .read_exact(&mut b)
+            .ok()
+            .map(|_| u32::from_le_bytes(b))
     }
 
     #[inline(always)]
@@ -129,7 +139,9 @@ impl KvBinScanner {
             return Some(Vec::new());
         }
         let mut buf = Vec::with_capacity(len);
-        unsafe { buf.set_len(len); }
+        unsafe {
+            buf.set_len(len);
+        }
         self.rdr.read_exact(&mut buf).ok().map(|_| buf)
     }
 }
@@ -221,9 +233,9 @@ mod tests {
             .map(|i| record_offset(&records, i))
             .filter(|&o| o < file_size)
             .collect();
-        create_index_file(dir.path(), "test.kvbin.idx", &offsets);
+        let idx_path = create_index_file(dir.path(), "test.kvbin.idx", &offsets);
 
-        let input = KvBinInputDirect::new(&kvbin_path).unwrap();
+        let input = KvBinInputDirect::new(kvbin_path, idx_path).unwrap();
 
         // Test single scanner
         let results: Vec<_> = input
@@ -269,9 +281,9 @@ mod tests {
             .map(|i| record_offset(&records, i))
             .filter(|&o| o < file_size)
             .collect();
-        create_index_file(dir.path(), "test.kvbin.idx", &offsets);
+        let idx_path = create_index_file(dir.path(), "test.kvbin.idx", &offsets);
 
-        let input = KvBinInputDirect::new(&kvbin_path).unwrap();
+        let input = KvBinInputDirect::new(kvbin_path, idx_path).unwrap();
         let results: Vec<_> = input
             .create_parallel_scanners(1, None)
             .into_iter()
@@ -292,10 +304,7 @@ mod tests {
         let large_key = vec![b'K'; 10000];
         let large_val = vec![b'V'; 50000];
 
-        let records: Vec<(&[u8], &[u8])> = vec![
-            (&large_key, &large_val),
-            (b"small", b"record"),
-        ];
+        let records: Vec<(&[u8], &[u8])> = vec![(&large_key, &large_val), (b"small", b"record")];
 
         let kvbin_path = create_kvbin_file(dir.path(), "test.kvbin", &records);
         let file_size = std::fs::metadata(&kvbin_path).unwrap().len();
@@ -304,9 +313,9 @@ mod tests {
             .map(|i| record_offset(&records, i))
             .filter(|&o| o < file_size)
             .collect();
-        create_index_file(dir.path(), "test.kvbin.idx", &offsets);
+        let idx_path = create_index_file(dir.path(), "test.kvbin.idx", &offsets);
 
-        let input = KvBinInputDirect::new(&kvbin_path).unwrap();
+        let input = KvBinInputDirect::new(kvbin_path, idx_path).unwrap();
         let results: Vec<_> = input
             .create_parallel_scanners(1, None)
             .into_iter()
@@ -322,10 +331,7 @@ mod tests {
     #[test]
     fn test_stem_index_file() {
         let dir = TempDir::new().unwrap();
-        let records: Vec<(&[u8], &[u8])> = vec![
-            (b"key1", b"val1"),
-            (b"key2", b"val2"),
-        ];
+        let records: Vec<(&[u8], &[u8])> = vec![(b"key1", b"val1"), (b"key2", b"val2")];
 
         let kvbin_path = create_kvbin_file(dir.path(), "data.kvbin", &records);
         let file_size = std::fs::metadata(&kvbin_path).unwrap().len();
@@ -335,9 +341,9 @@ mod tests {
             .map(|i| record_offset(&records, i))
             .filter(|&o| o < file_size)
             .collect();
-        create_index_file(dir.path(), "data.idx", &offsets);
+        let idx_path = create_index_file(dir.path(), "data.idx", &offsets);
 
-        let input = KvBinInputDirect::new(&kvbin_path).unwrap();
+        let input = KvBinInputDirect::new(kvbin_path, idx_path).unwrap();
         let results: Vec<_> = input
             .create_parallel_scanners(1, None)
             .into_iter()
@@ -352,19 +358,16 @@ mod tests {
     #[test]
     fn test_partition_ranges() {
         let dir = TempDir::new().unwrap();
-        let records: Vec<(&[u8], &[u8])> = vec![
-            (b"a", b"1"),
-            (b"b", b"2"),
-        ];
+        let records: Vec<(&[u8], &[u8])> = vec![(b"a", b"1"), (b"b", b"2")];
 
         let kvbin_path = create_kvbin_file(dir.path(), "test.kvbin", &records);
         let file_size = std::fs::metadata(&kvbin_path).unwrap().len();
 
         // Single checkpoint
         let offsets = vec![record_offset(&records, 1)];
-        create_index_file(dir.path(), "test.kvbin.idx", &offsets);
+        let idx_path = create_index_file(dir.path(), "test.kvbin.idx", &offsets);
 
-        let input = KvBinInputDirect::new(&kvbin_path).unwrap();
+        let input = KvBinInputDirect::new(kvbin_path, idx_path).unwrap();
 
         // Request 1 scanner - should get full range
         let ranges = input.partition_ranges(1);
@@ -379,12 +382,20 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "No valid index found")]
     fn test_missing_index() {
         let dir = TempDir::new().unwrap();
         let records: Vec<(&[u8], &[u8])> = vec![(b"key", b"val")];
         let kvbin_path = create_kvbin_file(dir.path(), "test.kvbin", &records);
-        let _ = KvBinInputDirect::new(&kvbin_path).unwrap();
+        let idx_path = dir.path().join("nonexistent.idx");
+        let result = KvBinInputDirect::new(kvbin_path, idx_path);
+        match result {
+            Err(e) => assert!(
+                e.contains("Failed to open index file"),
+                "Unexpected error: {}",
+                e
+            ),
+            Ok(_) => panic!("Expected error for missing index file"),
+        }
     }
 
     #[test]
@@ -394,10 +405,17 @@ mod tests {
 
         // Create 1000 records
         let records: Vec<(Vec<u8>, Vec<u8>)> = (0..1000)
-            .map(|i| (format!("key{:04}", i).into_bytes(), format!("val{:04}", i).into_bytes()))
+            .map(|i| {
+                (
+                    format!("key{:04}", i).into_bytes(),
+                    format!("val{:04}", i).into_bytes(),
+                )
+            })
             .collect();
-        let record_refs: Vec<(&[u8], &[u8])> =
-            records.iter().map(|(k, v)| (k.as_slice(), v.as_slice())).collect();
+        let record_refs: Vec<(&[u8], &[u8])> = records
+            .iter()
+            .map(|(k, v)| (k.as_slice(), v.as_slice()))
+            .collect();
 
         let kvbin_path = create_kvbin_file(dir.path(), "test.kvbin", &record_refs);
         let file_size = std::fs::metadata(&kvbin_path).unwrap().len();
@@ -408,18 +426,15 @@ mod tests {
             .map(|i| record_offset(&record_refs, i))
             .filter(|&o| o < file_size)
             .collect();
-        create_index_file(dir.path(), "test.kvbin.idx", &offsets);
+        let idx_path = create_index_file(dir.path(), "test.kvbin.idx", &offsets);
 
-        let input = KvBinInputDirect::new(&kvbin_path).unwrap();
+        let input = KvBinInputDirect::new(kvbin_path.clone(), idx_path.clone()).unwrap();
 
         // Test with 8 scanners
         let num_scanners = 8;
         let scanners = input.create_parallel_scanners(num_scanners, None);
 
-        let scanner_counts: Vec<usize> = scanners
-            .into_iter()
-            .map(|s| s.count())
-            .collect();
+        let scanner_counts: Vec<usize> = scanners.into_iter().map(|s| s.count()).collect();
 
         let total: usize = scanner_counts.iter().sum();
         assert_eq!(total, 1000, "Total records should be 1000");
@@ -434,7 +449,8 @@ mod tests {
                 let diff = c as f64 - mean;
                 diff * diff
             })
-            .sum::<f64>() / scanner_counts.len() as f64;
+            .sum::<f64>()
+            / scanner_counts.len() as f64;
         let std_dev = variance.sqrt();
 
         println!("Mean: {:.1}, Std Dev: {:.1}", mean, std_dev);
@@ -443,11 +459,12 @@ mod tests {
         assert!(
             std_dev < mean * 0.5,
             "Distribution too uneven: std_dev={:.1}, mean={:.1}",
-            std_dev, mean
+            std_dev,
+            mean
         );
 
         // Verify all records readable
-        let input2 = KvBinInputDirect::new(&kvbin_path).unwrap();
+        let input2 = KvBinInputDirect::new(kvbin_path, idx_path).unwrap();
         let all_results: Vec<_> = input2
             .create_parallel_scanners(num_scanners, None)
             .into_iter()

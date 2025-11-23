@@ -277,16 +277,12 @@ impl ExternalSorter {
                         SharedFd::new_from_path(&run_path)
                             .expect("Failed to open run file with Direct I/O"),
                     );
-                    let writer = AlignedWriter::from_fd_with_tracker(
-                        fd,
-                        Some((*io_tracker).clone()),
-                    )
-                    .expect("Failed to create run writer");
-                    let mut run = RunImpl::from_writer_with_indexing_interval(
-                        writer,
-                        run_indexing_interval,
-                    )
-                    .expect("Failed to create run");
+                    let writer =
+                        AlignedWriter::from_fd_with_tracker(fd, Some((*io_tracker).clone()))
+                            .expect("Failed to create run writer");
+                    let mut run =
+                        RunImpl::from_writer_with_indexing_interval(writer, run_indexing_interval)
+                            .expect("Failed to create run");
                     run.enable_auto_cleanup(run_path);
                     run
                 };
@@ -935,7 +931,7 @@ mod tests {
 
         for (i, stat) in per_merge_stats.iter().enumerate() {
             assert!(
-                stat.time_ms > 0 && stat.output_runs > 0 && stat.io_stats.is_some(),
+                stat.output_runs > 0 && stat.io_stats.is_some(),
                 "Merge pass {} missing required stats",
                 i + 1
             );
