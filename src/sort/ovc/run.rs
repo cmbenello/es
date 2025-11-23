@@ -6,6 +6,7 @@ use crate::diskio::io_stats::IoStatsTracker;
 use crate::ovc::offset_value_coding::OVCFlag;
 use crate::ovc::offset_value_coding_u64::OVCU64;
 use std::fs;
+use crate::sort::core::engine::RunSummary;
 use std::io::{Read, Write};
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -121,7 +122,7 @@ impl Drop for RunWithOVC {
 }
 
 impl RunWithOVC {
-    pub fn append(&mut self, ovc: OVCU64, key: Vec<u8>, value: Vec<u8>) {
+    pub fn append(&mut self, ovc: OVCU64, key: &[u8], value: &[u8]) {
         let writer = self
             .writer
             .as_mut()
@@ -130,7 +131,7 @@ impl RunWithOVC {
         // Use sampling interval for sparse index
         if self.total_entries % self.indexing_interval == 0 {
             let index_entry = IndexEntry {
-                key: key.clone(),
+                key: key.to_vec(),
                 file_offset: self.total_bytes,
                 entry_number: self.total_entries,
             };
@@ -332,13 +333,22 @@ impl Iterator for RunIteratorWithOVC {
     }
 }
 
+impl RunSummary for RunWithOVC {
+    fn total_entries(&self) -> usize {
+        self.total_entries
+    }
+
+    fn total_bytes(&self) -> usize {
+        self.total_bytes
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::diskio::aligned_writer::AlignedWriter;
     use crate::diskio::file::SharedFd;
-    use crate::sort::sort_buffer::SortBuffer;
-    use crate::sort_with_ovc::sort_buffer_with_ovc::SortBufferOVC;
+    use crate::sort::ovc::sort_buffer_with_ovc::SortBufferOVC;
     use std::fs;
     use std::path::PathBuf;
 
@@ -377,21 +387,9 @@ mod tests {
         let mut run = RunWithOVC::from_writer(writer).unwrap();
 
         // Append some data
-        run.append(
-            OVCU64::initial_value(),
-            b"key1".to_vec(),
-            b"value1".to_vec(),
-        );
-        run.append(
-            OVCU64::initial_value(),
-            b"key2".to_vec(),
-            b"value2".to_vec(),
-        );
-        run.append(
-            OVCU64::initial_value(),
-            b"key3".to_vec(),
-            b"value3".to_vec(),
-        );
+        run.append(OVCU64::initial_value(), b"key1", b"value1");
+        run.append(OVCU64::initial_value(), b"key2", b"value2");
+        run.append(OVCU64::initial_value(), b"key3", b"value3");
 
         assert_eq!(run.total_entries, 3);
         assert!(run.total_bytes > 0);
@@ -409,9 +407,9 @@ mod tests {
         let mut run = RunWithOVC::from_writer(writer).unwrap();
 
         // Write sorted data
-        run.append(OVCU64::initial_value(), b"a".to_vec(), b"1".to_vec());
-        run.append(OVCU64::initial_value(), b"b".to_vec(), b"2".to_vec());
-        run.append(OVCU64::initial_value(), b"c".to_vec(), b"3".to_vec());
+        run.append(OVCU64::initial_value(), b"a", b"1");
+        run.append(OVCU64::initial_value(), b"b", b"2");
+        run.append(OVCU64::initial_value(), b"c", b"3");
 
         let mut writer = run.finalize_write();
         writer.flush().unwrap();
@@ -439,11 +437,11 @@ mod tests {
         let mut run = RunWithOVC::from_writer(writer).unwrap();
 
         // Write sorted data
-        run.append(OVCU64::initial_value(), b"a".to_vec(), b"1".to_vec());
-        run.append(OVCU64::initial_value(), b"b".to_vec(), b"2".to_vec());
-        run.append(OVCU64::initial_value(), b"c".to_vec(), b"3".to_vec());
-        run.append(OVCU64::initial_value(), b"d".to_vec(), b"4".to_vec());
-        run.append(OVCU64::initial_value(), b"e".to_vec(), b"5".to_vec());
+        run.append(OVCU64::initial_value(), b"a", b"1");
+        run.append(OVCU64::initial_value(), b"b", b"2");
+        run.append(OVCU64::initial_value(), b"c", b"3");
+        run.append(OVCU64::initial_value(), b"d", b"4");
+        run.append(OVCU64::initial_value(), b"e", b"5");
 
         let mut writer = run.finalize_write();
         writer.flush().unwrap();
@@ -485,7 +483,7 @@ mod tests {
         // Add more entries than reservoir size
         for i in 0..20 {
             let key = format!("key_{:02}", i);
-            run.append(OVCU64::initial_value(), key.into_bytes(), b"value".to_vec());
+            run.append(OVCU64::initial_value(), &key.into_bytes(), b"value");
         }
 
         let writer = run.finalize_write();
@@ -545,16 +543,8 @@ mod tests {
         // Create large values
         let large_value = vec![b'x'; 1000];
 
-        run.append(
-            OVCU64::initial_value(),
-            b"key1".to_vec(),
-            large_value.clone(),
-        );
-        run.append(
-            OVCU64::initial_value(),
-            b"key2".to_vec(),
-            large_value.clone(),
-        );
+        run.append(OVCU64::initial_value(), b"key1", &large_value);
+        run.append(OVCU64::initial_value(), b"key2", &large_value);
 
         let mut writer = run.finalize_write();
         writer.flush().unwrap();
@@ -575,12 +565,8 @@ mod tests {
         let start_pos = writer.position() as usize;
         let mut run = RunWithOVC::from_writer(writer).unwrap();
 
-        run.append(OVCU64::initial_value(), b"key".to_vec(), b"value".to_vec());
-        run.append(
-            OVCU64::initial_value(),
-            b"key2".to_vec(),
-            b"value2".to_vec(),
-        );
+        run.append(OVCU64::initial_value(), b"key", b"value");
+        run.append(OVCU64::initial_value(), b"key2", b"value2");
 
         let (start, end) = run.byte_range();
         assert_eq!(start, start_pos);
@@ -595,21 +581,9 @@ mod tests {
         let mut run = RunWithOVC::from_writer(writer).unwrap();
 
         // Write with specific OVC values
-        run.append(
-            OVCU64::normal_value(&[10], 0),
-            b"key1".to_vec(),
-            b"val1".to_vec(),
-        );
-        run.append(
-            OVCU64::normal_value(&[20], 0),
-            b"key2".to_vec(),
-            b"val2".to_vec(),
-        );
-        run.append(
-            OVCU64::normal_value(&[30], 0),
-            b"key3".to_vec(),
-            b"val3".to_vec(),
-        );
+        run.append(OVCU64::normal_value(&[10], 0), b"key1", b"val1");
+        run.append(OVCU64::normal_value(&[20], 0), b"key2", b"val2");
+        run.append(OVCU64::normal_value(&[30], 0), b"key3", b"val3");
 
         let writer = run.finalize_write();
         drop(writer); // Close writer to flush data
@@ -639,7 +613,7 @@ mod tests {
         let writer = AlignedWriter::from_fd(fd.clone()).unwrap();
         let mut run = RunWithOVC::from_writer(writer).unwrap();
         for (ovc, key, value) in buffer.sorted_iter() {
-            run.append(ovc, key, value);
+            run.append(ovc, &key, &value);
         }
         let writer = run.finalize_write();
         drop(writer); // Close writer to flush data

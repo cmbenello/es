@@ -2,8 +2,8 @@ use super::input::BenchmarkInputProvider;
 use super::types::{BenchmarkConfig, BenchmarkResult};
 use super::verification::OutputVerifier;
 use crate::{
-    ExternalSorter, ExternalSorterWithOVC, RunsOutput, RunsOutputWithOVC, SortInput, SortOutput,
-    SortStats,
+    ExternalSorter, ExternalSorterWithOVC, RunGenerationAlgorithm, RunsOutput, RunsOutputWithOVC,
+    SortInput, SortOutput, SortStats,
 };
 use std::fs::File;
 use std::os::fd::AsRawFd;
@@ -115,6 +115,7 @@ impl BenchmarkRunner {
                     self.config.sketch_sampling_interval,
                     self.config.run_indexing_interval,
                     &temp_dir,
+                    RunGenerationAlgorithm::ReplacementSelection,
                 )?;
 
                 let (_merged_runs, multi_merge_stats) = ExternalSorterWithOVC::multi_merge(
@@ -137,6 +138,7 @@ impl BenchmarkRunner {
                     self.config.sketch_sampling_interval,
                     self.config.run_indexing_interval,
                     &temp_dir,
+                    RunGenerationAlgorithm::ReplacementSelection,
                 )?;
 
                 let mergeable_runs: Vec<crate::sort::sorter::MergeableRun> = runs;
@@ -258,6 +260,7 @@ impl BenchmarkRunner {
                 self.config.sketch_sampling_interval,
                 self.config.run_indexing_interval,
                 temp_dir,
+                RunGenerationAlgorithm::ReplacementSelection,
             )?;
 
             let (merged_run, multi_merge_stats) = ExternalSorterWithOVC::multi_merge(
@@ -282,6 +285,7 @@ impl BenchmarkRunner {
                 self.config.sketch_sampling_interval,
                 self.config.run_indexing_interval,
                 temp_dir,
+                RunGenerationAlgorithm::ReplacementSelection,
             )?;
 
             let (merged_run, multi_merge_stats) = ExternalSorter::multi_merge(

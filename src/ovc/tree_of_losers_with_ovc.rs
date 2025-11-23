@@ -151,6 +151,18 @@ impl<T: OVCTrait> TreeOfLosersWithOVC<T> {
         }
     }
 
+    pub fn top(&mut self) -> Option<(usize, &T)> {
+        if self.entries[0].value.is_late_fence() {
+            None
+        } else if self.entries[0].value.is_early_fence() {
+            let curr = self.curr;
+            self.curr += 1;
+            Some((curr, &self.entries[0].value))
+        } else {
+            Some((self.entries[0].run_id, &self.entries[0].value))
+        }
+    }
+
     pub fn node_index(&self, run_id: usize) -> usize {
         // Calculate the index of the node in the tree corresponding to the run_id.
         // The input_leaf_start is the starting index for the leaf nodes in the entries vector.
@@ -395,9 +407,7 @@ mod test {
     use super::*;
     use crate::ovc::{
         offset_value_coding_u64::{encode_run_with_ovc64, encode_runs_with_ovc64},
-        utils::{
-            generate_random_string_array, generate_runs, generate_string_runs, generate_vec_runs,
-        },
+        utils::generate_random_string_array,
     };
 
     #[test]
@@ -406,8 +416,6 @@ mod test {
         //     vec![vec![1, 2, 3], vec![3, 4, 5], vec![5, 6, 7]],
         //     vec![vec![2, 3, 4], vec![4, 5, 6], vec![6, 7, 8]],
         // ];
-        let num_runs = 10;
-        let num_entries_per_run = 10;
         // let runs = generate_vec_runs(num_runs, num_entries_per_run, 5);
         let runs = vec![
             // Run 0
