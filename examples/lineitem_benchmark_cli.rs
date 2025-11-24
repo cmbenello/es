@@ -6,7 +6,7 @@ use es::benchmark::{
 };
 use es::diskio::constants::DEFAULT_BUFFER_SIZE;
 use es::kvbin::{binary_file_name, create_kvbin_from_input};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 // TPC-H lineitem column cardinality reference table
 // Column Index | Column Name         | DataType      | Cardinality | Distinct Values    | Category

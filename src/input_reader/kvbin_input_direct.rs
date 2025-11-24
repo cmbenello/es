@@ -1,6 +1,6 @@
 use std::fs::File;
-use std::io::{BufReader, Read};
-use std::path::{Path, PathBuf};
+use std::io::Read;
+use std::path::Path;
 use std::sync::Arc;
 
 use crate::diskio::aligned_reader::AlignedReader;
@@ -176,6 +176,7 @@ mod tests {
     use super::*;
     use std::io::Write;
     use tempfile::TempDir;
+    use std::path::PathBuf;
 
     /// Helper to create a KVBin file with given key-value pairs
     fn create_kvbin_file(dir: &Path, name: &str, records: &[(&[u8], &[u8])]) -> PathBuf {

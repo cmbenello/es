@@ -1,0 +1,155 @@
+[Log_0.0]: Run Size: 12.74 MB, Run Gen Threads: 10, Merge Threads: 10, OVC: no
+warning: unused import: `BufReader`
+ --> src/input_reader/kvbin_input_direct.rs:2:15
+  |
+2 | use std::io::{BufReader, Read};
+  |               ^^^^^^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused import: `PathBuf`
+ --> src/input_reader/kvbin_input_direct.rs:3:23
+  |
+3 | use std::path::{Path, PathBuf};
+  |                       ^^^^^^^
+
+warning: hiding a lifetime that's elided elsewhere is confusing
+   --> src/kll.rs:544:13
+    |
+544 |     fn iter(&self) -> std::slice::Iter<T> {
+    |             ^^^^^     ^^^^^^^^^^^^^^^^^^^ the same lifetime is hidden here
+    |             |
+    |             the lifetime is elided here
+    |
+    = help: the same lifetime is referred to in inconsistent ways, making the signature confusing
+    = note: `#[warn(mismatched_lifetime_syntaxes)]` on by default
+help: use `'_` for type paths
+    |
+544 |     fn iter(&self) -> std::slice::Iter<'_, T> {
+    |                                        +++
+
+warning: `es` (lib) generated 3 warnings (run `cargo fix --lib -p es` to apply 3 suggestions)
+warning: unused import: `Path`
+ --> examples/lineitem_benchmark_cli.rs:9:17
+  |
+9 | use std::path::{Path, PathBuf};
+  |                 ^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: `es` (example "lineitem_benchmark_cli") generated 1 warning (run `cargo fix --example "lineitem_benchmark_cli" -p es` to apply 1 suggestion)
+    Finished `release` profile [optimized] target(s) in 0.08s
+     Running `target/release/examples/lineitem_benchmark_cli -n Log_0.0 -i lineitem_sf10.csv --run-gen-threads 10 --merge-threads 10 --run-size-mb 12.74 --merge-fanin 20000 --warmup-runs 1 --benchmark-runs 3 --cooldown-seconds 60 --dir logs/lineitem_bench_2025-11-23_16-13-11/Log_0.0_tmp`
+Creating KVBin file: "lineitem_sf10.k-8-9-13-14-15.v-0-3.kvbin"
+KVBin file created in 228.98s
+
+=== BENCHMARK MODE ===
+KVBin data: lineitem_sf10.k-8-9-13-14-15.v-0-3.kvbin, index: lineitem_sf10.k-8-9-13-14-15.v-0-3.kvbin.idx
+Estimated data size: 3992.27 MB
+Run generation threads: 10
+Run size (MB): 12.74
+Run generation memory (MB): 127.4
+Merge threads: 10
+Merge fan-in: 20000
+Merge memory (MB): 12500.0
+OVC enabled: false
+Temporary directory: "logs/lineitem_bench_2025-11-23_16-13-11/Log_0.0_tmp"
+Warmup runs: 1
+Runs per configuration: 3
+Cooldown between runs (s): 60
+Verify output: false
+
+Running benchmark for config: Log_0.0
+Parameters: Run Gen Threads: 10, Run Size: 12.74 MB, Run Gen Memory: 127.4 MB, Merge Threads: 10, Merge Fanin: 20000, Merge Memory: 12500.0 MB, Imbalance Factor: 1.0
+================================================================================
+  Performing 1 warmup run(s)...
+    Warmup 1/1: Starting sort with 10 parallel scanners for run generation
+Run gen thread 9 breakdown: load=4891 ms, sort=2896 ms, store=23509 ms
+Run gen thread 0 breakdown: load=5251 ms, sort=2902 ms, store=24282 ms
+Run gen thread 2 breakdown: load=5077 ms, sort=2906 ms, store=25906 ms
+Run gen thread 1 breakdown: load=5370 ms, sort=2843 ms, store=25984 ms
+Run gen thread 7 breakdown: load=5294 ms, sort=2987 ms, store=26350 ms
+Run gen thread 6 breakdown: load=5279 ms, sort=2938 ms, store=26538 ms
+Run gen thread 5 breakdown: load=5616 ms, sort=2748 ms, store=26421 ms
+Run gen thread 4 breakdown: load=5152 ms, sort=2859 ms, store=27050 ms
+Run gen thread 8 breakdown: load=5778 ms, sort=3034 ms, store=26282 ms
+Run gen thread 3 breakdown: load=5487 ms, sort=2978 ms, store=26784 ms
+Generated 320 runs in 35303 ms
+Merging all 320 runs in single pass
+Merging 320 runs using 10 threads
+Merge phase took 18435 ms | Merged 59986091 entries across 10 runs | Thread timing: min=14612 ms, max=18434 ms | Partition sizes: imbalance=1.03x
+53.74s
+  Warmup complete.
+
+  Run 1/3: Starting sort with 10 parallel scanners for run generation
+Run gen thread 0 breakdown: load=4786 ms, sort=3030 ms, store=27783 ms
+Run gen thread 5 breakdown: load=5297 ms, sort=2955 ms, store=27773 ms
+Run gen thread 1 breakdown: load=5389 ms, sort=3021 ms, store=28882 ms
+Run gen thread 4 breakdown: load=5468 ms, sort=3168 ms, store=28807 ms
+Run gen thread 8 breakdown: load=5412 ms, sort=3040 ms, store=29319 ms
+Run gen thread 2 breakdown: load=5347 ms, sort=3024 ms, store=29464 ms
+Run gen thread 6 breakdown: load=5223 ms, sort=2904 ms, store=29893 ms
+Run gen thread 7 breakdown: load=5154 ms, sort=3134 ms, store=29852 ms
+Run gen thread 9 breakdown: load=5379 ms, sort=2955 ms, store=29936 ms
+Run gen thread 3 breakdown: load=5466 ms, sort=3045 ms, store=29822 ms
+Generated 320 runs in 38389 ms
+Merging all 320 runs in single pass
+Merging 320 runs using 10 threads
+Merge phase took 18856 ms | Merged 59986091 entries across 10 runs | Thread timing: min=15032 ms, max=18856 ms | Partition sizes: imbalance=1.04x
+SortStats:
+  Number of runs: 320
+  (R) time: 38389 ms
+  (R) breakdown: load=5292 ms, sort=3027 ms, store=29153 ms
+  (R) I/O stats: I/O Stats: Read Ops: 63882, Read Bytes: 4186489856, Write Ops: 63931, Write Bytes: 4186291200
+  (M) time: 18856 ms
+  Read amplification:
+    Run generation writes: 4186291200 bytes (3.90 GB)
+    Merge phase reads: 4497062912 bytes (4.19 GB)
+    Read amplification factor: 1.07x
+    Excess reads: 7.4% (sparse indexing overhead)
+  Thread timing:
+    Min thread time: 15032 ms
+    Max thread time: 18856 ms
+    Avg thread time: 18112 ms
+    Time imbalance factor (max/avg): 1.04x
+    Thread times: [15032, 18523, 18589, 18832, 18856, 18051, 18443, 18721, 18824, 17248]
+
+57.25s
+
+  Cooling down for 60s before next run...
+  Run 2/3: Starting sort with 10 parallel scanners for run generation
+Run gen thread 0 breakdown: load=5160 ms, sort=4264 ms, store=26767 ms
+Run gen thread 2 breakdown: load=5197 ms, sort=3506 ms, store=28563 ms
+Run gen thread 1 breakdown: load=5250 ms, sort=3186 ms, store=29617 ms
+Run gen thread 7 breakdown: load=5382 ms, sort=3872 ms, store=29638 ms
+Run gen thread 9 breakdown: load=5327 ms, sort=3801 ms, store=29772 ms
+Run gen thread 8 breakdown: load=5319 ms, sort=4171 ms, store=29455 ms
+Run gen thread 3 breakdown: load=5330 ms, sort=3734 ms, store=29946 ms
+Run gen thread 4 breakdown: load=5381 ms, sort=3591 ms, store=30186 ms
+Run gen thread 6 breakdown: load=5579 ms, sort=3679 ms, store=30055 ms
+Run gen thread 5 breakdown: load=5614 ms, sort=3540 ms, store=30319 ms
+Generated 320 runs in 39526 ms
+Merging all 320 runs in single pass
+Merging 320 runs using 10 threads
+Merge phase took 19858 ms | Merged 59986091 entries across 10 runs | Thread timing: min=18082 ms, max=19858 ms | Partition sizes: imbalance=1.04x
+SortStats:
+  Number of runs: 320
+  (R) time: 39526 ms
+  (R) breakdown: load=5353 ms, sort=3734 ms, store=29431 ms
+  (R) I/O stats: I/O Stats: Read Ops: 63882, Read Bytes: 4186489856, Write Ops: 63931, Write Bytes: 4186291200
+  (M) time: 19858 ms
+  Read amplification:
+    Run generation writes: 4186291200 bytes (3.90 GB)
+    Merge phase reads: 4500536320 bytes (4.19 GB)
+    Read amplification factor: 1.08x
+    Excess reads: 7.5% (sparse indexing overhead)
+  Thread timing:
+    Min thread time: 18082 ms
+    Max thread time: 19858 ms
+    Avg thread time: 19266 ms
+    Time imbalance factor (max/avg): 1.03x
+    Thread times: [18814, 19365, 19594, 19450, 19858, 18938, 19353, 19558, 19648, 18082]
+
+59.38s
+
+  Cooling down for 60s before next run...

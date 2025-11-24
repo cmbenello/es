@@ -5,6 +5,8 @@
 /test_cleanup
 *.csv
 *.parquet
+*.kvbin
+*.idx
 *.txt
 *.data
 *.dat

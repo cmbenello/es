@@ -5,7 +5,6 @@ use es::benchmark::{
     YellowTaxiCsvInputProvider, YellowTaxiCsvVerifier, print_benchmark_summary,
 };
 use es::diskio::constants::DEFAULT_BUFFER_SIZE;
-use es::input_reader::kvbin_input_direct::KvBinInputDirect;
 use es::kvbin::{binary_file_name, create_kvbin_from_input};
 use std::path::PathBuf;
 
