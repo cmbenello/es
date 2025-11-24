@@ -4,11 +4,11 @@
 # Each record is 100 bytes
 
 # Create output directory if it doesn't exist
-OUTPUT_DIR="../gensort_data"
+OUTPUT_DIR="./datasets"
 mkdir -p "$OUTPUT_DIR"
 
 # Path to gensort binary
-GENSORT="./gensort"
+GENSORT="./dataset_generator/gensort"
 
 # Number of threads to use (default to number of CPU cores)
 THREADS=$(nproc)
