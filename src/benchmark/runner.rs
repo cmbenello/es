@@ -2,8 +2,8 @@ use super::input::BenchmarkInputProvider;
 use super::types::{BenchmarkConfig, BenchmarkResult};
 use super::verification::OutputVerifier;
 use crate::{
-    ExternalSorter, ExternalSorterWithOVC, RunGenerationAlgorithm, RunsOutput, RunsOutputWithOVC,
-    SortInput, SortOutput, SortStats,
+    ExternalSorter, ExternalSorterWithOVC, RunsOutput, RunsOutputWithOVC, SortInput, SortOutput,
+    SortStats,
 };
 use std::fs::File;
 use std::os::fd::AsRawFd;
@@ -36,8 +36,9 @@ impl BenchmarkRunner {
 
         println!("Running benchmark for config: {}", self.config.config_name);
         println!(
-            "Parameters: Run Gen Threads: {}, Run Size: {:.2} MB, Run Gen Memory: {:.1} MB, Merge Threads: {}, Merge Fanin: {}, Merge Memory: {:.1} MB, Imbalance Factor: {:.1}",
+            "Parameters: Run Gen Threads: {}, Run Gen Algorithm: {}, Run Size: {:.2} MB, Run Gen Memory: {:.1} MB, Merge Threads: {}, Merge Fanin: {}, Merge Memory: {:.1} MB, Imbalance Factor: {:.1}",
             self.config.run_gen_threads,
+            self.config.run_gen_algorithm,
             self.config.run_size_mb,
             self.config.run_gen_memory_mb,
             self.config.merge_threads,
@@ -68,6 +69,10 @@ impl BenchmarkRunner {
         }
         println!("Estimated data size: {:.2} MB", dataset_mb);
         println!("Run generation threads: {}", self.config.run_gen_threads);
+        println!(
+            "Run generation algorithm: {}",
+            self.config.run_gen_algorithm
+        );
         println!("Run size (MB): {:.2}", self.config.run_size_mb);
         println!(
             "Run generation memory (MB): {:.1}",
@@ -92,6 +97,7 @@ impl BenchmarkRunner {
 
     fn run_warmup_runs(&self) -> Result<(), Box<dyn std::error::Error>> {
         println!("  Performing {} warmup run(s)...", self.config.warmup_runs);
+        let run_gen_algorithm = self.config.run_gen_algorithm;
 
         for warmup in 1..=self.config.warmup_runs {
             print!("    Warmup {}/{}: ", warmup, self.config.warmup_runs);
@@ -115,7 +121,7 @@ impl BenchmarkRunner {
                     self.config.sketch_sampling_interval,
                     self.config.run_indexing_interval,
                     &temp_dir,
-                    RunGenerationAlgorithm::ReplacementSelection,
+                    run_gen_algorithm,
                 )?;
 
                 let (_merged_runs, multi_merge_stats) = ExternalSorterWithOVC::multi_merge(
@@ -138,7 +144,7 @@ impl BenchmarkRunner {
                     self.config.sketch_sampling_interval,
                     self.config.run_indexing_interval,
                     &temp_dir,
-                    RunGenerationAlgorithm::ReplacementSelection,
+                    run_gen_algorithm,
                 )?;
 
                 let mergeable_runs: Vec<crate::sort::sorter::MergeableRun> = runs;
@@ -251,6 +257,7 @@ impl BenchmarkRunner {
         input: Box<dyn SortInput>,
         temp_dir: &Path,
     ) -> Result<Box<dyn SortOutput>, Box<dyn std::error::Error>> {
+        let run_gen_algorithm = self.config.run_gen_algorithm;
         let output = if self.config.ovc {
             let (runs, sketch, run_gen_stats) = ExternalSorterWithOVC::run_generation(
                 input,
@@ -260,7 +267,7 @@ impl BenchmarkRunner {
                 self.config.sketch_sampling_interval,
                 self.config.run_indexing_interval,
                 temp_dir,
-                RunGenerationAlgorithm::ReplacementSelection,
+                run_gen_algorithm,
             )?;
 
             let (merged_run, multi_merge_stats) = ExternalSorterWithOVC::multi_merge(
@@ -285,7 +292,7 @@ impl BenchmarkRunner {
                 self.config.sketch_sampling_interval,
                 self.config.run_indexing_interval,
                 temp_dir,
-                RunGenerationAlgorithm::ReplacementSelection,
+                run_gen_algorithm,
             )?;
 
             let (merged_run, multi_merge_stats) = ExternalSorter::multi_merge(

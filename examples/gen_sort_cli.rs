@@ -1,4 +1,5 @@
 use clap::Parser;
+use es::RunGenerationAlgorithm;
 use es::benchmark::{
     BenchmarkConfig, BenchmarkInputProvider, BenchmarkResult, BenchmarkRunner,
     GenSortInputProvider, SimpleVerifier, print_benchmark_summary,
@@ -50,6 +51,14 @@ struct SortArgs {
     /// Cooldown seconds between runs
     #[arg(long, default_value = "0")]
     cooldown_seconds: u64,
+
+    /// Run generation algorithm (`replacement-selection` or `load-sort-store`)
+    #[arg(
+        long,
+        default_value = "replacement-selection",
+        value_name = "ALGORITHM"
+    )]
+    run_gen_algorithm: RunGenerationAlgorithm,
 
     /// Threads for run generation
     #[arg(long, required_unless_present = "estimate_size")]
@@ -116,6 +125,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         sketch_sampling_interval: args.sketch_sampling_interval,
         run_indexing_interval: args.run_indexing_interval,
         run_gen_threads,
+        run_gen_algorithm: args.run_gen_algorithm,
         run_size_mb,
         run_gen_memory_mb: run_size_mb * run_gen_threads as f64,
         merge_threads,

@@ -178,6 +178,35 @@ pub enum RunGenerationAlgorithm {
     LoadSortStore,
 }
 
+impl std::fmt::Display for RunGenerationAlgorithm {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::ReplacementSelection => write!(f, "replacement-selection"),
+            Self::LoadSortStore => write!(f, "load-sort-store"),
+        }
+    }
+}
+
+impl std::str::FromStr for RunGenerationAlgorithm {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        let normalized = s.trim().to_ascii_lowercase();
+        match normalized.as_str() {
+            "replacement-selection"
+            | "replacement_selection"
+            | "replacementselection"
+            | "replacement" => Ok(Self::ReplacementSelection),
+            "load-sort-store" | "load_sort_store" | "loadsortstore" | "load" | "lss" => {
+                Ok(Self::LoadSortStore)
+            }
+            other => Err(format!(
+                "Invalid run generation algorithm '{other}'. Expected 'replacement-selection' or 'load-sort-store'."
+            )),
+        }
+    }
+}
+
 pub struct SorterCore<H: SortHooks> {
     hooks: H,
     run_gen_threads: usize,

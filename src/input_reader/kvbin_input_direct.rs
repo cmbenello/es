@@ -39,9 +39,12 @@ impl KvBinInputDirect {
     fn load_index(index_file: impl AsRef<Path>, file_size: u64) -> Result<Vec<u64>, String> {
         let mut index_points = vec![0];
 
-        let mut index_file = File::open(index_file)
-            .map_err(|e| format!("Failed to open index file: {e}"))?;
-        let size = index_file.metadata().map_err(|e| format!("Failed to get index file metadata: {e}"))?.len();
+        let mut index_file =
+            File::open(index_file).map_err(|e| format!("Failed to open index file: {e}"))?;
+        let size = index_file
+            .metadata()
+            .map_err(|e| format!("Failed to get index file metadata: {e}"))?
+            .len();
 
         let mut buf = Vec::with_capacity(size as usize);
         unsafe {
@@ -175,8 +178,8 @@ impl Iterator for KvBinScanner {
 mod tests {
     use super::*;
     use std::io::Write;
-    use tempfile::TempDir;
     use std::path::PathBuf;
+    use tempfile::TempDir;
 
     /// Helper to create a KVBin file with given key-value pairs
     fn create_kvbin_file(dir: &Path, name: &str, records: &[(&[u8], &[u8])]) -> PathBuf {
