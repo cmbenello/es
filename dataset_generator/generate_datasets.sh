@@ -4,18 +4,17 @@
 # Each record is 100 bytes
 
 # Create output directory if it doesn't exist
-OUTPUT_DIR="./gensort_data"
+OUTPUT_DIR="../gensort_data"
 mkdir -p "$OUTPUT_DIR"
 
 # Path to gensort binary
-GENSORT="./dataset_generator/gensort"
+GENSORT="./gensort"
 
 # Number of threads to use (default to number of CPU cores)
 THREADS=$(nproc)
 
 # Dataset sizes to generate (in GiB)
-# DATA_SIZES=(10 20 40 60 80 100)  # Original sizes
-DATA_SIZES=(2 4 6 8 10)  # Current sizes
+DATA_SIZES=(200)  # Current sizes
 
 # Function to calculate number of records for given size in GiB
 calculate_records() {
