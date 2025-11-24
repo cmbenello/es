@@ -6,9 +6,7 @@ use crate::diskio::io_stats::IoStatsTracker;
 use crate::ovc::offset_value_coding::OVCFlag;
 use crate::ovc::offset_value_coding_u64::OVCU64;
 use crate::sort::core::engine::RunSummary;
-use std::fs;
 use std::io::{Read, Write};
-use std::path::PathBuf;
 use std::sync::Arc;
 
 // Sparse index entry
@@ -28,8 +26,6 @@ pub struct RunWithOVC {
     total_bytes: usize,
     sparse_index: Vec<IndexEntry>,
     indexing_interval: usize,
-    backing_path: Option<PathBuf>,
-    delete_on_drop: bool,
 }
 
 impl RunWithOVC {
@@ -53,19 +49,11 @@ impl RunWithOVC {
             total_bytes: 0,
             sparse_index: Vec::new(),
             indexing_interval,
-            backing_path: None,
-            delete_on_drop: false,
         })
     }
 
     pub fn finalize_write(&mut self) -> AlignedWriter {
         self.writer.take().unwrap()
-    }
-
-    /// Delete the backing file automatically once the run is dropped.
-    pub fn enable_auto_cleanup<P: Into<PathBuf>>(&mut self, path: P) {
-        self.backing_path = Some(path.into());
-        self.delete_on_drop = true;
     }
 
     pub fn byte_range(&self) -> (usize, usize) {
@@ -108,16 +96,6 @@ impl RunWithOVC {
         }
 
         Some((best_entry.file_offset, best_entry.key.clone()))
-    }
-}
-
-impl Drop for RunWithOVC {
-    fn drop(&mut self) {
-        if self.delete_on_drop {
-            if let Some(path) = self.backing_path.take() {
-                let _ = fs::remove_file(path);
-            }
-        }
     }
 }
 
@@ -364,7 +342,7 @@ mod tests {
 
     fn create_test_file(name: &str) -> Arc<SharedFd> {
         let path = test_dir().join(name);
-        Arc::new(SharedFd::new_from_path(&path).expect("Failed to create test file"))
+        Arc::new(SharedFd::new_from_path(&path, true).expect("Failed to create test file"))
     }
 
     #[test]

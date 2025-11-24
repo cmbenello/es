@@ -4,9 +4,7 @@ use crate::diskio::constants::align_down;
 use crate::diskio::file::SharedFd;
 use crate::diskio::io_stats::IoStatsTracker;
 use crate::sort::core::engine::RunSummary;
-use std::fs;
 use std::io::{Read, Write};
-use std::path::PathBuf;
 use std::sync::Arc;
 
 // Sparse index entry
@@ -26,8 +24,6 @@ pub struct RunImpl {
     total_bytes: usize,
     sparse_index: Vec<IndexEntry>,
     indexing_interval: usize,
-    backing_path: Option<PathBuf>,
-    delete_on_drop: bool,
 }
 
 impl RunImpl {
@@ -51,19 +47,11 @@ impl RunImpl {
             total_bytes: 0,
             sparse_index: Vec::new(),
             indexing_interval,
-            backing_path: None,
-            delete_on_drop: false,
         })
     }
 
     pub fn finalize_write(&mut self) -> AlignedWriter {
         self.writer.take().unwrap()
-    }
-
-    /// Remember the on-disk backing file so we can delete it once the run is dropped.
-    pub fn enable_auto_cleanup<P: Into<PathBuf>>(&mut self, path: P) {
-        self.backing_path = Some(path.into());
-        self.delete_on_drop = true;
     }
 
     pub fn byte_range(&self) -> (usize, usize) {
@@ -106,16 +94,6 @@ impl RunImpl {
         }
 
         Some((best_entry.file_offset, best_entry.key.clone()))
-    }
-}
-
-impl Drop for RunImpl {
-    fn drop(&mut self) {
-        if self.delete_on_drop {
-            if let Some(path) = self.backing_path.take() {
-                let _ = fs::remove_file(path);
-            }
-        }
     }
 }
 
@@ -330,7 +308,7 @@ mod tests {
     fn get_test_writer(name: &str) -> AlignedWriter {
         let path = get_test_path(name);
         let fd = Arc::new(
-            SharedFd::new_from_path(&path).expect("Failed to open test file with Direct I/O"),
+            SharedFd::new_from_path(&path, true).expect("Failed to open test file with Direct I/O"),
         );
 
         AlignedWriter::from_fd(fd).unwrap()
@@ -871,7 +849,7 @@ mod tests {
     fn test_io_tracking_write_operations() {
         let path = get_test_path("io_write_tracking");
         let fd = Arc::new(
-            SharedFd::new_from_path(&path).expect("Failed to open test file with Direct I/O"),
+            SharedFd::new_from_path(&path, true).expect("Failed to open test file with Direct I/O"),
         );
 
         // Create writer with IO tracker
@@ -927,7 +905,7 @@ mod tests {
     fn test_io_tracking_scan_operations() {
         let path = get_test_path("io_scan_tracking");
         let fd = Arc::new(
-            SharedFd::new_from_path(&path).expect("Failed to open test file with Direct I/O"),
+            SharedFd::new_from_path(&path, true).expect("Failed to open test file with Direct I/O"),
         );
 
         // First, write some data (without tracking writes for this test)
@@ -1013,7 +991,7 @@ mod tests {
     fn test_sparse_index_effectiveness() {
         let path = get_test_path("sparse_effectiveness");
         let fd = Arc::new(
-            SharedFd::new_from_path(&path).expect("Failed to open test file with Direct I/O"),
+            SharedFd::new_from_path(&path, true).expect("Failed to open test file with Direct I/O"),
         );
 
         let writer = AlignedWriter::from_fd(fd.clone()).unwrap();
@@ -1079,8 +1057,8 @@ mod tests {
         let path1 = get_test_path("merge_io_1");
         let path2 = get_test_path("merge_io_2");
 
-        let fd1 = Arc::new(SharedFd::new_from_path(&path1).unwrap());
-        let fd2 = Arc::new(SharedFd::new_from_path(&path2).unwrap());
+        let fd1 = Arc::new(SharedFd::new_from_path(&path1, true).unwrap());
+        let fd2 = Arc::new(SharedFd::new_from_path(&path2, true).unwrap());
 
         // Create first run (even keys)
         let writer1 = AlignedWriter::from_fd(fd1.clone()).unwrap();

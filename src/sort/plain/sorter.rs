@@ -105,7 +105,7 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
 
         let path0 = temp_dir.path().join("partition0.dat");
-        let fd0 = Arc::new(SharedFd::new_from_path(&path0).unwrap());
+        let fd0 = Arc::new(SharedFd::new_from_path(&path0, true).unwrap());
         let writer0 = AlignedWriter::from_fd(fd0.clone()).unwrap();
         let mut run0 = RunImpl::from_writer(writer0).unwrap();
         for i in 0..100 {
@@ -116,7 +116,7 @@ mod tests {
         run0.finalize_write();
 
         let path1 = temp_dir.path().join("partition1.dat");
-        let fd1 = Arc::new(SharedFd::new_from_path(&path1).unwrap());
+        let fd1 = Arc::new(SharedFd::new_from_path(&path1, true).unwrap());
         let writer1 = AlignedWriter::from_fd(fd1.clone()).unwrap();
         let mut run1 = RunImpl::from_writer(writer1).unwrap();
         for i in 0..100 {
@@ -127,7 +127,7 @@ mod tests {
         run1.finalize_write();
 
         let path2 = temp_dir.path().join("partition2.dat");
-        let fd2 = Arc::new(SharedFd::new_from_path(&path2).unwrap());
+        let fd2 = Arc::new(SharedFd::new_from_path(&path2, true).unwrap());
         let writer2 = AlignedWriter::from_fd(fd2.clone()).unwrap();
         let mut run2 = RunImpl::from_writer(writer2).unwrap();
         for i in 0..100 {

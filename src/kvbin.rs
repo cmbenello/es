@@ -53,14 +53,16 @@ pub fn create_kvbin_from_input(
         return Err("idx_every must be greater than 0".to_string());
     }
     // Create output file with aligned writer
-    let out_fd =
-        Arc::new(SharedFd::new_from_path(data_path).map_err(|e| format!("open data file: {e}"))?);
+    let out_fd = Arc::new(
+        SharedFd::new_from_path(data_path, false).map_err(|e| format!("open data file: {e}"))?,
+    );
     let mut out =
         AlignedWriter::from_fd(out_fd).map_err(|e| format!("create aligned writer: {e}"))?;
 
     // Create index file with aligned writer
-    let idx_fd =
-        Arc::new(SharedFd::new_from_path(idx_path).map_err(|e| format!("open idx file: {e}"))?);
+    let idx_fd = Arc::new(
+        SharedFd::new_from_path(idx_path, false).map_err(|e| format!("open idx file: {e}"))?,
+    );
     let mut idx =
         AlignedWriter::from_fd(idx_fd).map_err(|e| format!("create idx aligned writer: {e}"))?;
 

@@ -153,7 +153,7 @@ mod tests {
 
     fn create_test_file(dir: &Path, name: &str) -> io::Result<Arc<SharedFd>> {
         let file_path = dir.join(name);
-        let fd = SharedFd::new_from_path(&file_path)?;
+        let fd = SharedFd::new_from_path(&file_path, true)?;
         Ok(Arc::new(fd))
     }
 
@@ -273,7 +273,7 @@ mod tests {
         let fd = create_test_file(dir.path(), "auto_flush_test.dat").unwrap();
 
         {
-            let mut writer = AlignedWriter::from_fd(fd).unwrap();
+            let mut writer = AlignedWriter::from_fd(fd.clone()).unwrap();
             writer.write_all(b"Auto flush test").unwrap();
             // No explicit flush - should flush on drop
         }

@@ -18,47 +18,51 @@ TS=$(date +"%Y-%m-%d_%H-%M-%S")
 OUT_DIR=${2:-"logs/resource_bench_${TS}"}
 mkdir -p "$OUT_DIR"
 
+# ---------------------------------------------------------
+# CONFIGURATION
+# ---------------------------------------------------------
+PAGE_SIZE_KB=64
+
 echo "Building gen_sort_cli example (release)..."
 cargo build --release --example gen_sort_cli >/dev/null
 
-# Cooldown to prevent NVMe thermal throttling
-COOLDOWN_SECONDS=${COOLDOWN_SECONDS:-30}
 cooldown() {
-  echo "Cooling down for ${COOLDOWN_SECONDS}s..."
-  sleep "$COOLDOWN_SECONDS"
+  sleep 30
 }
 
-# ---------------------------------------------------------
-# CORE RUN FUNCTION
-# ---------------------------------------------------------
-run_case() {
-  local name="$1"
+run_calculated_case() {
+  local exp_prefix="$1"
   local active_threads="$2"
-  local run_size_mb="$3"
-  local merge_fanin="$4"
-  # Capture OVC flag if present
-  local extra_flags="${5-}"
+  local mem_gb="$3"
+  local extra_flags="${4-}"
 
+  # 1. Calculate Buffer Size (MB) per thread
+  # run_size_mb = (MemGB * 1024) / Threads
+  local run_size_mb=$(echo "scale=2; ($mem_gb * 1024) / $active_threads" | bc)
+
+  # 2. Calculate Max Feasible Fan-In (Physical Limit)
+  # FanIn <= (MemGB * 1024^2) / (Threads * PageKB)
+  local max_fanin=$(echo "($mem_gb * 1024 * 1024) / ($active_threads * $PAGE_SIZE_KB)" | bc)
+
+  local name="${exp_prefix}_Thr${active_threads}_Mem${mem_gb}GB"
   local temp_dir="${OUT_DIR}/${name}_tmp"
   mkdir -p "$temp_dir"
 
   echo "----------------------------------------------------------------"
   echo "BENCHMARK: $name"
-  echo "  Threads:      $active_threads"
-  echo "  Run Size:     $run_size_mb MB"
-  echo "  Merge Fan-In: $merge_fanin"
-  echo "  OVC:          ${extra_flags:-no}"
+  echo "  Mem Constraint: ${mem_gb} GB"
+  echo "  Threads:        $active_threads"
+  echo "  Buffer/Thread:  $run_size_mb MB"
+  echo "  Max Fan-In:     $max_fanin"
   echo "----------------------------------------------------------------"
 
-  # Run the binary
-  # Note: benchmark-runs set to 1 for long-running tests (100GB+)
   cargo run --release --example gen_sort_cli -- \
     -n "$name" \
     -i "$INPUT_DATA" \
     --run-gen-threads "$active_threads" \
     --merge-threads "$active_threads" \
     --run-size-mb "$run_size_mb" \
-    --merge-fanin "$merge_fanin" \
+    --merge-fanin "$max_fanin" \
     --warmup-runs 0 \
     --benchmark-runs 1 \
     --cooldown-seconds 30 \
@@ -70,66 +74,27 @@ run_case() {
 
 # ==============================================================================
 # EXPERIMENT 1: SCALABILITY TRAP (Fixed 2GB RAM)
-# Goal: Show that increasing threads shrinks run size until we hit multi-pass.
 # ==============================================================================
-echo "=== STARTING EXPERIMENT 1: SCALABILITY (FIXED 2GB MEMORY) ==="
-
-# 1. Safe Zone (Regime 1) - High Fan-In (20000) to force single pass
-# 4 Threads -> 512MB Runs
-run_case "Exp1_Thr04_Mem2GB" 4 "512.00" 20000 "--ovc"
-cooldown
-
-# 8 Threads -> 256MB Runs
-run_case "Exp1_Thr08_Mem2GB" 8 "256.00" 20000 "--ovc"
-cooldown
-
-# 16 Threads -> 128MB Runs
-run_case "Exp1_Thr16_Mem2GB" 16 "128.00" 20000 "--ovc"
-cooldown
-
-# 2. Danger Zone (Regime 2) - Realistic Fan-In (128) for Multi-Pass
-# Note: At 2GB RAM, we cannot handle the 2000+ runs generated here in one pass.
-# We switch to realistic fan-in (128) to measure the penalty of the multi-pass merge.
-
-# 24 Threads -> ~85MB Runs (Borderline)
-run_case "Exp1_Thr24_Mem2GB" 24 "85.33" 128 "--ovc"
-cooldown
-
-# 32 Threads -> 64MB Runs (Failure)
-run_case "Exp1_Thr32_Mem2GB" 32 "64.00" 128 "--ovc"
-cooldown
-
-# 40 Threads -> 51MB Runs (Deep Failure)
-run_case "Exp1_Thr40_Mem2GB" 40 "51.20" 128 "--ovc"
-cooldown
-
+echo "=== EXP 1: SCALABILITY (2GB RAM) ==="
+# 4, 8, 16 should be Safe. 24 Borderline. 32, 40 Fail.
+for t in 4 8 16 24 32 40; do
+  run_calculated_case "Exp1" "$t" "2" "--ovc"
+  cooldown
+done
 
 # ==============================================================================
 # EXPERIMENT 2: MEMORY CLIFF (Fixed 40 Threads)
-# Goal: Show 40 threads is fine at high memory, but crashes/slows at low memory.
 # ==============================================================================
-echo "=== STARTING EXPERIMENT 2: MEMORY CLIFF (FIXED 40 THREADS) ==="
+echo "=== EXP 2: MEMORY CLIFF (40 THREADS) ==="
+# 8, 6, 4 should be Safe. 2, 1 Fail. 
+# We skip 2 to avoid overlap with Exp 1. 
+# We also skip 1 since it
+for m in 8 6 4 2; do
+  # Skip overlap with Exp 1
+  if [[ "$m" == "2" ]]; then continue; fi
+  
+  run_calculated_case "Exp2" "40" "$m" "--ovc"
+  cooldown
+done
 
-# 1. Safe Zone (Regime 1) - High Fan-In
-# 8 GB -> ~205MB Runs
-run_case "Exp2_Thr40_Mem8GB" 40 "204.80" 20000 "--ovc"
-cooldown
-
-# 6 GB -> ~154MB Runs
-run_case "Exp2_Thr40_Mem6GB" 40 "153.60" 20000 "--ovc"
-cooldown
-
-# 4 GB -> ~102MB Runs
-run_case "Exp2_Thr40_Mem4GB" 40 "102.40" 20000 "--ovc"
-cooldown
-
-# 2. Danger Zone (Regime 2) - Realistic Fan-In
-# 2 GB -> 51MB Runs (Same as Exp1_Thr40, re-running for consistency or skip if desired)
-run_case "Exp2_Thr40_Mem2GB" 40 "51.20" 128 "--ovc"
-cooldown
-
-# 1 GB -> 25MB Runs (Extreme Stress)
-run_case "Exp2_Thr40_Mem1GB" 40 "25.60" 128 "--ovc"
-cooldown
-
-echo "All benchmarks completed. Results saved in ${OUT_DIR}"
+echo "Done. Results in ${OUT_DIR}"

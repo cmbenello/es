@@ -26,7 +26,7 @@ impl GenSortInputDirect {
             return Err(format!("File does not exist: {:?}", path));
         }
 
-        let fd = Arc::new(SharedFd::new_from_path(&path).map_err(|e| {
+        let fd = Arc::new(SharedFd::new_from_path(&path, false).map_err(|e| {
             format!(
                 "Failed to open file with Direct I/O: {}: {}",
                 path.display(),

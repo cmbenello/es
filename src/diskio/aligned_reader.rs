@@ -402,7 +402,7 @@ mod tests {
         file.sync_all()?;
         drop(file); // Close the write file
 
-        let fd = Arc::new(SharedFd::new_from_path(path)?);
+        let fd = Arc::new(SharedFd::new_from_path(path, true)?);
         Ok((fd, data))
     }
 
@@ -417,7 +417,7 @@ mod tests {
         file.sync_all()?;
         drop(file);
 
-        let fd = Arc::new(SharedFd::new_from_path(path)?);
+        let fd = Arc::new(SharedFd::new_from_path(path, true)?);
         Ok(fd)
     }
 

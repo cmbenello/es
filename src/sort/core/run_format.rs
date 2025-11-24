@@ -349,7 +349,7 @@ impl<F: RunFormat> SortHooks for FormatSortHooks<F> {
         let ts = format!("{}{:09}", now.as_secs(), now.subsec_nanos());
         let run_path = dir.join(format!("merge_output_{}_{}.dat", thread_id, ts));
         let fd = Arc::new(
-            SharedFd::new_from_path(&run_path)
+            SharedFd::new_from_path(&run_path, true)
                 .map_err(|e| format!("Failed to open merge output file: {}", e))?,
         );
         let writer = AlignedWriter::from_fd_with_tracker(fd, Some((*io_tracker).clone()))

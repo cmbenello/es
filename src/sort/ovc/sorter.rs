@@ -144,7 +144,7 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
 
         let path0 = temp_dir.path().join("partition0.dat");
-        let fd0 = Arc::new(SharedFd::new_from_path(&path0).unwrap());
+        let fd0 = Arc::new(SharedFd::new_from_path(&path0, true).unwrap());
         let writer0 = AlignedWriter::from_fd(fd0.clone()).unwrap();
         let mut run0 = RunWithOVC::from_writer(writer0).unwrap();
         for i in 0..100 {
@@ -155,7 +155,7 @@ mod tests {
         run0.finalize_write();
 
         let path1 = temp_dir.path().join("partition1.dat");
-        let fd1 = Arc::new(SharedFd::new_from_path(&path1).unwrap());
+        let fd1 = Arc::new(SharedFd::new_from_path(&path1, true).unwrap());
         let writer1 = AlignedWriter::from_fd(fd1.clone()).unwrap();
         let mut run1 = RunWithOVC::from_writer(writer1).unwrap();
         for i in 0..100 {
@@ -166,7 +166,7 @@ mod tests {
         run1.finalize_write();
 
         let path2 = temp_dir.path().join("partition2.dat");
-        let fd2 = Arc::new(SharedFd::new_from_path(&path2).unwrap());
+        let fd2 = Arc::new(SharedFd::new_from_path(&path2, true).unwrap());
         let writer2 = AlignedWriter::from_fd(fd2.clone()).unwrap();
         let mut run2 = RunWithOVC::from_writer(writer2).unwrap();
         for i in 0..100 {
@@ -246,7 +246,7 @@ mod tests {
             );
         }
         let temp_dir = tempdir().unwrap();
-        let fd = Arc::new(SharedFd::new_from_path(&temp_dir.path().join("run.dat")).unwrap());
+        let fd = Arc::new(SharedFd::new_from_path(&temp_dir.path().join("run.dat"), true).unwrap());
         let writer = AlignedWriter::from_fd(fd).unwrap();
         let mut sink = RunWriterSink::<OvcRunFormat>::new(writer, 1000, 128, 1);
         sink.start_run();
@@ -256,5 +256,80 @@ mod tests {
         sink.finish_run();
         let (runs, _sketch) = sink.finalize();
         assert_eq!(runs.len(), 1);
+    }
+
+    #[test]
+    fn test_consumed_runs_deleted_after_merge() {
+        let temp_dir = TempDir::new().unwrap();
+        let mut data: Vec<_> = (0..1000)
+            .map(|i| {
+                (
+                    format!("key_{:05}", i).into_bytes(),
+                    format!("value_{}", i).into_bytes(),
+                )
+            })
+            .collect();
+        data.shuffle(&mut small_thread_rng());
+
+        // Generate runs
+        let (runs, sketch, _) = ExternalSorterWithOVC::run_generation(
+            Box::new(InMemInput { data }),
+            2,        // num_threads
+            256 * 20, // run_size
+            100,      // sketch_size
+            1000,     // sketch_sampling_interval
+            1000,     // run_indexing_interval
+            temp_dir.path(),
+            RunGenerationAlgorithm::ReplacementSelection,
+        )
+        .unwrap();
+
+        // Capture file count before merge
+        let files_before_merge: Vec<_> = std::fs::read_dir(temp_dir.path())
+            .unwrap()
+            .filter_map(|e| e.ok().map(|e| e.path()))
+            .collect();
+        assert!(
+            !files_before_merge.is_empty(),
+            "Should have generated some runs"
+        );
+
+        // Perform the merge
+        let (merged_run, per_merge_stats) = ExternalSorterWithOVC::multi_merge(
+            runs,
+            2, // fanin
+            2, // num_threads
+            &sketch,
+            1.0, // imbalance_factor
+            temp_dir.path(),
+        )
+        .unwrap();
+
+        // Verify merge happened
+        assert!(!per_merge_stats.is_empty());
+
+        // Check that input run files were deleted
+        for path in &files_before_merge {
+            assert!(
+                !path.exists(),
+                "Input run file {:?} should be deleted after merge",
+                path
+            );
+        }
+
+        // Drop the merged run
+        let final_runs = merged_run.into_runs();
+        drop(final_runs);
+
+        // Verify all files are cleaned up
+        let remaining_files: Vec<std::fs::DirEntry> = std::fs::read_dir(temp_dir.path())
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .collect();
+        assert!(
+            remaining_files.is_empty(),
+            "All files should be deleted, but found: {:?}",
+            remaining_files
+        );
     }
 }

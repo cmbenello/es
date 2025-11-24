@@ -17,7 +17,7 @@ pub struct KvBinInputDirect {
 
 impl KvBinInputDirect {
     pub fn new(data_path: impl AsRef<Path>, idx_path: impl AsRef<Path>) -> Result<Self, String> {
-        let fd = Arc::new(SharedFd::new_from_path(&data_path).map_err(|e| e.to_string())?);
+        let fd = Arc::new(SharedFd::new_from_path(&data_path, false).map_err(|e| e.to_string())?);
         let file_size = file_size_fd(fd.as_raw_fd()).map_err(|e| e.to_string())?;
         let index = Self::load_index(&idx_path, file_size)?;
 

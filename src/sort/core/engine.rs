@@ -4,6 +4,7 @@ use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use crate::diskio::aligned_writer::AlignedWriter;
+use crate::diskio::file::SharedFd;
 use crate::diskio::io_stats::IoStatsTracker;
 use crate::kll::Sketch;
 use crate::rand::small_thread_rng;
@@ -419,7 +420,7 @@ fn run_generation_with_hooks<H: SortHooks>(
                        dir: PathBuf| {
         let run_path = dir.join(format!("intermediate_{}.dat", thread_id));
         let fd = Arc::new(
-            crate::diskio::file::SharedFd::new_from_path(&run_path)
+            SharedFd::new_from_path(&run_path, true)
                 .expect("Failed to open run file with Direct I/O"),
         );
         let run_writer = AlignedWriter::from_fd_with_tracker(fd, Some((*io_tracker).clone()))
