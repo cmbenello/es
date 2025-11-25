@@ -191,12 +191,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 args.delimiter,
                 args.headers,
             );
-            create_kvbin_from_input(
-                csv_provider.create_sort_input()?,
-                &data_path,
-                &idx_path,
-                args.run_indexing_interval,
-            )?;
+            create_kvbin_from_input(csv_provider.create_sort_input()?, &data_path, &idx_path, 0)?;
             let duration = start.elapsed();
             println!("KVBin file created in {:.2?}", duration);
             Box::new(KvBinInputProvider::new(data_path, idx_path))
