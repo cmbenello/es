@@ -118,9 +118,15 @@ pub fn create_kvbin_from_input(
     println!("[kvbin] Flushing index file...");
     idx.flush().map_err(|e| e.to_string())?;
 
+    let data_size = out.position();
+    println!("[kvbin] Data file size: {} bytes", data_size);
+    let index_size = idx.position();
+    println!("[kvbin] Index file size: {} bytes", index_size);
+
     println!("[kvbin] Cooling down for 30 seconds...");
     std::thread::sleep(std::time::Duration::from_secs(30));
     println!("[kvbin] Done!");
+
 
     Ok((rows, index_points))
 }
