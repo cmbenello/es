@@ -1,4 +1,5 @@
 // src/kvbin.rs
+use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -28,15 +29,16 @@ pub fn binary_file_name(
         .and_then(|s| s.to_str())
         .ok_or_else(|| "invalid input file name".to_string())?;
 
-    let parent = input_path
-        .parent()
-        .ok_or_else(|| "invalid input file path".to_string())?;
+    // Use ./datasets directory and create it if it doesn't exist
+    let datasets_dir = PathBuf::from("./datasets");
+    fs::create_dir_all(&datasets_dir)
+        .map_err(|e| format!("failed to create datasets directory: {}", e))?;
 
     // e.g. input: data.csv -> data.k-0-2.v-3-4.kvbin
     let data_file = format!("{file_stem}.k-{key_str}.v-{value_str}.kvbin");
     let idx_file = format!("{data_file}.idx");
 
-    Ok((parent.join(data_file), parent.join(idx_file)))
+    Ok((datasets_dir.join(data_file), datasets_dir.join(idx_file)))
 }
 
 /// Generic KVBin writer that takes any iterator producing (key, value) pairs.
@@ -52,6 +54,12 @@ pub fn create_kvbin_from_input(
     if idx_every == 0 {
         return Err("idx_every must be greater than 0".to_string());
     }
+
+    println!("[kvbin] Starting kvbin creation...");
+    println!("[kvbin] Data file: {:?}", data_path.as_ref());
+    println!("[kvbin] Index file: {:?}", idx_path.as_ref());
+    println!("[kvbin] Index checkpoint every {} records", idx_every);
+
     // Create output file with aligned writer
     let out_fd = Arc::new(
         SharedFd::new_from_path(data_path, false).map_err(|e| format!("open data file: {e}"))?,
@@ -69,6 +77,7 @@ pub fn create_kvbin_from_input(
     let mut rows: u64 = 0;
     let mut index_points: u64 = 0;
 
+    println!("[kvbin] Writing records...");
     let scanner = sort_input.create_parallel_scanners(1, None).remove(0);
     for (key, val) in scanner {
         // write [klen][key][vlen][val]
@@ -89,11 +98,33 @@ pub fn create_kvbin_from_input(
             let pos = out.position();
             idx.write_all(&pos.to_le_bytes())
                 .map_err(|e| e.to_string())?;
+            println!(
+                "[kvbin] Wrote index checkpoint #{} at position {} (after {} records)",
+                index_points, pos, rows
+            );
+        }
+
+        // Progress updates every 1M records
+        if rows % 1_000_000 == 0 {
+            println!(
+                "[kvbin] Progress: {} million records written",
+                rows / 1_000_000
+            );
         }
     }
 
+    println!(
+        "[kvbin] Finished writing {} records with {} index checkpoints",
+        rows, index_points
+    );
+    println!("[kvbin] Flushing data file...");
     out.flush().map_err(|e| e.to_string())?;
+    println!("[kvbin] Flushing index file...");
     idx.flush().map_err(|e| e.to_string())?;
+
+    println!("[kvbin] Cooling down for 30 seconds...");
+    std::thread::sleep(std::time::Duration::from_secs(30));
+    println!("[kvbin] Done!");
 
     Ok((rows, index_points))
 }
