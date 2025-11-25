@@ -1,0 +1,92 @@
+    Finished `release` profile [optimized] target(s) in 0.12s
+     Running `target/release/examples/gen_sort_cli -n Exp1_Thr4_Mem2GB -i datasets/gensort_200GiB.data --run-gen-threads 4 --merge-threads 4 --run-size-mb 512.00 --merge-fanin 8192 --warmup-runs 0 --benchmark-runs 1 --cooldown-seconds 30 --dir logs/resource_bench_2025-11-24_03-16-40/Exp1_Thr4_Mem2GB_tmp --ovc`
+
+=== BENCHMARK MODE ===
+GenSort file: "datasets/gensort_200GiB.data"
+Total entries: 2147483648
+Estimated data size: 204800.00 MB
+Run generation threads: 4
+Run generation algorithm: replacement-selection
+Run size (MB): 512.00
+Run generation memory (MB): 2048.0
+Merge threads: 4
+Merge fan-in: 8192
+Merge memory (MB): 2048.0
+OVC enabled: true
+Temporary directory: "logs/resource_bench_2025-11-24_03-16-40/Exp1_Thr4_Mem2GB_tmp"
+Warmup runs: 0
+Runs per configuration: 1
+Cooldown between runs (s): 30
+Verify output: false
+
+Running benchmark for config: Exp1_Thr4_Mem2GB
+Parameters: Run Gen Threads: 4, Run Gen Algorithm: replacement-selection, Run Size: 512.00 MB, Run Gen Memory: 2048.0 MB, Merge Threads: 4, Merge Fanin: 8192, Merge Memory: 2048.0 MB, Imbalance Factor: 1.0
+================================================================================
+  Run 1/1: Starting sort with 4 parallel scanners for run generation
+Run gen thread 3 (ReplacementSelection) 2109874 ms, 55 runs generated
+Run gen thread 1 (ReplacementSelection) 2366883 ms, 55 runs generated
+Run gen thread 2 (ReplacementSelection) 2372427 ms, 55 runs generated
+Run gen thread 0 (ReplacementSelection) 2376842 ms, 55 runs generated
+Generated 220 runs in 2376875 ms
+Merging 220 runs using 4 threads
+Merge phase took 772296 ms | Merged 2147483648 entries across 4 runs | Thread timing: min=758039 ms, max=772295 ms | Partition sizes: imbalance=1.01x
+SortStats:
+  Number of runs: 220
+  (R) time: 2376875 ms
+  (R) breakdown: load=0 ms, sort=2306506 ms, store=0 ms
+  (R) I/O stats: I/O Stats: Read Ops: 3276800, Read Bytes: 214748364800, Write Ops: 3801088, Write Bytes: 249108103168
+  (M) time: 772296 ms
+  Read amplification:
+    Run generation writes: 249108103168 bytes (232.00 GB)
+    Merge phase reads: 249202475008 bytes (232.09 GB)
+    Read amplification factor: 1.00x
+    Excess reads: 0.0% (sparse indexing overhead)
+  Thread timing:
+    Min thread time: 758039 ms
+    Max thread time: 772295 ms
+    Avg thread time: 767623 ms
+    Time imbalance factor (max/avg): 1.01x
+    Thread times: [770343, 772295, 769816, 758039]
+
+3149.17s
+
+
+================================================================================================================================================================
+Benchmark Results Summary
+================================================================================================================================================================
+Config               Run Size   RG Runs    Gen Thr    Merge Thr  Total (s)  RunGen (s)   Merge (s)  Entries      Throughput       Read MB    Write MB  
+                     (MB)                                                                                        (M entries/s)                         
+----------------------------------------------------------------------------------------------------------------------------------------------------------------
+Exp1_Thr4_Mem2GB[1]  512.0      220        4          4          3149.17      2376.88    772.30     2147483648   0.68             442458.0   475136.0  
+Exp1_Thr4_Mem2GB[avg] 512.0      220        4          4          3149.17      2376.88    772.30     2147483648   0.68             442458.0   475136.0  
+================================================================================================================================================================
+
+================================================================================================================================================================
+Merge Operations Summary (showing last 1 of 1 merge passes)
+================================================================================================================================================================
+Config               M1PAvg     M1PMax     M1Imbal    M1Slow       M1Fast      
+----------------------------------------------------------------------------------------------------------------------------------------------------------------
+Exp1_Thr4_Mem2GB[1]  536870912  541405698  1.01       772.30       772.30      
+----------------------------------------------------------------------------------------------------------------------------------------------------------------
+Exp1_Thr4_Mem2GB[avg] 536870912  541405698  1.01       772.30       772.30      
+================================================================================================================================================================
+
+================================================================================================================================================================
+Detailed I/O Statistics
+================================================================================================================================================================
+Config               RG Read MB   RG Write MB  M1Read MB    M1Write MB  
+----------------------------------------------------------------------------------------------------------------------------------------------------------------
+Exp1_Thr4_Mem2GB[1]  204800.0     237568.0     237658.0     237568.0    
+----------------------------------------------------------------------------------------------------------------------------------------------------------------
+Exp1_Thr4_Mem2GB[avg] 204800.0     237568.0     237658.0     237568.0    
+================================================================================================================================================================
+
+====================================================================================================
+Run Generation Time Breakdown
+====================================================================================================
+Config               RG Total s   Load s       Sort s       Store s     
+----------------------------------------------------------------------------------------------------
+Exp1_Thr4_Mem2GB[1]  2376.88      0            2306.506     0           
+----------------------------------------------------------------------------------------------------
+Exp1_Thr4_Mem2GB[avg] 2376.88      0.00         2306.51      0.00        
+====================================================================================================

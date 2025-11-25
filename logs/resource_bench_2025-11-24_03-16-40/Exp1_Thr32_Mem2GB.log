@@ -1,0 +1,143 @@
+    Finished `release` profile [optimized] target(s) in 1.31s
+     Running `target/release/examples/gen_sort_cli -n Exp1_Thr32_Mem2GB -i datasets/gensort_200GiB.data --run-gen-threads 32 --merge-threads 32 --run-size-mb 64.00 --merge-fanin 1024 --warmup-runs 0 --benchmark-runs 1 --cooldown-seconds 30 --dir logs/resource_bench_2025-11-24_03-16-40/Exp1_Thr32_Mem2GB_tmp --ovc`
+
+=== BENCHMARK MODE ===
+GenSort file: "datasets/gensort_200GiB.data"
+Total entries: 2147483648
+Estimated data size: 204800.00 MB
+Run generation threads: 32
+Run generation algorithm: replacement-selection
+Run size (MB): 64.00
+Run generation memory (MB): 2048.0
+Merge threads: 32
+Merge fan-in: 1024
+Merge memory (MB): 2048.0
+OVC enabled: true
+Temporary directory: "logs/resource_bench_2025-11-24_03-16-40/Exp1_Thr32_Mem2GB_tmp"
+Warmup runs: 0
+Runs per configuration: 1
+Cooldown between runs (s): 30
+Verify output: false
+
+Running benchmark for config: Exp1_Thr32_Mem2GB
+Parameters: Run Gen Threads: 32, Run Gen Algorithm: replacement-selection, Run Size: 64.00 MB, Run Gen Memory: 2048.0 MB, Merge Threads: 32, Merge Fanin: 1024, Merge Memory: 2048.0 MB, Imbalance Factor: 1.0
+================================================================================
+  Run 1/1: Starting sort with 32 parallel scanners for run generation
+Run gen thread 31 (ReplacementSelection) 530640 ms, 55 runs generated
+Run gen thread 30 (ReplacementSelection) 532090 ms, 55 runs generated
+Run gen thread 6 (ReplacementSelection) 533048 ms, 55 runs generated
+Run gen thread 23 (ReplacementSelection) 535023 ms, 55 runs generated
+Run gen thread 3 (ReplacementSelection) 535124 ms, 55 runs generated
+Run gen thread 15 (ReplacementSelection) 535860 ms, 55 runs generated
+Run gen thread 5 (ReplacementSelection) 535928 ms, 55 runs generated
+Run gen thread 0 (ReplacementSelection) 538167 ms, 55 runs generated
+Run gen thread 4 (ReplacementSelection) 539666 ms, 55 runs generated
+Run gen thread 17 (ReplacementSelection) 541840 ms, 55 runs generated
+Run gen thread 14 (ReplacementSelection) 543110 ms, 55 runs generated
+Run gen thread 18 (ReplacementSelection) 544875 ms, 55 runs generated
+Run gen thread 10 (ReplacementSelection) 544951 ms, 55 runs generated
+Run gen thread 26 (ReplacementSelection) 544977 ms, 55 runs generated
+Run gen thread 28 (ReplacementSelection) 546794 ms, 55 runs generated
+Run gen thread 29 (ReplacementSelection) 547534 ms, 55 runs generated
+Run gen thread 9 (ReplacementSelection) 547690 ms, 55 runs generated
+Run gen thread 8 (ReplacementSelection) 548271 ms, 55 runs generated
+Run gen thread 7 (ReplacementSelection) 549070 ms, 55 runs generated
+Run gen thread 19 (ReplacementSelection) 549247 ms, 55 runs generated
+Run gen thread 20 (ReplacementSelection) 549300 ms, 55 runs generated
+Run gen thread 25 (ReplacementSelection) 549374 ms, 55 runs generated
+Run gen thread 13 (ReplacementSelection) 549991 ms, 55 runs generated
+Run gen thread 16 (ReplacementSelection) 550328 ms, 55 runs generated
+Run gen thread 1 (ReplacementSelection) 550581 ms, 55 runs generated
+Run gen thread 27 (ReplacementSelection) 551007 ms, 55 runs generated
+Run gen thread 2 (ReplacementSelection) 551242 ms, 55 runs generated
+Run gen thread 22 (ReplacementSelection) 551859 ms, 55 runs generated
+Run gen thread 12 (ReplacementSelection) 554621 ms, 55 runs generated
+Run gen thread 24 (ReplacementSelection) 557299 ms, 55 runs generated
+Run gen thread 21 (ReplacementSelection) 559119 ms, 55 runs generated
+Run gen thread 11 (ReplacementSelection) 563641 ms, 55 runs generated
+Generated 1760 runs in 564143 ms
+Multi-level merge: 2047 runs (including 287 dummies), F=1024, expected 2 merge operations
+Merging 1024 runs using 32 threads
+Merge phase took 204190 ms | Merged 875722327 entries across 32 runs | Thread timing: min=177810 ms, max=204187 ms | Partition sizes: imbalance=1.14x
+Merge 1/2: merging 1024 shortest runs (875722327 total entries)
+Merging 1024 runs using 32 threads
+Merge phase took 467423 ms | Merged 2147483648 entries across 32 runs | Thread timing: min=390875 ms, max=467420 ms | Partition sizes: imbalance=1.14x
+Merge 2/2: merging 1024 shortest runs (2147483648 total entries)
+SortStats:
+  Number of runs: 1760
+  (R) time: 564143 ms
+  (R) breakdown: load=0 ms, sort=545695 ms, store=0 ms
+  (R) I/O stats: I/O Stats: Read Ops: 3276800, Read Bytes: 214748364800, Write Ops: 3801088, Write Bytes: 249108103168
+  (M) time: 671613 ms
+  Read amplification:
+    Run generation writes: 249108103168 bytes (232.00 GB)
+    Merge phase reads: 357564866560 bytes (333.01 GB)
+    Read amplification factor: 1.44x
+    Excess reads: 43.5% (sparse indexing overhead)
+  Thread timing (merge pass 1):
+    Min thread time: 177810 ms
+    Max thread time: 204187 ms
+    Avg thread time: 194759 ms
+    Time imbalance factor (max/avg): 1.05x
+    Thread times: [183642, 198783, 189642, 203335, 188311, 194241, 195201, 204187, 190557, 196819, 193535, 202859, 189429, 193102, 199622, 194193, 195889, 197049, 203339, 177810, 192662, 203702, 188097, 204115, 189404, 193523, 195558, 190490, 199279, 200656, 182727, 200536]
+  Thread timing (merge pass 2):
+    Min thread time: 390875 ms
+    Max thread time: 467420 ms
+    Avg thread time: 437000 ms
+    Time imbalance factor (max/avg): 1.07x
+    Thread times: [404522, 454759, 419783, 467307, 417136, 423893, 434841, 467420, 432715, 438168, 428578, 463339, 422959, 427599, 458335, 429131, 448544, 450477, 464537, 390875, 427584, 465655, 408911, 464436, 414318, 427000, 430628, 423759, 451866, 461305, 405939, 457676]
+  Multi-level merge details:
+    Total merge passes: 2
+    Merge pass 1:
+      Time: 204190 ms
+      Output runs: 32
+      I/O: read=99608.81 MiB, write=96877.85 MiB
+      Partitions: 32, imbalance: 1.14x
+    Merge pass 2:
+      Time: 467423 ms
+      Output runs: 32
+      I/O: read=241391.62 MiB, write=237567.96 MiB
+      Partitions: 32, imbalance: 1.14x
+
+1235.76s
+
+
+================================================================================================================================================================
+Benchmark Results Summary
+================================================================================================================================================================
+Config               Run Size   RG Runs    Gen Thr    Merge Thr  Total (s)  RunGen (s)   Merge (s)  Entries      Throughput       Read MB    Write MB  
+                     (MB)                                                                                        (M entries/s)                         
+----------------------------------------------------------------------------------------------------------------------------------------------------------------
+Exp1_Thr32_Mem2GB[1] 64.0       1760       32         32         1235.76      564.14     671.61     2147483648   1.74             545800.4   572013.8  
+Exp1_Thr32_Mem2GB[avg] 64.0       1760       32         32         1235.76      564.14     671.61     2147483648   1.74             545800.4   572013.8  
+================================================================================================================================================================
+
+================================================================================================================================================================
+Merge Operations Summary (showing last 2 of 2 merge passes)
+================================================================================================================================================================
+Config               M1PAvg     M1PMax     M1Imbal    M1Slow       M1Fast       M2PAvg     M2PMax     M2Imbal    M2Slow       M2Fast      
+----------------------------------------------------------------------------------------------------------------------------------------------------------------
+Exp1_Thr32_Mem2GB[1] 27366322   31165865   1.14       204.19       204.19       67108864   76431246   1.14       467.42       467.42      
+----------------------------------------------------------------------------------------------------------------------------------------------------------------
+Exp1_Thr32_Mem2GB[avg] 27366322   31165865   1.14       204.19       204.19       67108864   76431246   1.14       467.42       467.42      
+================================================================================================================================================================
+
+================================================================================================================================================================
+Detailed I/O Statistics
+================================================================================================================================================================
+Config               RG Read MB   RG Write MB  M1Read MB    M1Write MB   M2Read MB    M2Write MB  
+----------------------------------------------------------------------------------------------------------------------------------------------------------------
+Exp1_Thr32_Mem2GB[1] 204800.0     237568.0     99608.8      96877.9      241391.6     237568.0    
+----------------------------------------------------------------------------------------------------------------------------------------------------------------
+Exp1_Thr32_Mem2GB[avg] 204800.0     237568.0     99608.8      96877.9      241391.6     237568.0    
+================================================================================================================================================================
+
+====================================================================================================
+Run Generation Time Breakdown
+====================================================================================================
+Config               RG Total s   Load s       Sort s       Store s     
+----------------------------------------------------------------------------------------------------
+Exp1_Thr32_Mem2GB[1] 564.14       0            545.695      0           
+----------------------------------------------------------------------------------------------------
+Exp1_Thr32_Mem2GB[avg] 564.14       0.00         545.70       0.00        
+====================================================================================================
