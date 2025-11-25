@@ -98,10 +98,6 @@ pub fn create_kvbin_from_input(
             let pos = out.position();
             idx.write_all(&pos.to_le_bytes())
                 .map_err(|e| e.to_string())?;
-            println!(
-                "[kvbin] Wrote index checkpoint #{} at position {} (after {} records)",
-                index_points, pos, rows
-            );
         }
 
         // Progress updates every 1M records
