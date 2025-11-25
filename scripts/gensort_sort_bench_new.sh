@@ -63,8 +63,8 @@ run_calculated_case() {
     --merge-threads "$active_threads" \
     --run-size-mb "$run_size_mb" \
     --merge-fanin "$max_fanin" \
-    --warmup-runs 0 \
-    --benchmark-runs 1 \
+    --warmup-runs 1 \
+    --benchmark-runs 3 \
     --cooldown-seconds 30 \
     --dir "$temp_dir" \
     $extra_flags 2>&1 | tee -a "${OUT_DIR}/${name}.log"
@@ -77,7 +77,7 @@ run_calculated_case() {
 # ==============================================================================
 echo "=== EXP 1: SCALABILITY (2GB RAM) ==="
 # 4, 8, 16 should be Safe. 24 Borderline. 32, 40 Fail.
-for t in 4 8 16 24 32 40; do
+for t in 4 8 16 24 32 40 44; do
   run_calculated_case "Exp1" "$t" "2" "--ovc"
   cooldown
 done
@@ -88,8 +88,7 @@ done
 echo "=== EXP 2: MEMORY CLIFF (40 THREADS) ==="
 # 8, 6, 4 should be Safe. 2, 1 Fail. 
 # We skip 2 to avoid overlap with Exp 1. 
-# We also skip 1 since it
-for m in 8 6 4 2; do
+for m in 8 6 4 2 1; do
   # Skip overlap with Exp 1
   if [[ "$m" == "2" ]]; then continue; fi
   

@@ -1,0 +1,144 @@
+warning[E0133]: call to unsafe function `libc::posix_fadvise` is unsafe and requires unsafe block
+   --> src/kvbin.rs:267:19
+    |
+267 |         let ret = libc::posix_fadvise(fd, 0, 0, libc::POSIX_FADV_DONTNEED);
+    |                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ call to unsafe function
+    |
+    = note: for more information, see <https://doc.rust-lang.org/nightly/edition-guide/rust-2024/unsafe-op-in-unsafe-fn.html>
+    = note: consult the function's documentation for information on how to avoid undefined behavior
+note: an unsafe function restricts its caller, but its body is safe by default
+   --> src/kvbin.rs:263:1
+    |
+263 | unsafe fn drop_cache(fd: i32) {
+    | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    = note: `#[warn(unsafe_op_in_unsafe_fn)]` on by default
+
+For more information about this error, try `rustc --explain E0133`.
+warning: `es` (lib) generated 1 warning (run `cargo fix --lib -p es` to apply 1 suggestion)
+    Finished `release` profile [optimized] target(s) in 1.06s
+     Running `target/release/examples/lineitem_benchmark_cli -n Exp2_Thr40_Mem6GB -i /tank/local/riki/lineitem_sf500.csv --run-gen-threads 40 --merge-threads 40 --run-size-mb 153.60 --merge-fanin 2457 --warmup-runs 0 --benchmark-runs 1 --cooldown-seconds 30 --dir logs/lineitem_bench_2025-11-24_23-37-34/Exp2_Thr40_Mem6GB_tmp --ovc`
+Using existing KVBin file: "./datasets/lineitem_sf500.k-8-9-13-14-15.v-0-3.kvbin"
+
+=== BENCHMARK MODE ===
+KVBin data: ./datasets/lineitem_sf500.k-8-9-13-14-15.v-0-3.kvbin, index: ./datasets/lineitem_sf500.k-8-9-13-14-15.v-0-3.kvbin.idx
+Estimated data size: 199659.46 MB
+Run generation threads: 40
+Run generation algorithm: replacement-selection
+Run size (MB): 153.60
+Run generation memory (MB): 6144.0
+Merge threads: 40
+Merge fan-in: 2457
+Merge memory (MB): 6142.5
+OVC enabled: true
+Temporary directory: "logs/lineitem_bench_2025-11-24_23-37-34/Exp2_Thr40_Mem6GB_tmp"
+Warmup runs: 0
+Runs per configuration: 1
+Cooldown between runs (s): 30
+Verify output: false
+
+Running benchmark for config: Exp2_Thr40_Mem6GB
+Parameters: Run Gen Threads: 40, Run Gen Algorithm: replacement-selection, Run Size: 153.60 MB, Run Gen Memory: 6144.0 MB, Merge Threads: 40, Merge Fanin: 2457, Merge Memory: 6142.5 MB, Imbalance Factor: 1.0
+================================================================================
+  Run 1/1: Starting sort with 40 parallel scanners for run generation
+Run gen thread 27 (ReplacementSelection) 524257 ms, 17 runs generated
+Run gen thread 28 (ReplacementSelection) 527355 ms, 17 runs generated
+Run gen thread 39 (ReplacementSelection) 529853 ms, 17 runs generated
+Run gen thread 12 (ReplacementSelection) 529899 ms, 17 runs generated
+Run gen thread 36 (ReplacementSelection) 530241 ms, 17 runs generated
+Run gen thread 37 (ReplacementSelection) 530274 ms, 17 runs generated
+Run gen thread 9 (ReplacementSelection) 530507 ms, 17 runs generated
+Run gen thread 3 (ReplacementSelection) 530614 ms, 17 runs generated
+Run gen thread 30 (ReplacementSelection) 531013 ms, 17 runs generated
+Run gen thread 14 (ReplacementSelection) 531853 ms, 17 runs generated
+Run gen thread 23 (ReplacementSelection) 532117 ms, 17 runs generated
+Run gen thread 11 (ReplacementSelection) 532248 ms, 17 runs generated
+Run gen thread 21 (ReplacementSelection) 533048 ms, 17 runs generated
+Run gen thread 26 (ReplacementSelection) 533400 ms, 17 runs generated
+Run gen thread 38 (ReplacementSelection) 533408 ms, 17 runs generated
+Run gen thread 25 (ReplacementSelection) 534241 ms, 17 runs generated
+Run gen thread 20 (ReplacementSelection) 534517 ms, 17 runs generated
+Run gen thread 5 (ReplacementSelection) 534919 ms, 17 runs generated
+Run gen thread 0 (ReplacementSelection) 535394 ms, 17 runs generated
+Run gen thread 2 (ReplacementSelection) 536018 ms, 17 runs generated
+Run gen thread 1 (ReplacementSelection) 537367 ms, 17 runs generated
+Run gen thread 24 (ReplacementSelection) 538012 ms, 17 runs generated
+Run gen thread 31 (ReplacementSelection) 540128 ms, 17 runs generated
+Run gen thread 10 (ReplacementSelection) 540838 ms, 17 runs generated
+Run gen thread 6 (ReplacementSelection) 541001 ms, 17 runs generated
+Run gen thread 22 (ReplacementSelection) 541099 ms, 17 runs generated
+Run gen thread 32 (ReplacementSelection) 542540 ms, 17 runs generated
+Run gen thread 16 (ReplacementSelection) 543209 ms, 17 runs generated
+Run gen thread 18 (ReplacementSelection) 543708 ms, 17 runs generated
+Run gen thread 7 (ReplacementSelection) 544474 ms, 17 runs generated
+Run gen thread 19 (ReplacementSelection) 545121 ms, 17 runs generated
+Run gen thread 17 (ReplacementSelection) 545808 ms, 17 runs generated
+Run gen thread 35 (ReplacementSelection) 546081 ms, 17 runs generated
+Run gen thread 29 (ReplacementSelection) 546801 ms, 17 runs generated
+Run gen thread 13 (ReplacementSelection) 547957 ms, 17 runs generated
+Run gen thread 4 (ReplacementSelection) 548306 ms, 17 runs generated
+Run gen thread 8 (ReplacementSelection) 549248 ms, 17 runs generated
+Run gen thread 33 (ReplacementSelection) 550035 ms, 17 runs generated
+Run gen thread 15 (ReplacementSelection) 550864 ms, 17 runs generated
+Run gen thread 34 (ReplacementSelection) 551443 ms, 17 runs generated
+Generated 680 runs in 551759 ms
+Merging 680 runs using 40 threads
+Merge phase took 242015 ms | Merged 3000028242 entries across 40 runs | Thread timing: min=176158 ms, max=241929 ms | Partition sizes: imbalance=1.34x
+SortStats:
+  Number of runs: 680
+  (R) time: 551759 ms
+  (R) breakdown: load=0 ms, sort=538230 ms, store=0 ms
+  (R) I/O stats: I/O Stats: Read Ops: 3194568, Read Bytes: 209359202661, Write Ops: 2074194, Write Bytes: 135933170688
+  (M) time: 242015 ms
+  Read amplification:
+    Run generation writes: 135933170688 bytes (126.60 GB)
+    Merge phase reads: 138312252928 bytes (128.81 GB)
+    Read amplification factor: 1.02x
+    Excess reads: 1.8% (sparse indexing overhead)
+  Thread timing:
+    Min thread time: 176158 ms
+    Max thread time: 241929 ms
+    Avg thread time: 212221 ms
+    Time imbalance factor (max/avg): 1.14x
+
+793.77s
+
+
+================================================================================================================================================================
+Benchmark Results Summary
+================================================================================================================================================================
+Config               Run Size   RG Runs    Gen Thr    Merge Thr  Total (s)  RunGen (s)   Merge (s)  Entries      Throughput       Read MB    Write MB  
+                     (MB)                                                                                        (M entries/s)                         
+----------------------------------------------------------------------------------------------------------------------------------------------------------------
+Exp2_Thr40_Mem6GB[1] 153.6      680        40         40         793.77       551.76     242.01     3000028242   3.78             331565.3   226403.5  
+Exp2_Thr40_Mem6GB[avg] 153.6      680        40         40         793.77       551.76     242.01     3000028242   3.78             331565.3   226403.5  
+================================================================================================================================================================
+
+================================================================================================================================================================
+Merge Operations Summary (showing last 1 of 1 merge passes)
+================================================================================================================================================================
+Config               M1PAvg     M1PMax     M1Imbal    M1Slow       M1Fast      
+----------------------------------------------------------------------------------------------------------------------------------------------------------------
+Exp2_Thr40_Mem6GB[1] 75000706   100131066  1.34       242.01       242.01      
+----------------------------------------------------------------------------------------------------------------------------------------------------------------
+Exp2_Thr40_Mem6GB[avg] 75000706   100131066  1.34       242.01       242.01      
+================================================================================================================================================================
+
+================================================================================================================================================================
+Detailed I/O Statistics
+================================================================================================================================================================
+Config               RG Read MB   RG Write MB  M1Read MB    M1Write MB  
+----------------------------------------------------------------------------------------------------------------------------------------------------------------
+Exp2_Thr40_Mem6GB[1] 199660.5     129636.0     131904.8     96767.6     
+----------------------------------------------------------------------------------------------------------------------------------------------------------------
+Exp2_Thr40_Mem6GB[avg] 199660.5     129636.0     131904.8     96767.6     
+================================================================================================================================================================
+
+====================================================================================================
+Run Generation Time Breakdown
+====================================================================================================
+Config               RG Total s   Load s       Sort s       Store s     
+----------------------------------------------------------------------------------------------------
+Exp2_Thr40_Mem6GB[1] 551.76       0            538.23       0           
+----------------------------------------------------------------------------------------------------
+Exp2_Thr40_Mem6GB[avg] 551.76       0.00         538.23       0.00        
+====================================================================================================
