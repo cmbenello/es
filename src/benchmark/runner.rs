@@ -1,6 +1,7 @@
 use super::input::BenchmarkInputProvider;
 use super::types::{BenchmarkConfig, BenchmarkResult};
 use super::verification::OutputVerifier;
+use crate::sketch::SketchType;
 use crate::{
     ExternalSorter, ExternalSorterWithOVC, RunsOutput, RunsOutputWithOVC, SortInput, SortOutput,
     SortStats,
@@ -117,6 +118,7 @@ impl BenchmarkRunner {
                     input,
                     self.config.run_gen_threads as usize,
                     (self.config.run_size_mb * 1024.0 * 1024.0) as usize,
+                    self.config.sketch_type,
                     self.config.sketch_size,
                     self.config.sketch_sampling_interval,
                     self.config.run_indexing_interval,
@@ -140,6 +142,7 @@ impl BenchmarkRunner {
                     input,
                     self.config.run_gen_threads as usize,
                     (self.config.run_size_mb * 1024.0 * 1024.0) as usize,
+                    self.config.sketch_type,
                     self.config.sketch_size,
                     self.config.sketch_sampling_interval,
                     self.config.run_indexing_interval,
@@ -263,6 +266,7 @@ impl BenchmarkRunner {
                 input,
                 self.config.run_gen_threads as usize,
                 (self.config.run_size_mb * 1024.0 * 1024.0) as usize,
+                self.config.sketch_type,
                 self.config.sketch_size,
                 self.config.sketch_sampling_interval,
                 self.config.run_indexing_interval,
@@ -288,6 +292,7 @@ impl BenchmarkRunner {
                 input,
                 self.config.run_gen_threads as usize,
                 (self.config.run_size_mb * 1024.0 * 1024.0) as usize,
+                self.config.sketch_type,
                 self.config.sketch_size,
                 self.config.sketch_sampling_interval,
                 self.config.run_indexing_interval,

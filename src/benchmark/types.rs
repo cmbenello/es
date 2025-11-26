@@ -1,3 +1,4 @@
+use crate::sketch::SketchType;
 use crate::{RunGenerationAlgorithm, SortStats};
 use std::path::PathBuf;
 
@@ -16,6 +17,7 @@ pub struct BenchmarkConfig {
     pub verify: bool,
     pub ovc: bool,
     pub temp_dir: PathBuf,
+    pub sketch_type: SketchType,
     pub sketch_size: usize,
     pub sketch_sampling_interval: usize,
     pub run_indexing_interval: usize,

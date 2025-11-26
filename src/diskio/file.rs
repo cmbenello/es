@@ -1,6 +1,5 @@
 use libc::{c_void, fstat, off_t, pread, pwrite};
-use std::fs::{self, File};
-use std::os::unix::io::{AsRawFd, RawFd};
+use std::os::unix::io::RawFd;
 use std::path::{Path, PathBuf};
 use std::{io, os::fd::IntoRawFd};
 

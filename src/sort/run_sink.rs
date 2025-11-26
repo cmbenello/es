@@ -1,4 +1,4 @@
-use crate::sketch::kll::KLL;
+use crate::sketch::Sketch;
 use crate::sort::core::engine::RunSummary;
 
 pub trait RunSink: Send {
@@ -8,5 +8,5 @@ pub trait RunSink: Send {
     fn push_record(&mut self, key: &[u8], value: &[u8]);
     fn finish_run(&mut self);
 
-    fn finalize(self) -> (Vec<Self::MergeableRun>, KLL<Vec<u8>>);
+    fn finalize(self) -> (Vec<Self::MergeableRun>, Sketch<Vec<u8>>);
 }

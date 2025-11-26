@@ -110,7 +110,6 @@ impl SorterCore<OvcSortHooks> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::InMemInput;
     use crate::diskio::aligned_writer::AlignedWriter;
     use crate::diskio::file::SharedFd;
     use crate::rand::small_thread_rng;
@@ -119,6 +118,7 @@ mod tests {
     use crate::sort::ovc::run::RunWithOVC;
     use crate::sort::ovc::sort_buffer_with_ovc::SortBufferOVC;
     use crate::sort::run_sink::RunSink;
+    use crate::{InMemInput, sketch::SketchType};
     use rand::seq::SliceRandom;
     use std::sync::Arc;
     use tempfile::{TempDir, tempdir};
@@ -190,6 +190,7 @@ mod tests {
         let num_records = 100000;
         let num_threads_run_gen = 2;
         let run_size = 512;
+        let sketch_type = SketchType::Kll;
         let sketch_size = 200;
         let sketch_sampling_interval = 1000;
         let run_indexing_interval = 1000;
@@ -213,6 +214,7 @@ mod tests {
             Box::new(InMemInput { data }),
             num_threads_run_gen,
             run_size,
+            sketch_type,
             sketch_size,
             sketch_sampling_interval,
             run_indexing_interval,
@@ -248,7 +250,7 @@ mod tests {
         let temp_dir = tempdir().unwrap();
         let fd = Arc::new(SharedFd::new_from_path(&temp_dir.path().join("run.dat"), true).unwrap());
         let writer = AlignedWriter::from_fd(fd).unwrap();
-        let mut sink = RunWriterSink::<OvcRunFormat>::new(writer, 1000, 128, 1);
+        let mut sink = RunWriterSink::<OvcRunFormat>::new(writer, 1000, SketchType::Kll, 128, 1);
         sink.start_run();
         for (_ovc, key, value) in buffer.sorted_iter() {
             sink.push_record(&key, &value);
@@ -276,9 +278,10 @@ mod tests {
             Box::new(InMemInput { data }),
             2,        // num_threads
             256 * 20, // run_size
-            100,      // sketch_size
-            1000,     // sketch_sampling_interval
-            1000,     // run_indexing_interval
+            SketchType::Kll,
+            100,  // sketch_size
+            1000, // sketch_sampling_interval
+            1000, // run_indexing_interval
             temp_dir.path(),
             RunGenerationAlgorithm::ReplacementSelection,
         )

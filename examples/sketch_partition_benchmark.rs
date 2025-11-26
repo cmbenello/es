@@ -1,7 +1,7 @@
 use es::fastzipf::FastZipf;
-use es::sketch::{MergeableSampler, QuantileSampler};
 use es::sketch::kll::KLL;
 use es::sketch::reservoir_sampler::ReservoirSampler;
+use es::sketch::{MergeableSampler, QuantileSampler};
 use std::collections::HashMap;
 
 fn main() {
@@ -12,7 +12,9 @@ fn main() {
     let num_trials = 10;
 
     // CSV header
-    println!("skew,trial,sketch_type,min_partition_size,max_partition_size,imbalance_pct,variance,top1_pct,top2_pct,top3_pct");
+    println!(
+        "skew,trial,sketch_type,min_partition_size,max_partition_size,imbalance_pct,variance,top1_pct,top2_pct,top3_pct"
+    );
 
     for &skew in &skew_values {
         for trial in 0..num_trials {
@@ -33,9 +35,18 @@ fn main() {
             let mut freq_vec: Vec<(u64, usize)> = freq_map.into_iter().collect();
             freq_vec.sort_unstable_by(|a, b| b.1.cmp(&a.1));
 
-            let top1_pct = freq_vec.get(0).map(|(_, count)| *count as f64 / total_samples as f64 * 100.0).unwrap_or(0.0);
-            let top2_pct = freq_vec.get(1).map(|(_, count)| *count as f64 / total_samples as f64 * 100.0).unwrap_or(0.0);
-            let top3_pct = freq_vec.get(2).map(|(_, count)| *count as f64 / total_samples as f64 * 100.0).unwrap_or(0.0);
+            let top1_pct = freq_vec
+                .get(0)
+                .map(|(_, count)| *count as f64 / total_samples as f64 * 100.0)
+                .unwrap_or(0.0);
+            let top2_pct = freq_vec
+                .get(1)
+                .map(|(_, count)| *count as f64 / total_samples as f64 * 100.0)
+                .unwrap_or(0.0);
+            let top3_pct = freq_vec
+                .get(2)
+                .map(|(_, count)| *count as f64 / total_samples as f64 * 100.0)
+                .unwrap_or(0.0);
 
             // Build sketches independently on each chunk
             let mut kll_sketches = Vec::new();
@@ -102,16 +113,19 @@ fn main() {
             let calculate_stats = |counts: &[usize]| -> (usize, usize, f64, f64) {
                 let min = *counts.iter().min().unwrap();
                 let max = *counts.iter().max().unwrap();
-                let imbalance = ((max as f64 - optimal_size as f64) / optimal_size as f64 * 100.0).abs();
+                let imbalance =
+                    ((max as f64 - optimal_size as f64) / optimal_size as f64 * 100.0).abs();
 
                 // Calculate variance
                 let mean = counts.iter().sum::<usize>() as f64 / counts.len() as f64;
-                let variance = counts.iter()
+                let variance = counts
+                    .iter()
                     .map(|&c| {
                         let diff = c as f64 - mean;
                         diff * diff
                     })
-                    .sum::<f64>() / counts.len() as f64;
+                    .sum::<f64>()
+                    / counts.len() as f64;
 
                 (min, max, imbalance, variance)
             };
@@ -120,12 +134,32 @@ fn main() {
             let (res_min, res_max, res_imbalance, res_variance) = calculate_stats(&res_counts);
 
             // Output KLL stats
-            println!("{},{},KLL,{},{},{:.4},{:.4},{:.4},{:.4},{:.4}",
-                skew, trial, kll_min, kll_max, kll_imbalance, kll_variance, top1_pct, top2_pct, top3_pct);
+            println!(
+                "{},{},KLL,{},{},{:.4},{:.4},{:.4},{:.4},{:.4}",
+                skew,
+                trial,
+                kll_min,
+                kll_max,
+                kll_imbalance,
+                kll_variance,
+                top1_pct,
+                top2_pct,
+                top3_pct
+            );
 
             // Output Reservoir stats
-            println!("{},{},RS,{},{},{:.4},{:.4},{:.4},{:.4},{:.4}",
-                skew, trial, res_min, res_max, res_imbalance, res_variance, top1_pct, top2_pct, top3_pct);
+            println!(
+                "{},{},RS,{},{},{:.4},{:.4},{:.4},{:.4},{:.4}",
+                skew,
+                trial,
+                res_min,
+                res_max,
+                res_imbalance,
+                res_variance,
+                top1_pct,
+                top2_pct,
+                top3_pct
+            );
 
             eprintln!("Completed skew={}, trial={}", skew, trial);
         }

@@ -3,6 +3,109 @@ use std::cmp::Ordering;
 pub mod kll;
 pub mod reservoir_sampler;
 
+/// Specifies which sketch algorithm to use for quantile estimation
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SketchType {
+    /// KLL sketch - provides better accuracy with tighter error bounds
+    Kll,
+    /// Reservoir sampling - uses uniform random sampling
+    ReservoirSampling,
+}
+
+impl std::fmt::Display for SketchType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            SketchType::Kll => write!(f, "kll"),
+            SketchType::ReservoirSampling => write!(f, "reservoir-sampling"),
+        }
+    }
+}
+
+impl std::str::FromStr for SketchType {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        let normalized = s.trim().to_ascii_lowercase();
+        match normalized.as_str() {
+            "kll" => Ok(SketchType::Kll),
+            "reservoir" | "reservoir-sampling" | "reservoir_sampling" => {
+                Ok(SketchType::ReservoirSampling)
+            }
+            other => Err(format!(
+                "Invalid sketch type '{other}'. Expected 'kll' or 'reservoir-sampling'."
+            )),
+        }
+    }
+}
+
+/// Wrapper that holds either a KLL or ReservoirSampler and provides merge capability
+pub enum Sketch<T> {
+    Kll(kll::KLL<T>),
+    Reservoir(reservoir_sampler::ReservoirSampler<T>),
+}
+
+impl<T> Sketch<T>
+where
+    T: PartialOrd + Clone,
+{
+    pub fn new(sketch_type: SketchType, size: usize) -> Self {
+        match sketch_type {
+            SketchType::Kll => Sketch::Kll(kll::KLL::new(size)),
+            SketchType::ReservoirSampling => {
+                Sketch::Reservoir(reservoir_sampler::ReservoirSampler::new(size))
+            }
+        }
+    }
+
+    pub fn merge(&mut self, other: &Sketch<T>) {
+        match (self, other) {
+            (Sketch::Kll(a), Sketch::Kll(b)) => a.merge(b),
+            (Sketch::Reservoir(a), Sketch::Reservoir(b)) => a.merge(b),
+            _ => panic!("Cannot merge different sketch types"),
+        }
+    }
+}
+
+impl<T> QuantileSampler<T> for Sketch<T>
+where
+    T: PartialOrd + Clone,
+{
+    fn update(&mut self, x: T) {
+        match self {
+            Sketch::Kll(s) => s.update(x),
+            Sketch::Reservoir(s) => s.update(x),
+        }
+    }
+
+    fn rank(&self, x: T) -> usize {
+        match self {
+            Sketch::Kll(s) => s.rank(x),
+            Sketch::Reservoir(s) => s.rank(x),
+        }
+    }
+
+    fn count(&self) -> usize {
+        match self {
+            Sketch::Kll(s) => s.count(),
+            Sketch::Reservoir(s) => s.count(),
+        }
+    }
+
+    fn quantile(&self, x: T) -> f64 {
+        match self {
+            Sketch::Kll(s) => s.quantile(x),
+            Sketch::Reservoir(s) => s.quantile(x),
+        }
+    }
+
+    fn cdf(&self) -> CDF<T> {
+        match self {
+            Sketch::Kll(s) => s.cdf(),
+            Sketch::Reservoir(s) => s.cdf(),
+        }
+    }
+}
+
 /// Common trait for sampling-based data structures that provide quantile estimation.
 ///
 /// This trait defines the core operations for any sampling technique (KLL sketch,
@@ -360,7 +463,11 @@ mod tests {
         println!("\nMerged sketch test (Zipf skew={}):", skew);
         println!("  Total samples: {}", total_samples);
         println!("  Num partitions: {}", num_partitions);
-        println!("  Optimal partition size: {} ({:.2}%)", optimal_size, 100.0 / num_partitions as f64);
+        println!(
+            "  Optimal partition size: {} ({:.2}%)",
+            optimal_size,
+            100.0 / num_partitions as f64
+        );
         println!("\nTop 5 most frequent values:");
         for (value, count) in freq_vec.iter().take(5) {
             let pct = *count as f64 / total_samples as f64 * 100.0;

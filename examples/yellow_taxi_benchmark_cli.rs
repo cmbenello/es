@@ -7,6 +7,7 @@ use es::benchmark::{
 };
 use es::diskio::constants::DEFAULT_BUFFER_SIZE;
 use es::kvbin::{binary_file_name, create_kvbin_from_input};
+use es::sketch::SketchType;
 use std::path::PathBuf;
 
 // NYC Yellow Taxi Dataset Column Reference
@@ -114,7 +115,11 @@ struct Args {
     #[arg(short = 'v', long, default_value = "0")]
     value_columns: String,
 
-    /// Sketch size for quantile estimation (KLL)
+    /// Sketch type for quantile estimation (`kll` or `reservoir-sampling`)
+    #[arg(long, default_value = "kll", value_name = "SKETCH")]
+    sketch_type: SketchType,
+
+    /// Sketch size for quantile estimation
     #[arg(long, default_value = "200")]
     sketch_size: usize,
 
@@ -237,6 +242,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         verify: args.verify,
         ovc: args.ovc,
         temp_dir: args.dir,
+        sketch_type: args.sketch_type,
         sketch_size: args.sketch_size,
         sketch_sampling_interval: args.sketch_sampling_interval,
         run_indexing_interval: args.run_indexing_interval,

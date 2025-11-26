@@ -264,7 +264,7 @@ unsafe fn drop_cache(fd: i32) {
     // --- Linux の場合 ---
     #[cfg(target_os = "linux")]
     {
-        let ret = libc::posix_fadvise(fd, 0, 0, libc::POSIX_FADV_DONTNEED);
+        let ret = unsafe { libc::posix_fadvise(fd, 0, 0, libc::POSIX_FADV_DONTNEED) };
         if ret != 0 {
             eprintln!(
                 "[kvbin] Warning: posix_fadvise failed on Linux (err: {})",
@@ -277,7 +277,7 @@ unsafe fn drop_cache(fd: i32) {
     #[cfg(target_os = "macos")]
     {
         // F_NOCACHE: このファイルに対するキャッシュを無効化する
-        let ret = libc::fcntl(fd, libc::F_NOCACHE, 1);
+        let ret = unsafe { libc::fcntl(fd, libc::F_NOCACHE, 1) };
         if ret == -1 {
             eprintln!("[kvbin] Warning: fcntl(F_NOCACHE) failed on macOS");
         }
