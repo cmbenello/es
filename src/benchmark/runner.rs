@@ -83,6 +83,12 @@ impl BenchmarkRunner {
         println!("Merge fan-in: {}", self.config.merge_fanin);
         println!("Merge memory (MB): {:.1}", self.config.merge_memory_mb);
         println!("OVC enabled: {}", self.config.ovc);
+        println!("Sketch type: {}", self.config.sketch_type);
+        println!("Sketch size: {}", self.config.sketch_size);
+        println!(
+            "Run indexing interval: {}",
+            self.config.run_indexing_interval
+        );
         println!("Temporary directory: {:?}", self.config.temp_dir);
         println!("Warmup runs: {}", self.config.warmup_runs);
         println!("Runs per configuration: {}", self.config.benchmark_runs);
