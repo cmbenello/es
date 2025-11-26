@@ -102,6 +102,8 @@ where
 }
 
 mod tests {
+    use std::collections::HashMap;
+
     use super::kll::*;
     use super::reservoir_sampler::*;
     use super::*;
@@ -183,7 +185,7 @@ mod tests {
         let num_partitions = 40;
         let skew = 0.80;
         let nr_items = 100000;
-        let num_samples = 10_000_000;
+        let num_samples = 1_000_000;
 
         let mut zipf = FastZipf::new(skew, nr_items);
         let mut kll = KLL::new(200);
@@ -257,5 +259,120 @@ mod tests {
 
         println!("\nKLL imbalance: {:.2}%", kll_imbalance);
         println!("Reservoir imbalance: {:.2}%", res_imbalance);
+    }
+
+    #[test]
+    fn test_merged_sketch_partition_quality_zipf() {
+        use crate::fastzipf::FastZipf;
+
+        let num_partitions = 40;
+        let skew = 0.80;
+        let nr_items = 100000;
+        let samples_per_chunk = 250_000;
+
+        let mut zipf = FastZipf::new(skew, nr_items);
+
+        // Generate all data first
+        let total_samples = num_partitions * samples_per_chunk;
+        let mut all_data = Vec::with_capacity(total_samples);
+        for _ in 0..total_samples {
+            all_data.push(zipf.sample() as f64);
+        }
+
+        // Top 5 most frequent values
+        let mut freq_map = HashMap::new();
+        for &v in &all_data {
+            *freq_map.entry(v as u64).or_insert(0) += 1;
+        }
+        let mut freq_vec: Vec<(u64, usize)> = freq_map.into_iter().collect();
+        freq_vec.sort_unstable_by(|a, b| b.1.cmp(&a.1));
+
+        // Build sketches independently on each chunk
+        let mut kll_sketches = Vec::new();
+        let mut res_sketches = Vec::new();
+        for chunk_idx in 0..num_partitions {
+            let mut kll = KLL::new(200);
+            let mut reservoir = ReservoirSampler::new(600);
+            let start = chunk_idx * samples_per_chunk;
+            let end = start + samples_per_chunk;
+
+            for &v in &all_data[start..end] {
+                kll.update(v);
+                reservoir.update(v);
+            }
+            kll_sketches.push(kll);
+            res_sketches.push(reservoir);
+        }
+
+        // Merge all sketches
+        let mut merged_kll = kll_sketches.remove(0);
+        for sketch in kll_sketches.drain(..) {
+            merged_kll.merge(&sketch);
+        }
+
+        let mut merged_res = res_sketches.remove(0);
+        for sketch in res_sketches.drain(..) {
+            merged_res.merge(&sketch);
+        }
+
+        // Get boundaries from merged sketches
+        let kll_cdf = merged_kll.cdf();
+        let res_cdf = merged_res.cdf();
+
+        let mut kll_boundaries = vec![f64::NEG_INFINITY];
+        let mut res_boundaries = vec![f64::NEG_INFINITY];
+
+        for i in 1..num_partitions {
+            let quantile = i as f64 / num_partitions as f64;
+            kll_boundaries.push(kll_cdf.query(quantile));
+            res_boundaries.push(res_cdf.query(quantile));
+        }
+        kll_boundaries.push(f64::INFINITY);
+        res_boundaries.push(f64::INFINITY);
+
+        // Count how data is distributed with these boundaries
+        let count_partition = |boundaries: &[f64]| -> Vec<usize> {
+            let mut counts = vec![0; num_partitions];
+            for &v in &all_data {
+                for i in 0..num_partitions {
+                    if v > boundaries[i] && v <= boundaries[i + 1] {
+                        counts[i] += 1;
+                        break;
+                    }
+                }
+            }
+            counts
+        };
+
+        let kll_counts = count_partition(&kll_boundaries);
+        let res_counts = count_partition(&res_boundaries);
+
+        let optimal_size = total_samples / num_partitions;
+
+        let calculate_imbalance = |counts: &[usize]| {
+            let max = *counts.iter().max().unwrap();
+            ((max as f64 - optimal_size as f64) / optimal_size as f64 * 100.0).abs()
+        };
+
+        let kll_imbalance = calculate_imbalance(&kll_counts);
+        let res_imbalance = calculate_imbalance(&res_counts);
+
+        println!("\nMerged sketch test (Zipf skew={}):", skew);
+        println!("  Total samples: {}", total_samples);
+        println!("  Num partitions: {}", num_partitions);
+        println!("  Optimal partition size: {} ({:.2}%)", optimal_size, 100.0 / num_partitions as f64);
+        println!("\nTop 5 most frequent values:");
+        for (value, count) in freq_vec.iter().take(5) {
+            let pct = *count as f64 / total_samples as f64 * 100.0;
+            println!("  Value {}: {} occurrences ({:.2}%)", value, count, pct);
+        }
+        println!("\nKLL (size=200):");
+        println!("  Min partition size: {}", kll_counts.iter().min().unwrap());
+        println!("  Max partition size: {}", kll_counts.iter().max().unwrap());
+        println!("  Imbalance: {:.2}%", kll_imbalance);
+        println!("\nReservoir (size=600):");
+        println!("  Min partition size: {}", res_counts.iter().min().unwrap());
+        println!("  Max partition size: {}", res_counts.iter().max().unwrap());
+        println!("  Imbalance: {:.2}%", res_imbalance);
     }
 }
