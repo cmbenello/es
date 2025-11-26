@@ -6,9 +6,9 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use crate::diskio::aligned_writer::AlignedWriter;
 use crate::diskio::file::SharedFd;
 use crate::diskio::io_stats::IoStatsTracker;
-use crate::kll::Sketch;
 use crate::rand::small_thread_rng;
 use crate::replacement_selection::run_replacement_selection;
+use crate::sketch::kll::KLL;
 use crate::sort::run_sink::RunSink;
 use crate::sort::sort_buffer::SortBuffer;
 use crate::{
@@ -22,7 +22,7 @@ pub type Scanner = Box<dyn Iterator<Item = (Vec<u8>, Vec<u8>)> + Send>;
 
 pub struct RunGenerationThreadResult<R> {
     pub runs: Vec<R>,
-    pub sketch: Sketch<Vec<u8>>,
+    pub sketch: KLL<Vec<u8>>,
     pub load_ms: u128,
     pub sort_ms: u128,
     pub store_ms: u128,
@@ -39,7 +39,7 @@ pub fn execute_run_generation<R, F>(
     sketch_size: usize,
     dir: impl AsRef<Path>,
     worker: F,
-) -> Result<(Vec<R>, Sketch<Vec<u8>>, RunGenerationStats), String>
+) -> Result<(Vec<R>, KLL<Vec<u8>>, RunGenerationStats), String>
 where
     R: RunSummary + Send + 'static,
     F: Fn(usize, Scanner, Arc<IoStatsTracker>, PathBuf) -> RunGenerationThreadResult<R>
@@ -62,7 +62,7 @@ where
     if scanners.is_empty() {
         return Ok((
             vec![],
-            Sketch::new(sketch_size),
+            KLL::new(sketch_size),
             RunGenerationStats {
                 num_runs: 0,
                 runs_info: vec![],
@@ -86,7 +86,7 @@ where
     }
 
     let mut output_runs = Vec::new();
-    let mut sketch = Sketch::new(sketch_size);
+    let mut sketch = KLL::new(sketch_size);
     let mut total_load_ms: u128 = 0;
     let mut total_sort_ms: u128 = 0;
     let mut total_store_ms: u128 = 0;
@@ -290,7 +290,7 @@ impl<H: SortHooks> SorterCore<H> {
     fn run_generation_internal(
         &self,
         sort_input: Box<dyn SortInput>,
-    ) -> Result<(Vec<H::MergeableRun>, Sketch<Vec<u8>>, RunGenerationStats), String> {
+    ) -> Result<(Vec<H::MergeableRun>, KLL<Vec<u8>>, RunGenerationStats), String> {
         run_generation_with_hooks(
             &self.hooks,
             sort_input,
@@ -307,7 +307,7 @@ impl<H: SortHooks> SorterCore<H> {
     fn multi_merge_internal(
         &self,
         runs: Vec<H::MergeableRun>,
-        sketch: &Sketch<Vec<u8>>,
+        sketch: &KLL<Vec<u8>>,
     ) -> Result<(H::MergeableRun, Vec<MergeStats>), String> {
         multi_merge_with_hooks(
             &self.hooks,
@@ -329,7 +329,7 @@ impl<H: SortHooks> SorterCore<H> {
         run_indexing_interval: usize,
         dir: impl AsRef<Path>,
         algorithm: RunGenerationAlgorithm,
-    ) -> Result<(Vec<H::MergeableRun>, Sketch<Vec<u8>>, RunGenerationStats), String>
+    ) -> Result<(Vec<H::MergeableRun>, KLL<Vec<u8>>, RunGenerationStats), String>
     where
         H: Default,
     {
@@ -351,7 +351,7 @@ impl<H: SortHooks> SorterCore<H> {
         runs: Vec<H::MergeableRun>,
         fanin: usize,
         num_threads: usize,
-        sketch: &Sketch<Vec<u8>>,
+        sketch: &KLL<Vec<u8>>,
         imbalance_factor: f64,
         dir: impl AsRef<Path>,
     ) -> Result<(H::MergeableRun, Vec<MergeStats>), String>
@@ -410,7 +410,7 @@ fn run_generation_with_hooks<H: SortHooks>(
     run_indexing_interval: usize,
     dir: impl AsRef<Path>,
     algorithm: RunGenerationAlgorithm,
-) -> Result<(Vec<H::MergeableRun>, Sketch<Vec<u8>>, RunGenerationStats), String> {
+) -> Result<(Vec<H::MergeableRun>, KLL<Vec<u8>>, RunGenerationStats), String> {
     let dir = dir.as_ref();
     let hooks = hooks.clone();
     let worker_hooks = hooks.clone();
@@ -513,7 +513,7 @@ fn multi_merge_with_hooks<H: SortHooks>(
     mut runs: Vec<H::MergeableRun>,
     fanin: usize,
     num_threads: usize,
-    sketch: &Sketch<Vec<u8>>,
+    sketch: &KLL<Vec<u8>>,
     imbalance_factor: f64,
     dir: &Path,
 ) -> Result<(H::MergeableRun, Vec<MergeStats>), String> {
@@ -595,7 +595,7 @@ fn merge_once_with_hooks<H: SortHooks>(
     hooks: &H,
     output_runs: Vec<H::MergeableRun>,
     num_threads: usize,
-    sketch: &Sketch<Vec<u8>>,
+    sketch: &KLL<Vec<u8>>,
     imbalance_factor: f64,
     dir: &Path,
 ) -> Result<(H::MergeableRun, MergeStats), String> {

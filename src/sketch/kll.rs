@@ -1,4 +1,5 @@
 use crate::rand::small_thread_rng;
+use crate::sketch::{CDF, MergeableSampler, Quantile, QuantileSampler};
 use rand::Rng;
 use std::cmp::Ordering;
 use std::fmt;
@@ -52,7 +53,7 @@ pub fn insertion_sort<T: PartialEq + PartialOrd>(run: &mut Vec<T>) {
 ///
 /// The sketch maintains a hierarchy of compactors that progressively
 /// compress the data stream while preserving quantile accuracy guarantees.
-pub struct Sketch<T> {
+pub struct KLL<T> {
     /// Hierarchy of compactors, where compactor[i] has weight 2^i.
     /// Each compactor stores sorted samples from the input stream.
     /// Higher levels store fewer but more representative samples.
@@ -72,7 +73,7 @@ pub struct Sketch<T> {
     pub(crate) max_size: usize,
 }
 
-impl<T> Sketch<T>
+impl<T> KLL<T>
 where
     T: PartialOrd + Clone,
 {
@@ -84,7 +85,7 @@ where
         let size = 0;
         let max_size = expected_capacity;
 
-        Sketch {
+        KLL {
             compactors: vec![new_compactor],
             k,
             size,
@@ -161,7 +162,7 @@ where
         }
     }
 
-    pub fn merge(&mut self, t: &Sketch<T>) {
+    pub fn merge(&mut self, t: &KLL<T>) {
         while self.compactors.len() < t.compactors.len() {
             self.grow();
         }
@@ -314,7 +315,41 @@ where
     }
 }
 
-impl fmt::Display for Sketch<f64> {
+impl<T> QuantileSampler<T> for KLL<T>
+where
+    T: PartialOrd + Clone,
+{
+    fn update(&mut self, x: T) {
+        self.update(x);
+    }
+
+    fn rank(&self, x: T) -> usize {
+        self.rank(x)
+    }
+
+    fn count(&self) -> usize {
+        self.count()
+    }
+
+    fn quantile(&self, x: T) -> f64 {
+        self.quantile(x)
+    }
+
+    fn cdf(&self) -> CDF<T> {
+        self.cdf()
+    }
+}
+
+impl<T> MergeableSampler<T> for KLL<T>
+where
+    T: PartialOrd + Clone,
+{
+    fn merge(&mut self, other: &Self) {
+        self.merge(other);
+    }
+}
+
+impl fmt::Display for KLL<f64> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         writeln!(f, "KLL Sketch (k={})", self.k)?;
         writeln!(
@@ -367,7 +402,7 @@ impl fmt::Display for Sketch<f64> {
     }
 }
 
-impl fmt::Display for Sketch<String> {
+impl fmt::Display for KLL<String> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         writeln!(f, "KLL Sketch (k={})", self.k)?;
         writeln!(
@@ -416,7 +451,7 @@ impl fmt::Display for Sketch<String> {
     }
 }
 
-impl fmt::Display for Sketch<Vec<u8>> {
+impl fmt::Display for KLL<Vec<u8>> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         writeln!(f, "KLL Sketch (k={})", self.k)?;
         writeln!(
@@ -473,7 +508,7 @@ impl fmt::Display for Sketch<Vec<u8>> {
 }
 
 // Generic display implementation for integers
-impl fmt::Display for Sketch<i32> {
+impl fmt::Display for KLL<i32> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         writeln!(f, "KLL Sketch (k={})", self.k)?;
         writeln!(
@@ -567,20 +602,8 @@ where
         }
 
         let mut current_items = std::mem::take(&mut self.0);
-
-        // Nothing to compact if we have 0 or 1 items
-        if current_items.len() == 2 {
-            // Special case for 2 items: just ensure they're sorted
-            if current_items[0] > current_items[1] {
-                current_items.swap(0, 1);
-            }
-        } else if current_items.len() > 100 {
-            // Use standard sort for large arrays (more efficient)
-            current_items.sort_unstable_by(|a, b| a.partial_cmp(b).unwrap_or(Ordering::Equal));
-        } else {
-            // Use insertion sort for small arrays (better cache locality)
-            insertion_sort(&mut current_items);
-        }
+        // Use standard sort for large arrays (more efficient)
+        current_items.sort_unstable_by(|a, b| a.partial_cmp(b).unwrap_or(Ordering::Equal));
 
         // Ensure destination has enough capacity for the promoted items
         let free = dst.0.capacity() - dst.0.len();
@@ -607,75 +630,6 @@ where
     }
 }
 
-#[derive(Clone, Debug)]
-pub struct Quantile<T> {
-    pub q: f64,
-    pub v: T,
-}
-
-#[derive(Clone, Debug)]
-pub struct CDF<T>(Vec<Quantile<T>>);
-
-impl<T> CDF<T>
-where
-    T: PartialOrd + Clone,
-{
-    /// Find the size of the CDF.
-    pub fn size(&self) -> usize {
-        self.0.len()
-    }
-
-    /// Find the quantile for a given value x.
-    /// Returns the fraction of values less than or equal to x.
-    pub fn quantile(&self, x: T) -> f64 {
-        // Find the rightmost position where value <= x
-        let idx = self
-            .0
-            .binary_search_by(|q| {
-                // Use match to handle all cases properly
-                match q.v.partial_cmp(&x) {
-                    Some(Ordering::Less) | Some(Ordering::Equal) => Ordering::Less,
-                    Some(Ordering::Greater) => Ordering::Greater,
-                    None => Ordering::Greater, // Handle NaN by treating as greater
-                }
-            })
-            .unwrap_or_else(|e| e);
-
-        // idx is the position where we'd insert a value > x
-        // So idx-1 is the last position with value <= x
-        if idx == 0 { 0.0 } else { self.0[idx - 1].q }
-    }
-
-    /// Query the CDF for a specific quantile p (0.0 to 1.0).
-    /// Returns the smallest value whose cumulative probability is >= p.
-    pub fn query(&self, p: f64) -> T {
-        // Handle edge cases
-        if self.0.is_empty() {
-            panic!("Cannot query empty CDF");
-        }
-
-        // Find the first position where cumulative probability >= p
-        let idx = self
-            .0
-            .binary_search_by(|q| {
-                if q.q < p {
-                    Ordering::Less
-                } else {
-                    Ordering::Greater
-                }
-            })
-            .unwrap_or_else(|e| e);
-
-        // idx is the first position with cumulative probability >= p
-        if idx == self.0.len() {
-            // p is greater than all cumulative probabilities, return the last value
-            self.0[self.0.len() - 1].v.clone()
-        } else {
-            self.0[idx].v.clone()
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -685,7 +639,7 @@ mod tests {
 
     #[test]
     fn test_basic_sketch() {
-        let mut sketch = Sketch::new(200);
+        let mut sketch = KLL::new(200);
 
         for i in 0..1000 {
             sketch.update(i as f64);
@@ -708,7 +662,7 @@ mod tests {
 
     #[test]
     fn test_cdf() {
-        let mut sketch = Sketch::new(200);
+        let mut sketch = KLL::new(200);
 
         for i in 0..10000 {
             sketch.update(i as f64);
@@ -728,8 +682,8 @@ mod tests {
 
     #[test]
     fn test_merge() {
-        let mut sketch1 = Sketch::new(200);
-        let mut sketch2 = Sketch::new(200);
+        let mut sketch1 = KLL::new(200);
+        let mut sketch2 = KLL::new(200);
 
         for i in 0..5000 {
             sketch1.update(i as f64);
@@ -753,7 +707,7 @@ mod tests {
         for &dup in &[false, true] {
             for &l in &[0, 1, 2, 3, 5, 8, 32, 1024] {
                 for _ in 0..10 {
-                    let mut c = crate::kll::Compactor(vec![0.0; l]);
+                    let mut c = crate::sketch::kll::Compactor(vec![0.0; l]);
                     for i in 0..l {
                         if dup && i % 2 == 1 && i > 0 {
                             c.0[i] = c.0[i - 1];
@@ -776,7 +730,7 @@ mod tests {
 
     #[test]
     fn test_empty_sketch() {
-        let sketch = Sketch::new(200);
+        let sketch = KLL::new(200);
         assert_eq!(sketch.count(), 0);
         assert_eq!(sketch.rank(0.0), 0);
         assert_eq!(sketch.rank(100.0), 0);
@@ -784,7 +738,7 @@ mod tests {
 
     #[test]
     fn test_single_element() {
-        let mut sketch = Sketch::new(200);
+        let mut sketch = KLL::new(200);
         sketch.update(42.0);
 
         assert_eq!(sketch.count(), 1);
@@ -801,7 +755,7 @@ mod tests {
     #[test]
     fn test_uniform_distribution_accuracy() {
         for k in &[50, 100, 200, 500] {
-            let mut sketch = Sketch::new(*k);
+            let mut sketch = KLL::new(*k);
             let n = 100_000;
 
             for i in 0..n {
@@ -841,7 +795,7 @@ mod tests {
         let mut rng = small_thread_rng();
         let normal = Normal::new(500.0, 100.0).unwrap();
 
-        let mut sketch = Sketch::new(200);
+        let mut sketch = KLL::new(200);
         let n = 100_000;
 
         for _ in 0..n {
@@ -875,7 +829,7 @@ mod tests {
         let mut rng = small_thread_rng();
         let exp = Exp::new(1.0).unwrap();
 
-        let mut sketch = Sketch::new(200);
+        let mut sketch = KLL::new(200);
         let n = 50_000;
 
         for _ in 0..n {
@@ -906,7 +860,7 @@ mod tests {
         let mode1 = Normal::new(100.0, 10.0).unwrap();
         let mode2 = Normal::new(200.0, 10.0).unwrap();
 
-        let mut sketch = Sketch::new(300);
+        let mut sketch = KLL::new(300);
         let n = 50_000;
 
         for i in 0..n {
@@ -938,7 +892,7 @@ mod tests {
 
     #[test]
     fn test_negative_numbers() {
-        let mut sketch = Sketch::new(100);
+        let mut sketch = KLL::new(100);
 
         for i in -1000..1000 {
             sketch.update(i as f64);
@@ -965,7 +919,7 @@ mod tests {
 
     #[test]
     fn test_duplicates() {
-        let mut sketch = Sketch::new(100);
+        let mut sketch = KLL::new(100);
 
         // Add many duplicates
         for _ in 0..1000 {
@@ -997,7 +951,7 @@ mod tests {
 
     #[test]
     fn test_extreme_quantiles() {
-        let mut sketch = Sketch::new(200);
+        let mut sketch = KLL::new(200);
 
         for i in 0..10000 {
             sketch.update(i as f64);
@@ -1039,8 +993,8 @@ mod tests {
     #[test]
     fn test_merge_accuracy() {
         // Create two sketches with different ranges
-        let mut sketch1 = Sketch::new(200);
-        let mut sketch2 = Sketch::new(200);
+        let mut sketch1 = KLL::new(200);
+        let mut sketch2 = KLL::new(200);
 
         for i in 0..50000 {
             sketch1.update(i as f64);
@@ -1076,7 +1030,7 @@ mod tests {
     fn test_memory_bounds() {
         // Test that sketch stays within expected memory bounds
         let k = 100;
-        let mut sketch = Sketch::new(k);
+        let mut sketch = KLL::new(k);
 
         // Add many elements
         for i in 0..1_000_000 {
@@ -1099,7 +1053,7 @@ mod tests {
 
     #[test]
     fn test_rank_consistency() {
-        let mut sketch = Sketch::new(200);
+        let mut sketch = KLL::new(200);
         let values: Vec<f64> = (0..1000).map(|i| i as f64).collect();
 
         for &v in &values {
@@ -1152,8 +1106,8 @@ mod tests {
     #[test]
     fn test_deterministic_operations() {
         // Test that operations are deterministic given same seed
-        let mut sketch1 = Sketch::new(100);
-        let mut sketch2 = Sketch::new(100);
+        let mut sketch1 = KLL::new(100);
+        let mut sketch2 = KLL::new(100);
 
         // Reset thread-local RNG to ensure determinism
         set_seed(12345);
@@ -1182,7 +1136,7 @@ mod tests {
     #[test]
     fn test_streaming_property() {
         // Test that sketch works correctly as a streaming algorithm
-        let mut sketch = Sketch::new(200);
+        let mut sketch = KLL::new(200);
         let mut exact_values = Vec::new();
 
         let mut rng = small_thread_rng();
@@ -1212,7 +1166,7 @@ mod tests {
 
     #[test]
     fn test_corner_cases() {
-        let mut sketch = Sketch::new(10); // Small k
+        let mut sketch = KLL::new(10); // Small k
 
         // Test with NaN - should handle gracefully
         sketch.update(f64::NAN);
@@ -1227,7 +1181,7 @@ mod tests {
         assert_eq!(sketch.count(), 5);
 
         // Test with very small k
-        let mut tiny_sketch = Sketch::new(1);
+        let mut tiny_sketch = KLL::new(1);
         for i in 0..100 {
             tiny_sketch.update(i as f64);
         }
@@ -1237,7 +1191,7 @@ mod tests {
     #[test]
     fn test_quantile_accuracy_vs_exact() {
         // For small datasets, compare with exact quantiles
-        let mut sketch = Sketch::new(100);
+        let mut sketch = KLL::new(100);
         let mut exact = Vec::new();
 
         let data = vec![
@@ -1271,7 +1225,7 @@ mod tests {
     #[test]
     fn test_periodic_values() {
         // Test with periodic/cyclic data
-        let mut sketch = Sketch::new(200);
+        let mut sketch = KLL::new(200);
 
         for i in 0..10000 {
             sketch.update((i as f64 * 0.1).sin() * 100.0);
@@ -1298,7 +1252,7 @@ mod tests {
 
     #[test]
     fn test_integer_sketch() {
-        let mut sketch = Sketch::<i32>::new(100);
+        let mut sketch = KLL::<i32>::new(100);
 
         // Add integers from 0 to 999
         for i in 0..1000 {
@@ -1330,7 +1284,7 @@ mod tests {
 
     #[test]
     fn test_string_sketch() {
-        let mut sketch = Sketch::<String>::new(50);
+        let mut sketch = KLL::<String>::new(50);
 
         // Add words with different frequencies
         let words = vec![
@@ -1378,7 +1332,7 @@ mod tests {
 
     #[test]
     fn test_vec_u8_sketch() {
-        let mut sketch = Sketch::<Vec<u8>>::new(100);
+        let mut sketch = KLL::<Vec<u8>>::new(100);
 
         // Add byte arrays - they sort lexicographically
         // Single bytes: [0], [1], ..., [99]
@@ -1434,9 +1388,9 @@ mod tests {
     #[test]
     fn test_mixed_integer_types() {
         // Test with different integer types to ensure generic implementation works
-        let mut u32_sketch = Sketch::<u32>::new(50);
-        let mut i64_sketch = Sketch::<i64>::new(50);
-        let mut usize_sketch = Sketch::<usize>::new(50);
+        let mut u32_sketch = KLL::<u32>::new(50);
+        let mut i64_sketch = KLL::<i64>::new(50);
+        let mut usize_sketch = KLL::<usize>::new(50);
 
         for i in 0..100 {
             u32_sketch.update(i as u32);
@@ -1462,8 +1416,8 @@ mod tests {
 
     #[test]
     fn test_string_merge() {
-        let mut sketch1 = Sketch::<String>::new(50);
-        let mut sketch2 = Sketch::<String>::new(50);
+        let mut sketch1 = KLL::<String>::new(50);
+        let mut sketch2 = KLL::<String>::new(50);
 
         // Add different sets of words to each sketch
         for _ in 0..100 {
@@ -1499,7 +1453,7 @@ mod tests {
 
     #[test]
     fn test_pretty_print() {
-        let mut sketch = Sketch::new(50);
+        let mut sketch = KLL::new(50);
 
         // Add some data to create multiple levels
         for i in 0..1000 {
@@ -1511,7 +1465,7 @@ mod tests {
         println!("{}", sketch);
 
         // Test with strings
-        let mut string_sketch = Sketch::<String>::new(30);
+        let mut string_sketch = KLL::<String>::new(30);
         let words = vec![
             "apple",
             "banana",
@@ -1533,7 +1487,7 @@ mod tests {
     #[test]
     fn test_cdf_binary_search_edge_cases() {
         // Test 1: Simple uniform distribution
-        let mut sketch = Sketch::new(100);
+        let mut sketch = KLL::new(100);
         for i in 0..100 {
             sketch.update(i as f64);
         }
@@ -1578,7 +1532,7 @@ mod tests {
 
     #[test]
     fn test_cdf_with_duplicates() {
-        let mut sketch = Sketch::new(50);
+        let mut sketch = KLL::new(50);
 
         // Add duplicates
         for _ in 0..100 {
@@ -1632,7 +1586,7 @@ mod tests {
     #[test]
     fn test_cdf_binary_search_correctness() {
         // Create a small exact dataset to verify binary search behavior
-        let mut sketch = Sketch::new(1000); // Large k to minimize compression
+        let mut sketch = KLL::new(1000); // Large k to minimize compression
 
         // Add values 1 through 10
         for i in 1..=10 {
@@ -1670,5 +1624,24 @@ mod tests {
 
         let v_at_0_9 = cdf.query(0.9);
         println!("query(0.9) = {} (expected 9)", v_at_0_9);
+    }
+
+    #[test]
+    fn test_sketch_trait() {
+        // Test that KLL Sketch works with the QuantileSampler trait
+        let mut sketch: Box<dyn QuantileSampler<f64>> = Box::new(KLL::new(100));
+
+        for i in 0..1000 {
+            sketch.update(i as f64);
+        }
+
+        assert_eq!(sketch.count(), 1000);
+
+        let rank = sketch.rank(500.0);
+        assert!(
+            rank > 450 && rank < 550,
+            "rank(500) should be ~500, got {}",
+            rank
+        );
     }
 }

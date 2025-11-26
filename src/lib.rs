@@ -291,13 +291,14 @@ impl AsRef<Path> for TempDirInfo {
 // Implementations
 pub mod benchmark;
 pub mod diskio;
+pub mod fastzipf;
 pub mod input_reader;
-pub mod kll;
 pub mod kvbin;
 pub mod order_preserving_encoding;
 pub mod ovc;
 pub mod rand;
 pub mod replacement_selection;
+pub mod sketch;
 pub mod sort;
 pub mod sort_stats;
 

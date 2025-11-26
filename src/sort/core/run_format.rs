@@ -5,7 +5,7 @@ use std::time::{Instant, SystemTime, UNIX_EPOCH};
 use crate::diskio::aligned_writer::AlignedWriter;
 use crate::diskio::file::SharedFd;
 use crate::diskio::io_stats::IoStatsTracker;
-use crate::kll::Sketch;
+use crate::sketch::kll::KLL;
 use crate::sort::core::engine::RunSummary;
 use crate::sort::core::engine::SortHooks;
 use crate::sort::run_sink::RunSink;
@@ -183,7 +183,7 @@ impl<F: RunFormat> Iterator for RangePartitionedIterator<F> {
 pub struct RunWriterSink<F: RunFormat> {
     run_writer: Option<AlignedWriter>,
     run_indexing_interval: usize,
-    sketch: Sketch<Vec<u8>>,
+    sketch: KLL<Vec<u8>>,
     sketch_sampling_interval: usize,
     records_seen: u64,
     current_run: Option<F::Run>,
@@ -201,7 +201,7 @@ impl<F: RunFormat> RunWriterSink<F> {
         Self {
             run_writer: Some(writer),
             run_indexing_interval,
-            sketch: Sketch::new(sketch_size),
+            sketch: KLL::new(sketch_size),
             sketch_sampling_interval,
             records_seen: 0,
             current_run: None,
@@ -219,7 +219,7 @@ impl<F: RunFormat> RunWriterSink<F> {
         self.append_state = None;
     }
 
-    fn into_parts(mut self) -> (Vec<MergeableRun<F>>, Sketch<Vec<u8>>) {
+    fn into_parts(mut self) -> (Vec<MergeableRun<F>>, KLL<Vec<u8>>) {
         self.finalize_active_run();
         self.run_writer.take();
         (self.runs, self.sketch)
@@ -264,7 +264,7 @@ impl<F: RunFormat> RunSink for RunWriterSink<F> {
         self.finalize_active_run();
     }
 
-    fn finalize(self) -> (Vec<Self::MergeableRun>, Sketch<Vec<u8>>) {
+    fn finalize(self) -> (Vec<Self::MergeableRun>, KLL<Vec<u8>>) {
         self.into_parts()
     }
 }
