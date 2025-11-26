@@ -31,37 +31,49 @@ impl SharedFd {
 
 impl Drop for SharedFd {
     fn drop(&mut self) {
-        // Close the file descriptor when SharedFd is dropped
-        unsafe {
-            libc::close(self.fd);
-        }
-
+        // 1. CHECK LOGIC: Only attempt cleanup if requested
         if self.delete_on_drop {
-            if fs::remove_file(&self.path).is_ok() {
+            unsafe {
+                // 2. TRUNCATE (Critical Step):
+                // We must do this BEFORE closing the FD.
+                // This forces the OS to free the blocks immediately.
+                libc::ftruncate(self.fd, 0);
+            }
+
+            // 3. REMOVE PATH:
+            // Unlink the filename from the directory.
+            // We ignore errors here because Drop cannot return a Result
+            // and we don't want to panic if the file is already gone.
+            if std::fs::remove_file(&self.path).is_ok() {
+                // Optional: Sync parent directory to persist the removal
                 sync_parent_directory(&self.path);
             }
+        }
+
+        // 4. CLOSE FD:
+        // Now it is safe to close the descriptor.
+        unsafe {
+            libc::close(self.fd);
         }
     }
 }
 
 #[cfg(target_family = "unix")]
-fn sync_parent_directory(path: &Path) {
+fn sync_parent_directory(path: &std::path::Path) {
     if let Some(parent) = path.parent() {
-        if let Ok(dir_file) = File::open(parent) {
+        // Rust's File::open creates a read-only FD, which is sufficient
+        // for fsyncing a directory on Linux/Unix.
+        if let Ok(dir_file) = std::fs::File::open(parent) {
             unsafe {
-                #[cfg(target_os = "linux")]
-                {
-                    libc::syncfs(dir_file.as_raw_fd());
-                }
-                #[cfg(not(target_os = "linux"))]
-                {
-                    libc::fsync(dir_file.as_raw_fd());
-                }
+                use std::os::unix::io::AsRawFd;
+                // Use fsync on Linux too. It is standard, faster, and sufficient.
+                libc::fsync(dir_file.as_raw_fd());
             }
             return;
         }
     }
 
+    // Fallback: only nuking the whole system sync if we couldn't open the parent
     unsafe {
         libc::sync();
     }
