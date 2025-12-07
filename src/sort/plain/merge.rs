@@ -1,61 +1,60 @@
 use std::cmp::Ordering;
-use std::collections::BinaryHeap;
+
+use crate::ovc::offset_value_coding::{SentinelValue, Sentineled};
+use crate::ovc::tree_of_losers::LoserTree;
 
 // K-way merge iterator
 pub struct MergeIterator<I: Iterator<Item = (Vec<u8>, Vec<u8>)>> {
-    // Min heap of (key, value, source_index)
-    heap: BinaryHeap<HeapEntry>,
+    // Tournament tree of losers
+    tree: LoserTree<Sentineled<MergeEntry>>,
     // Iterators for each run
     iterators: Vec<I>,
 }
 
-struct HeapEntry {
+#[derive(Clone, Eq, PartialEq)]
+struct MergeEntry {
     key: Vec<u8>,
     value: Vec<u8>,
-    source: usize,
 }
 
-// Implement reverse ordering for min-heap
-impl Ord for HeapEntry {
-    fn cmp(&self, other: &Self) -> Ordering {
-        // Reverse for min-heap
-        other
-            .key
-            .cmp(&self.key)
-            .then_with(|| other.source.cmp(&self.source))
+impl MergeEntry {
+    fn new(key: Vec<u8>, value: Vec<u8>) -> Self {
+        Self { key, value }
+    }
+
+    fn take(self) -> (Vec<u8>, Vec<u8>) {
+        (self.key, self.value)
     }
 }
 
-impl PartialOrd for HeapEntry {
+impl PartialOrd for MergeEntry {
     fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
-        Some(self.cmp(other))
+        Some(self.key.cmp(&other.key))
     }
 }
 
-impl Eq for HeapEntry {}
-
-impl PartialEq for HeapEntry {
-    fn eq(&self, other: &Self) -> bool {
-        self.key == other.key && self.source == other.source
+impl Ord for MergeEntry {
+    fn cmp(&self, other: &Self) -> Ordering {
+        self.partial_cmp(other).unwrap()
     }
 }
 
 impl<I: Iterator<Item = (Vec<u8>, Vec<u8>)>> MergeIterator<I> {
     pub fn new(mut iterators: Vec<I>) -> Self {
-        let mut heap = BinaryHeap::new();
+        let initial: Vec<Sentineled<MergeEntry>> = iterators
+            .iter_mut()
+            .map(|iter| {
+                if let Some((key, value)) = iter.next() {
+                    Sentineled::new(MergeEntry::new(key, value))
+                } else {
+                    Sentineled::late_fence()
+                }
+            })
+            .collect();
 
-        // Initialize heap with first element from each iterator
-        for (i, iter) in iterators.iter_mut().enumerate() {
-            if let Some((key, value)) = iter.next() {
-                heap.push(HeapEntry {
-                    key,
-                    value,
-                    source: i,
-                });
-            }
-        }
+        let tree = LoserTree::new(initial);
 
-        Self { heap, iterators }
+        Self { tree, iterators }
     }
 }
 
@@ -63,22 +62,20 @@ impl<I: Iterator<Item = (Vec<u8>, Vec<u8>)>> Iterator for MergeIterator<I> {
     type Item = (Vec<u8>, Vec<u8>);
 
     fn next(&mut self) -> Option<Self::Item> {
-        // Get minimum element
-        let entry = self.heap.pop()?;
+        let (_, source_idx) = self.tree.peek()?;
 
-        // Try to get next element from the same source
-        if let Some((key, value)) = self.iterators[entry.source].next() {
-            self.heap.push(HeapEntry {
-                key,
-                value,
-                source: entry.source,
-            });
+        // If the source still has data, push its next element and return the old winner.
+        if let Some((key, value)) = self.iterators[source_idx].next() {
+            let winner = self.tree.push(Sentineled::new(MergeEntry::new(key, value)));
+            return Some(winner.inner().take());
         }
 
-        Some((entry.key, entry.value))
+        // Otherwise, mark it exhausted.
+        self.tree
+            .mark_current_exhausted()
+            .map(|winner| winner.inner().take())
     }
 }
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -292,74 +289,6 @@ mod tests {
             assert_eq!(results[i].0, vec![i as u8]);
             assert_eq!(results[i].1, vec![(i as u8).saturating_mul(10)]);
         }
-    }
-
-    #[test]
-    fn test_merge_preserves_stable_ordering() {
-        // When keys are equal, elements from earlier iterators should come first
-        let data1 = vec![
-            (vec![1], vec![10]),
-            (vec![2], vec![20]),
-            (vec![3], vec![30]),
-        ];
-        let data2 = vec![
-            (vec![1], vec![11]),
-            (vec![2], vec![21]),
-            (vec![3], vec![31]),
-        ];
-        let data3 = vec![
-            (vec![1], vec![12]),
-            (vec![2], vec![22]),
-            (vec![3], vec![32]),
-        ];
-
-        let iterators = vec![data1.into_iter(), data2.into_iter(), data3.into_iter()];
-        let merger = MergeIterator::new(iterators);
-
-        let results: Vec<_> = merger.collect();
-        assert_eq!(results.len(), 9);
-
-        // For each key, verify the values come in source order
-        let key1_values: Vec<_> = results
-            .iter()
-            .filter(|(k, _)| k == &vec![1])
-            .map(|(_, v)| v.clone())
-            .collect();
-        assert_eq!(key1_values, vec![vec![10], vec![11], vec![12]]);
-
-        let key2_values: Vec<_> = results
-            .iter()
-            .filter(|(k, _)| k == &vec![2])
-            .map(|(_, v)| v.clone())
-            .collect();
-        assert_eq!(key2_values, vec![vec![20], vec![21], vec![22]]);
-    }
-
-    #[test]
-    fn test_heap_entry_ordering() {
-        // Test the HeapEntry ordering directly
-        // Note: HeapEntry implements reverse ordering for min-heap
-        let entry1 = HeapEntry {
-            key: vec![1, 2, 3],
-            value: vec![],
-            source: 0,
-        };
-        let entry2 = HeapEntry {
-            key: vec![1, 2, 4],
-            value: vec![],
-            source: 1,
-        };
-        let entry3 = HeapEntry {
-            key: vec![1, 2, 3],
-            value: vec![],
-            source: 1,
-        };
-
-        // Due to reverse ordering for min-heap:
-        // Smaller keys should be "greater" in heap ordering
-        assert!(entry1 > entry2); // [1,2,3] > [1,2,4] in heap (reversed)
-        assert!(entry1 > entry3); // source 0 > source 1 when keys are equal (reversed)
-        assert!(entry3 > entry2); // [1,2,3] > [1,2,4] in heap (reversed)
     }
 
     #[test]

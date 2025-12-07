@@ -1,7 +1,6 @@
 use crate::diskio::aligned_writer::AlignedWriter;
 use crate::diskio::io_stats::IoStatsTracker;
-use crate::ovc::offset_value_coding_u64::OVCU64;
-use crate::replacement_selection::compute_ovc_delta;
+use crate::ovc::offset_value_coding::OVCU64;
 use crate::sort::core::engine::SorterCore;
 use crate::sort::core::run_format::{
     FormatSortHooks, MergeableRun as GenericMergeableRun, RunFormat,
@@ -37,14 +36,23 @@ impl RunFormat for OvcRunFormat {
     }
 
     fn append_from_kv(
+        _state: &mut Self::AppendState,
+        _run: &mut Self::Run,
+        _key: &[u8],
+        _value: &[u8],
+    ) {
+        panic!("append_from_kv is not supported for OVC runs");
+    }
+
+    fn append_with_ovc(
         state: &mut Self::AppendState,
         run: &mut Self::Run,
+        ovc: OVCU64,
         key: &[u8],
         value: &[u8],
     ) {
-        let ovc = compute_ovc_delta(state.prev_key.as_deref(), key);
-        state.prev_key = Some(key.to_vec());
         run.append(ovc, key, value);
+        state.prev_key = Some(key.to_vec());
     }
 
     fn append_record(state: &mut Self::AppendState, run: &mut Self::Run, record: Self::Record) {
@@ -87,6 +95,10 @@ impl RunFormat for OvcRunFormat {
     fn record_into_kv(record: Self::Record) -> (Vec<u8>, Vec<u8>) {
         (record.1, record.2)
     }
+
+    fn algorithm() -> crate::sort::core::engine::RunGenerationAlgorithm {
+        crate::sort::core::engine::RunGenerationAlgorithm::TreeOfLosersWithOVC
+    }
 }
 
 impl SorterCore<OvcSortHooks> {
@@ -112,11 +124,11 @@ mod tests {
     use super::*;
     use crate::diskio::aligned_writer::AlignedWriter;
     use crate::diskio::file::SharedFd;
+    use crate::ovc::offset_value_coding::compute_ovc_delta;
     use crate::rand::small_thread_rng;
     use crate::sort::core::run_format::RunWriterSink;
     use crate::sort::engine::RunGenerationAlgorithm;
     use crate::sort::ovc::run::RunWithOVC;
-    use crate::sort::ovc::sort_buffer_with_ovc::SortBufferOVC;
     use crate::sort::run_sink::RunSink;
     use crate::{InMemInput, sketch::SketchType};
     use rand::seq::SliceRandom;
@@ -219,7 +231,6 @@ mod tests {
             sketch_sampling_interval,
             run_indexing_interval,
             temp_dir.path(),
-            RunGenerationAlgorithm::ReplacementSelection,
         )
         .unwrap();
 
@@ -236,28 +247,6 @@ mod tests {
         assert!(per_merge_stats.len() >= 1);
         let final_runs = merged_run.into_runs();
         assert_eq!(final_runs.len(), num_threads);
-    }
-
-    #[test]
-    fn test_sort_buffer_flush_with_ovc() {
-        let mut buffer = SortBufferOVC::new(1024);
-        for i in 0..100 {
-            buffer.append(
-                format!("{:04}", 99 - i).into_bytes(),
-                i.to_string().into_bytes(),
-            );
-        }
-        let temp_dir = tempdir().unwrap();
-        let fd = Arc::new(SharedFd::new_from_path(&temp_dir.path().join("run.dat"), true).unwrap());
-        let writer = AlignedWriter::from_fd(fd).unwrap();
-        let mut sink = RunWriterSink::<OvcRunFormat>::new(writer, 1000, SketchType::Kll, 128, 1);
-        sink.start_run();
-        for (_ovc, key, value) in buffer.sorted_iter() {
-            sink.push_record(&key, &value);
-        }
-        sink.finish_run();
-        let (runs, _sketch) = sink.finalize();
-        assert_eq!(runs.len(), 1);
     }
 
     #[test]
@@ -283,7 +272,6 @@ mod tests {
             1000, // sketch_sampling_interval
             1000, // run_indexing_interval
             temp_dir.path(),
-            RunGenerationAlgorithm::ReplacementSelection,
         )
         .unwrap();
 

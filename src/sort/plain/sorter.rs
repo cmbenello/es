@@ -6,7 +6,7 @@ use crate::sort::core::run_format::{
     RunsOutput as GenericRunsOutput,
 };
 use crate::sort::plain::merge::MergeIterator;
-use crate::sort::plain::run::RunImpl;
+use crate::sort::plain::run::Run;
 
 pub type PlainSortHooks = FormatSortHooks<PlainRunFormat>;
 pub type ExternalSorter = SorterCore<PlainSortHooks>;
@@ -17,12 +17,12 @@ pub type RunsOutput = GenericRunsOutput<PlainRunFormat>;
 pub struct PlainRunFormat;
 
 impl RunFormat for PlainRunFormat {
-    type Run = RunImpl;
+    type Run = Run;
     type Record = (Vec<u8>, Vec<u8>);
     type AppendState = ();
 
     fn new_run(writer: AlignedWriter, indexing_interval: usize) -> Result<Self::Run, String> {
-        RunImpl::from_writer_with_indexing_interval(writer, indexing_interval)
+        Run::from_writer_with_indexing_interval(writer, indexing_interval)
     }
 
     fn finalize_run(run: &mut Self::Run) -> AlignedWriter {
@@ -68,6 +68,10 @@ impl RunFormat for PlainRunFormat {
     fn record_into_kv(record: Self::Record) -> (Vec<u8>, Vec<u8>) {
         record
     }
+
+    fn algorithm() -> crate::sort::core::engine::RunGenerationAlgorithm {
+        crate::sort::core::engine::RunGenerationAlgorithm::TreeOfLosers
+    }
 }
 
 impl SorterCore<PlainSortHooks> {
@@ -108,7 +112,7 @@ mod tests {
         let path0 = temp_dir.path().join("partition0.dat");
         let fd0 = Arc::new(SharedFd::new_from_path(&path0, true).unwrap());
         let writer0 = AlignedWriter::from_fd(fd0.clone()).unwrap();
-        let mut run0 = RunImpl::from_writer(writer0).unwrap();
+        let mut run0 = Run::from_writer(writer0).unwrap();
         for i in 0..100 {
             let key = format!("a{:02}", i).into_bytes();
             let value = format!("value_{}", i).into_bytes();
@@ -119,7 +123,7 @@ mod tests {
         let path1 = temp_dir.path().join("partition1.dat");
         let fd1 = Arc::new(SharedFd::new_from_path(&path1, true).unwrap());
         let writer1 = AlignedWriter::from_fd(fd1.clone()).unwrap();
-        let mut run1 = RunImpl::from_writer(writer1).unwrap();
+        let mut run1 = Run::from_writer(writer1).unwrap();
         for i in 0..100 {
             let key = format!("b{:02}", i).into_bytes();
             let value = format!("value_{}", i + 100).into_bytes();
@@ -130,7 +134,7 @@ mod tests {
         let path2 = temp_dir.path().join("partition2.dat");
         let fd2 = Arc::new(SharedFd::new_from_path(&path2, true).unwrap());
         let writer2 = AlignedWriter::from_fd(fd2.clone()).unwrap();
-        let mut run2 = RunImpl::from_writer(writer2).unwrap();
+        let mut run2 = Run::from_writer(writer2).unwrap();
         for i in 0..100 {
             let key = format!("c{:02}", i).into_bytes();
             let value = format!("value_{}", i + 200).into_bytes();
@@ -209,7 +213,6 @@ mod tests {
             sketch_sampling_interval,
             run_indexing_interval,
             temp_dir.path(),
-            RunGenerationAlgorithm::ReplacementSelection,
         )
         .unwrap();
 

@@ -5,9 +5,10 @@ use std::time::{Instant, SystemTime, UNIX_EPOCH};
 use crate::diskio::aligned_writer::AlignedWriter;
 use crate::diskio::file::SharedFd;
 use crate::diskio::io_stats::IoStatsTracker;
+use crate::ovc::offset_value_coding::OVCU64;
 use crate::sketch::{QuantileSampler, Sketch, SketchType};
-use crate::sort::core::engine::RunSummary;
 use crate::sort::core::engine::SortHooks;
+use crate::sort::core::engine::{RunGenerationAlgorithm, RunSummary};
 use crate::sort::run_sink::RunSink;
 use crate::{SortOutput, SortStats};
 
@@ -31,6 +32,18 @@ pub trait RunFormat: Clone + Send + Sync + 'static {
         Self::append_from_kv(state, run, &key, &value);
     }
 
+    /// Append a record that carries an OVC delta; default ignores the delta.
+    fn append_with_ovc(
+        state: &mut Self::AppendState,
+        run: &mut Self::Run,
+        ovc: OVCU64,
+        key: &[u8],
+        value: &[u8],
+    ) {
+        let _ = ovc;
+        Self::append_from_kv(state, run, key, value);
+    }
+
     fn scan_range(
         run: &Self::Run,
         lower_bound: &[u8],
@@ -47,6 +60,9 @@ pub trait RunFormat: Clone + Send + Sync + 'static {
     fn record_key<'a>(record: &'a Self::Record) -> &'a [u8];
     fn record_value<'a>(record: &'a Self::Record) -> &'a [u8];
     fn record_into_kv(record: Self::Record) -> (Vec<u8>, Vec<u8>);
+
+    /// Returns the run generation algorithm that this format should use
+    fn algorithm() -> RunGenerationAlgorithm;
 }
 
 pub enum MergeableRun<F: RunFormat> {
@@ -225,6 +241,13 @@ impl<F: RunFormat> RunWriterSink<F> {
         self.run_writer.take();
         (self.runs, self.sketch)
     }
+
+    fn record_sketch_sample(&mut self, key: &[u8]) {
+        if self.records_seen % self.sketch_sampling_interval as u64 == 0 {
+            self.sketch.update(key.to_vec());
+        }
+        self.records_seen += 1;
+    }
 }
 
 impl<F: RunFormat> RunSink for RunWriterSink<F> {
@@ -244,18 +267,30 @@ impl<F: RunFormat> RunSink for RunWriterSink<F> {
     }
 
     fn push_record(&mut self, key: &[u8], value: &[u8]) {
+        self.record_sketch_sample(key);
+
         let run = self
             .current_run
             .as_mut()
             .expect("run must be started before pushing records");
 
-        if self.records_seen % self.sketch_sampling_interval as u64 == 0 {
-            self.sketch.update(key.to_vec());
-        }
-        self.records_seen += 1;
-
         if let Some(state) = &mut self.append_state {
             F::append_from_kv(state, run, key, value);
+        } else {
+            panic!("append state must exist while run is active");
+        }
+    }
+
+    fn push_record_with_ovc(&mut self, ovc: OVCU64, key: &[u8], value: &[u8]) {
+        self.record_sketch_sample(key);
+
+        let run = self
+            .current_run
+            .as_mut()
+            .expect("run must be started before pushing records");
+
+        if let Some(state) = &mut self.append_state {
+            F::append_with_ovc(state, run, ovc, key, value);
         } else {
             panic!("append state must exist while run is active");
         }
@@ -374,5 +409,9 @@ impl<F: RunFormat> SortHooks for FormatSortHooks<F> {
 
     fn into_output(&self, run: Self::MergeableRun, stats: SortStats) -> Box<dyn SortOutput> {
         Box::new(RunsOutput::<F> { run, stats })
+    }
+
+    fn algorithm(&self) -> crate::sort::core::engine::RunGenerationAlgorithm {
+        F::algorithm()
     }
 }

@@ -16,7 +16,7 @@ pub struct IndexEntry {
 }
 
 // File-based run implementation with direct I/O
-pub struct RunImpl {
+pub struct Run {
     fd: Arc<SharedFd>,
     writer: Option<AlignedWriter>,
     total_entries: usize,
@@ -26,7 +26,7 @@ pub struct RunImpl {
     indexing_interval: usize,
 }
 
-impl RunImpl {
+impl Run {
     pub fn from_writer(writer: AlignedWriter) -> Result<Self, String> {
         Self::from_writer_with_indexing_interval(writer, 1000)
     }
@@ -97,7 +97,7 @@ impl RunImpl {
     }
 }
 
-impl RunImpl {
+impl Run {
     pub fn append(&mut self, key: &[u8], value: &[u8]) {
         let writer = self
             .writer
@@ -205,7 +205,7 @@ struct RunIterator {
     actual_start: usize, // Where this run actually starts in the file
 }
 
-impl RunSummary for RunImpl {
+impl RunSummary for Run {
     fn total_entries(&self) -> usize {
         self.total_entries
     }
@@ -317,7 +317,7 @@ mod tests {
     #[test]
     fn test_basic_append_and_scan() {
         let writer = get_test_writer("basic");
-        let mut run = RunImpl::from_writer(writer).unwrap();
+        let mut run = Run::from_writer(writer).unwrap();
 
         // Append some entries
         run.append(b"key1", b"value1");
@@ -335,7 +335,7 @@ mod tests {
     #[test]
     fn test_empty_run() {
         let writer = get_test_writer("empty");
-        let mut run = RunImpl::from_writer(writer).unwrap();
+        let mut run = Run::from_writer(writer).unwrap();
         run.finalize_write();
 
         // For empty runs, total_bytes should be 0
@@ -350,7 +350,7 @@ mod tests {
     #[test]
     fn test_scan_range_filtering() {
         let writer = get_test_writer("range");
-        let mut run = RunImpl::from_writer(writer).unwrap();
+        let mut run = Run::from_writer(writer).unwrap();
 
         // Append entries
         run.append(b"a", b"1");
@@ -385,7 +385,7 @@ mod tests {
     #[test]
     fn test_large_entries() {
         let writer = get_test_writer("large");
-        let mut run = RunImpl::from_writer(writer).unwrap();
+        let mut run = Run::from_writer(writer).unwrap();
 
         // Create large key and value
         let large_key = vec![b'k'; 1000];
@@ -410,7 +410,7 @@ mod tests {
     #[test]
     fn test_page_buffer_flushing() {
         let writer = get_test_writer("page_flush");
-        let mut run = RunImpl::from_writer(writer).unwrap();
+        let mut run = Run::from_writer(writer).unwrap();
 
         // Add entries that will trigger page flushes
         // Page size is 4096 bytes, each entry is 8 bytes + key + value
@@ -437,7 +437,7 @@ mod tests {
     #[test]
     fn test_multiple_scans() {
         let writer = get_test_writer("multi_scan");
-        let mut run = RunImpl::from_writer(writer).unwrap();
+        let mut run = Run::from_writer(writer).unwrap();
 
         run.append(b"a", b"1");
         run.append(b"b", b"2");
@@ -468,7 +468,7 @@ mod tests {
         let writer = get_test_writer("in_memory");
         let entry_count = 10;
 
-        let mut run = RunImpl::from_writer(writer).unwrap();
+        let mut run = Run::from_writer(writer).unwrap();
 
         // Track bytes as we add entries
         let mut expected_bytes = 0;
@@ -489,7 +489,7 @@ mod tests {
     #[test]
     fn test_binary_data() {
         let writer = get_test_writer("binary");
-        let mut run = RunImpl::from_writer(writer).unwrap();
+        let mut run = Run::from_writer(writer).unwrap();
 
         // Test with binary data including null bytes
         let binary_key = vec![0, 1, 2, 3, 255, 254, 253, 252];
@@ -516,7 +516,7 @@ mod tests {
     #[test]
     fn test_exact_page_boundary() {
         let writer = get_test_writer("page_boundary");
-        let mut run = RunImpl::from_writer(writer).unwrap();
+        let mut run = Run::from_writer(writer).unwrap();
 
         // Calculate entry size to exactly fill pages
         // Each entry: 4 bytes key_len + 4 bytes value_len + key + value
@@ -559,7 +559,7 @@ mod tests {
     #[test]
     fn test_finalize_idempotent() {
         let writer = get_test_writer("finalize_idempotent");
-        let mut run = RunImpl::from_writer(writer).unwrap();
+        let mut run = Run::from_writer(writer).unwrap();
 
         run.append(b"key", b"value");
         run.finalize_write();
@@ -573,7 +573,7 @@ mod tests {
     #[test]
     fn test_unicode_keys_values() {
         let writer = get_test_writer("unicode");
-        let mut run = RunImpl::from_writer(writer).unwrap();
+        let mut run = Run::from_writer(writer).unwrap();
 
         // Test with various unicode strings
         let test_cases = vec![
@@ -600,7 +600,7 @@ mod tests {
     #[test]
     fn test_scan_after_partial_read() {
         let writer = get_test_writer("partial_read");
-        let mut run = RunImpl::from_writer(writer).unwrap();
+        let mut run = Run::from_writer(writer).unwrap();
 
         // Add entries
         for i in 0..10 {
@@ -627,7 +627,7 @@ mod tests {
     #[test]
     fn test_empty_key_value() {
         let writer = get_test_writer("empty_kv");
-        let mut run = RunImpl::from_writer(writer).unwrap();
+        let mut run = Run::from_writer(writer).unwrap();
 
         // Test empty key with non-empty value
         let empty_key = vec![];
@@ -671,7 +671,7 @@ mod tests {
     #[test]
     fn test_stress_many_small_entries() {
         let writer = get_test_writer("stress_small");
-        let mut run = RunImpl::from_writer(writer).unwrap();
+        let mut run = Run::from_writer(writer).unwrap();
 
         // Add 10,000 small entries
         let count = 10_000;
@@ -706,7 +706,7 @@ mod tests {
             let success_count = Arc::clone(&success_count);
             let handle = thread::spawn(move || {
                 let writer = get_test_writer(&format!("concurrent_{}", i));
-                let mut run = RunImpl::from_writer(writer).unwrap();
+                let mut run = Run::from_writer(writer).unwrap();
 
                 for j in 0..100 {
                     let key = format!("thread{}_{:03}", i, j).into_bytes();
@@ -731,7 +731,7 @@ mod tests {
     #[test]
     fn test_max_key_value_sizes() {
         let writer = get_test_writer("max_sizes");
-        let mut run = RunImpl::from_writer(writer).unwrap();
+        let mut run = Run::from_writer(writer).unwrap();
 
         // Test with maximum practical sizes
         let max_key = vec![b'k'; 1_000_000]; // 1MB key
@@ -754,7 +754,7 @@ mod tests {
     #[test]
     fn test_alternating_large_small() {
         let writer = get_test_writer("alternating");
-        let mut run = RunImpl::from_writer(writer).unwrap();
+        let mut run = Run::from_writer(writer).unwrap();
 
         // Alternate between large and small entries
         for i in 0..100 {
@@ -791,7 +791,7 @@ mod tests {
         let writer = get_test_writer("no_metadata");
 
         // Create a run with data
-        let mut run = RunImpl::from_writer(writer).unwrap();
+        let mut run = Run::from_writer(writer).unwrap();
         for i in 0..10 {
             run.append(&format!("{:02}", i).into_bytes(), b"value");
         }
@@ -809,7 +809,7 @@ mod tests {
     #[test]
     fn test_scan_with_equal_bounds() {
         let writer = get_test_writer("equal_bounds");
-        let mut run = RunImpl::from_writer(writer).unwrap();
+        let mut run = Run::from_writer(writer).unwrap();
 
         run.append(b"a", b"1");
         run.append(b"b", b"2");
@@ -825,7 +825,7 @@ mod tests {
     #[test]
     fn test_duplicate_keys() {
         let writer = get_test_writer("duplicate_keys");
-        let mut run = RunImpl::from_writer(writer).unwrap();
+        let mut run = Run::from_writer(writer).unwrap();
 
         // Add duplicate keys
         run.append(b"key", b"value1");
@@ -855,7 +855,7 @@ mod tests {
         // Create writer with IO tracker
         let io_tracker = IoStatsTracker::new();
         let writer = AlignedWriter::from_fd_with_tracker(fd, Some(io_tracker.clone())).unwrap();
-        let mut run = RunImpl::from_writer(writer).unwrap();
+        let mut run = Run::from_writer(writer).unwrap();
 
         // Get baseline stats before writing
         let (initial_write_ops, initial_write_bytes) = io_tracker.get_write_stats();
@@ -910,7 +910,7 @@ mod tests {
 
         // First, write some data (without tracking writes for this test)
         let writer = AlignedWriter::from_fd(fd.clone()).unwrap();
-        let mut run = RunImpl::from_writer(writer).unwrap();
+        let mut run = Run::from_writer(writer).unwrap();
 
         let num_records = 100000;
         let mut expected_logical_bytes = 0;
@@ -995,7 +995,7 @@ mod tests {
         );
 
         let writer = AlignedWriter::from_fd(fd.clone()).unwrap();
-        let mut run = RunImpl::from_writer(writer).unwrap();
+        let mut run = Run::from_writer(writer).unwrap();
 
         // Write 10000 sequential records
         let num_records = 10000;
@@ -1062,7 +1062,7 @@ mod tests {
 
         // Create first run (even keys)
         let writer1 = AlignedWriter::from_fd(fd1.clone()).unwrap();
-        let mut run1 = RunImpl::from_writer(writer1).unwrap();
+        let mut run1 = Run::from_writer(writer1).unwrap();
         let mut run1_logical_bytes = 0;
 
         for i in (0..5000).step_by(2) {
@@ -1076,7 +1076,7 @@ mod tests {
 
         // Create second run (odd keys)
         let writer2 = AlignedWriter::from_fd(fd2.clone()).unwrap();
-        let mut run2 = RunImpl::from_writer(writer2).unwrap();
+        let mut run2 = Run::from_writer(writer2).unwrap();
         let mut run2_logical_bytes = 0;
 
         for i in (1..5000).step_by(2) {
@@ -1152,7 +1152,7 @@ mod tests {
     #[test]
     fn test_indexing_interval_sparse_index() {
         let writer = get_test_writer("indexing_interval");
-        let mut run = RunImpl::from_writer_with_indexing_interval(writer, 500).unwrap();
+        let mut run = Run::from_writer_with_indexing_interval(writer, 500).unwrap();
 
         // Add many entries to test sampling interval
         // Should sample every 500th entry
@@ -1217,7 +1217,7 @@ mod tests {
     #[test]
     fn test_sparse_index_seek() {
         let writer = get_test_writer("sparse_seek");
-        let mut run = RunImpl::from_writer(writer).unwrap();
+        let mut run = Run::from_writer(writer).unwrap();
 
         // Add enough entries to build a sparse index
         for i in 0..5000 {
@@ -1246,7 +1246,7 @@ mod tests {
     #[test]
     fn test_scan_range_many_duplicate_keys() {
         let writer = get_test_writer("many_duplicates");
-        let mut run = RunImpl::from_writer(writer).unwrap();
+        let mut run = Run::from_writer(writer).unwrap();
 
         // Create a pattern with many duplicates
         // Keys: 100 'a's, 200 'b's, 150 'c's, 100 'd's, 50 'e's
@@ -1339,7 +1339,7 @@ mod tests {
     #[test]
     fn test_scan_range_duplicate_keys_with_sparse_index() {
         let writer = get_test_writer("duplicates_sparse");
-        let mut run = RunImpl::from_writer(writer).unwrap();
+        let mut run = Run::from_writer(writer).unwrap();
 
         // Create enough duplicate data to trigger sparse indexing
         // Each entry is about 108 bytes (8 + 3 + 97)
@@ -1399,7 +1399,7 @@ mod tests {
         let writer = get_test_writer("multiple_runs_reused");
 
         // First run: create new file
-        let mut run1 = RunImpl::from_writer(writer).unwrap();
+        let mut run1 = Run::from_writer(writer).unwrap();
 
         // Write keys 00-09
         for i in 0..10 {
@@ -1413,7 +1413,7 @@ mod tests {
         println!("Writer position after run1: {}", writer.position());
 
         // Second run: reuse the writer
-        let mut run2 = RunImpl::from_writer(writer).unwrap();
+        let mut run2 = Run::from_writer(writer).unwrap();
 
         // Write keys 10-19
         for i in 10..20 {
@@ -1426,7 +1426,7 @@ mod tests {
         let writer = run2.finalize_write();
 
         // Third run: reuse the writer again
-        let mut run3 = RunImpl::from_writer(writer).unwrap();
+        let mut run3 = Run::from_writer(writer).unwrap();
 
         // Write keys 20-29
         for i in 20..30 {

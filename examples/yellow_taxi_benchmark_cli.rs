@@ -131,10 +131,6 @@ struct Args {
     #[arg(long, default_value = "1000")]
     run_indexing_interval: usize,
 
-    /// Use OVC encoding for keys
-    #[arg(long, default_value = "false")]
-    ovc: bool,
-
     /// Directory for temporary files
     #[arg(short, long, default_value = ".")]
     dir: PathBuf,
@@ -240,7 +236,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         benchmark_runs: args.benchmark_runs,
         cooldown_seconds: args.cooldown_seconds,
         verify: args.verify,
-        ovc: args.ovc,
         temp_dir: args.dir,
         sketch_type: args.sketch_type,
         sketch_size: args.sketch_size,

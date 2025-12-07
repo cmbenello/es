@@ -7,16 +7,15 @@ use crate::diskio::aligned_writer::AlignedWriter;
 use crate::diskio::file::SharedFd;
 use crate::diskio::io_stats::IoStatsTracker;
 use crate::rand::small_thread_rng;
-use crate::replacement_selection::run_replacement_selection;
+use crate::replacement_selection::{
+    run_replacement_selection, run_replacement_selection_ovc, run_replacement_selection_tol,
+};
 use crate::sketch::{QuantileSampler, Sketch, SketchType};
 use crate::sort::run_sink::RunSink;
-use crate::sort::sort_buffer::SortBuffer;
 use crate::{
     MergeStats, RunGenerationStats, RunInfo, SortInput, SortOutput, SortStats, TempDirInfo,
 };
 use rand::Rng;
-
-const ENTRY_METADATA_SIZE: usize = std::mem::size_of::<u32>() * 2;
 
 pub type Scanner = Box<dyn Iterator<Item = (Vec<u8>, Vec<u8>)> + Send>;
 
@@ -173,19 +172,23 @@ pub trait SortHooks: Clone + Send + Sync + 'static {
     ) -> Result<(Self::MergeableRun, u128), String>;
 
     fn into_output(&self, run: Self::MergeableRun, stats: SortStats) -> Box<dyn SortOutput>;
+
+    /// Returns the run generation algorithm that this sorter should use
+    fn algorithm(&self) -> RunGenerationAlgorithm;
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RunGenerationAlgorithm {
-    ReplacementSelection,
-    LoadSortStore,
+    // ReplacementSelection,   // Heap-based replacement selection, plain format
+    TreeOfLosers,        // Tree of Losers replacement selection, plain format
+    TreeOfLosersWithOVC, // Tree of Losers replacement selection, OVC format
 }
 
 impl std::fmt::Display for RunGenerationAlgorithm {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::ReplacementSelection => write!(f, "replacement-selection"),
-            Self::LoadSortStore => write!(f, "load-sort-store"),
+            Self::TreeOfLosers => write!(f, "tree-of-losers"),
+            Self::TreeOfLosersWithOVC => write!(f, "tree-of-losers-ovc"),
         }
     }
 }
@@ -196,17 +199,19 @@ impl std::str::FromStr for RunGenerationAlgorithm {
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         let normalized = s.trim().to_ascii_lowercase();
         match normalized.as_str() {
-            "replacement-selection"
-            | "replacement_selection"
-            | "replacementselection"
-            | "replacement" => Ok(Self::ReplacementSelection),
-            "load-sort-store" | "load_sort_store" | "loadsortstore" | "load" | "lss" => {
-                Ok(Self::LoadSortStore)
-            }
+            "tree-of-losers" | "tree_of_losers" | "treeoflosers" | "tol" => Ok(Self::TreeOfLosers),
+            "tree-of-losers-ovc" | "tree_of_losers_ovc" | "treeoflosersovc" | "tol-ovc"
+            | "tol_ovc" | "tolovc" => Ok(Self::TreeOfLosersWithOVC),
             other => Err(format!(
-                "Invalid run generation algorithm '{other}'. Expected 'replacement-selection' or 'load-sort-store'."
+                "Invalid run generation algorithm '{other}'. Expected 'replacement-selection', 'tree-of-losers', 'tree-of-losers-ovc', or 'load-sort-store'."
             )),
         }
+    }
+}
+
+impl RunGenerationAlgorithm {
+    pub fn uses_ovc(&self) -> bool {
+        matches!(self, Self::TreeOfLosersWithOVC)
     }
 }
 
@@ -259,7 +264,7 @@ impl<H: SortHooks> SorterCore<H> {
                 path: temp_dir,
                 should_delete: true,
             }),
-            run_gen_algorithm: RunGenerationAlgorithm::ReplacementSelection,
+            run_gen_algorithm: RunGenerationAlgorithm::TreeOfLosers,
         }
     }
 
@@ -313,7 +318,6 @@ impl<H: SortHooks> SorterCore<H> {
             self.sketch_sampling_interval,
             self.run_indexing_interval,
             self.temp_dir_info.as_ref().as_ref(),
-            self.run_gen_algorithm,
         )
     }
 
@@ -342,7 +346,6 @@ impl<H: SortHooks> SorterCore<H> {
         sketch_sampling_interval: usize,
         run_indexing_interval: usize,
         dir: impl AsRef<Path>,
-        algorithm: RunGenerationAlgorithm,
     ) -> Result<(Vec<H::MergeableRun>, Sketch<Vec<u8>>, RunGenerationStats), String>
     where
         H: Default,
@@ -358,7 +361,6 @@ impl<H: SortHooks> SorterCore<H> {
             sketch_sampling_interval,
             run_indexing_interval,
             dir,
-            algorithm,
         )
     }
 
@@ -425,102 +427,70 @@ fn run_generation_with_hooks<H: SortHooks>(
     sketch_sampling_interval: usize,
     run_indexing_interval: usize,
     dir: impl AsRef<Path>,
-    algorithm: RunGenerationAlgorithm,
 ) -> Result<(Vec<H::MergeableRun>, Sketch<Vec<u8>>, RunGenerationStats), String> {
     let dir = dir.as_ref();
+    let algorithm = hooks.algorithm();
     let hooks = hooks.clone();
     let worker_hooks = hooks.clone();
-    let worker = move |thread_id: usize,
-                       mut scanner: Scanner,
-                       io_tracker: Arc<IoStatsTracker>,
-                       dir: PathBuf| {
-        let run_path = dir.join(format!("intermediate_{}.dat", thread_id));
-        let fd = Arc::new(
-            SharedFd::new_from_path(&run_path, true)
-                .expect("Failed to open run file with Direct I/O"),
-        );
-        let run_writer = AlignedWriter::from_fd_with_tracker(fd, Some((*io_tracker).clone()))
-            .expect("Failed to create run writer");
-        let mut sink = worker_hooks.create_sink(
-            run_writer,
-            run_indexing_interval,
-            sketch_type,
-            sketch_size,
-            sketch_sampling_interval,
-        );
-        match algorithm {
-            RunGenerationAlgorithm::ReplacementSelection => {
-                let thread_start = Instant::now();
-                let _ = run_replacement_selection(scanner, &mut sink, run_size);
-                let (local_runs, sketch) = sink.finalize();
-                let total_time_ms = thread_start.elapsed().as_millis();
-                println!(
-                    "Run gen thread {} ({:?}) {} ms, {} runs generated",
-                    thread_id,
-                    RunGenerationAlgorithm::ReplacementSelection,
-                    total_time_ms,
-                    local_runs.len()
-                );
-                RunGenerationThreadResult {
-                    runs: local_runs,
-                    sketch,
-                    load_ms: 0,
-                    sort_ms: total_time_ms,
-                    store_ms: 0,
+    let worker =
+        move |thread_id: usize, scanner: Scanner, io_tracker: Arc<IoStatsTracker>, dir: PathBuf| {
+            let run_path = dir.join(format!("intermediate_{}.dat", thread_id));
+            let fd = Arc::new(
+                SharedFd::new_from_path(&run_path, true)
+                    .expect("Failed to open run file with Direct I/O"),
+            );
+            let run_writer = AlignedWriter::from_fd_with_tracker(fd, Some((*io_tracker).clone()))
+                .expect("Failed to create run writer");
+            let mut sink = worker_hooks.create_sink(
+                run_writer,
+                run_indexing_interval,
+                sketch_type,
+                sketch_size,
+                sketch_sampling_interval,
+            );
+            match algorithm {
+                RunGenerationAlgorithm::TreeOfLosers => {
+                    let thread_start = Instant::now();
+                    let _ = run_replacement_selection_tol(scanner, &mut sink, run_size);
+                    let (local_runs, sketch) = sink.finalize();
+                    let total_time_ms = thread_start.elapsed().as_millis();
+                    println!(
+                        "Run gen thread {} ({}) {} ms, {} runs generated",
+                        thread_id,
+                        algorithm,
+                        total_time_ms,
+                        local_runs.len()
+                    );
+                    RunGenerationThreadResult {
+                        runs: local_runs,
+                        sketch,
+                        load_ms: 0,
+                        sort_ms: total_time_ms,
+                        store_ms: 0,
+                    }
+                }
+                RunGenerationAlgorithm::TreeOfLosersWithOVC => {
+                    let thread_start = Instant::now();
+                    let _ = run_replacement_selection_ovc(scanner, &mut sink, run_size);
+                    let (local_runs, sketch) = sink.finalize();
+                    let total_time_ms = thread_start.elapsed().as_millis();
+                    println!(
+                        "Run gen thread {} ({}) {} ms, {} runs generated",
+                        thread_id,
+                        algorithm,
+                        total_time_ms,
+                        local_runs.len()
+                    );
+                    RunGenerationThreadResult {
+                        runs: local_runs,
+                        sketch,
+                        load_ms: 0,
+                        sort_ms: total_time_ms,
+                        store_ms: 0,
+                    }
                 }
             }
-            RunGenerationAlgorithm::LoadSortStore => {
-                let mut buffer = SortBuffer::new(run_size);
-                let mut pending_record: Option<(Vec<u8>, Vec<u8>)> = None;
-                let mut load_duration = Duration::default();
-                let mut sort_duration = Duration::default();
-                let mut store_duration = Duration::default();
-
-                loop {
-                    let load_start = Instant::now();
-                    fill_sort_buffer(&mut buffer, scanner.as_mut(), &mut pending_record, run_size);
-                    load_duration += load_start.elapsed();
-
-                    if buffer.is_empty() {
-                        break;
-                    }
-
-                    let sort_start = Instant::now();
-                    let sorted_iter = buffer.sorted_iter();
-                    sort_duration += sort_start.elapsed();
-
-                    sink.start_run();
-                    let store_start = Instant::now();
-                    for (key, value) in sorted_iter {
-                        sink.push_record(&key, &value);
-                    }
-                    sink.finish_run();
-                    store_duration += store_start.elapsed();
-
-                    buffer.reset();
-                }
-
-                let (local_runs, sketch) = sink.finalize();
-                let load_ms = load_duration.as_millis();
-                let sort_ms = sort_duration.as_millis();
-                let store_ms = store_duration.as_millis();
-                println!(
-                    "Run gen thread {} ({:?}) {} ms, {} runs generated",
-                    thread_id,
-                    RunGenerationAlgorithm::LoadSortStore,
-                    load_ms + sort_ms + store_ms,
-                    local_runs.len()
-                );
-                RunGenerationThreadResult {
-                    runs: local_runs,
-                    sketch,
-                    load_ms,
-                    sort_ms,
-                    store_ms,
-                }
-            }
-        }
-    };
+        };
 
     execute_run_generation(
         sort_input,
@@ -758,48 +728,4 @@ fn merge_once_with_hooks<H: SortHooks>(
     };
 
     Ok((hooks.combine_runs(output_runs), merge_stats))
-}
-
-fn append_record_to_buffer(
-    buffer: &mut SortBuffer,
-    key: Vec<u8>,
-    value: Vec<u8>,
-    run_size: usize,
-) -> Result<(), (Vec<u8>, Vec<u8>)> {
-    if buffer.has_space(&key, &value) {
-        let appended = buffer.append(key, value);
-        debug_assert!(appended, "SortBuffer reported space but append failed");
-        Ok(())
-    } else {
-        if buffer.is_empty() {
-            let entry_size = key.len() + value.len() + ENTRY_METADATA_SIZE;
-            panic!(
-                "Record of size {} bytes exceeds load-sort-store run size limit {} bytes",
-                entry_size, run_size
-            );
-        }
-        Err((key, value))
-    }
-}
-
-fn fill_sort_buffer(
-    buffer: &mut SortBuffer,
-    scanner: &mut dyn Iterator<Item = (Vec<u8>, Vec<u8>)>,
-    pending_record: &mut Option<(Vec<u8>, Vec<u8>)>,
-    run_size: usize,
-) {
-    if let Some((key, value)) = pending_record.take() {
-        append_record_to_buffer(buffer, key, value, run_size)
-            .expect("pending record must fit inside an empty buffer");
-    }
-
-    while let Some((key, value)) = scanner.next() {
-        match append_record_to_buffer(buffer, key, value, run_size) {
-            Ok(()) => {}
-            Err(record) => {
-                *pending_record = Some(record);
-                break;
-            }
-        }
-    }
 }

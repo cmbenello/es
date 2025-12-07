@@ -15,7 +15,6 @@ pub struct BenchmarkConfig {
     pub benchmark_runs: usize,
     pub cooldown_seconds: u64,
     pub verify: bool,
-    pub ovc: bool,
     pub temp_dir: PathBuf,
     pub sketch_type: SketchType,
     pub sketch_size: usize,

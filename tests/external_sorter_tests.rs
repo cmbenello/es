@@ -1,20 +1,11 @@
 mod common;
 
 use common::{sorter_behavior, test_dir};
-use es::{ExternalSorter, RunGenerationAlgorithm};
+use es::ExternalSorter;
 
 #[test]
 fn test_basic_functionality() {
     sorter_behavior::basic_sort(|| ExternalSorter::new(1, 512, 1, 10000, test_dir()));
-}
-
-#[test]
-fn test_quicksort_run_generation_path() {
-    sorter_behavior::load_sort_store(|| {
-        let mut sorter = ExternalSorter::new(2, 4 * 1024, 2, 10000, test_dir());
-        sorter.set_run_generation_algorithm(RunGenerationAlgorithm::LoadSortStore);
-        sorter
-    });
 }
 
 #[test]

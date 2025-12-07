@@ -149,35 +149,37 @@ fn main() {
 
             // For preaggregated approach, count aggregated entries per partition
             // Each chunk contributes its unique items independently (naive combination, no global dedup)
-            let count_partition_preagg = |boundaries: &[f64], freq_maps: &[HashMap<u64, usize>]| -> Vec<usize> {
-                let mut counts = vec![0; num_partitions];
-                for freq_map in freq_maps {
-                    for &val in freq_map.keys() {
-                        for i in 0..num_partitions {
-                            if val as f64 > boundaries[i] && val as f64 <= boundaries[i + 1] {
-                                counts[i] += 1; // Count each aggregated entry (duplicates across chunks counted separately)
-                                break;
+            let count_partition_preagg =
+                |boundaries: &[f64], freq_maps: &[HashMap<u64, usize>]| -> Vec<usize> {
+                    let mut counts = vec![0; num_partitions];
+                    for freq_map in freq_maps {
+                        for &val in freq_map.keys() {
+                            for i in 0..num_partitions {
+                                if val as f64 > boundaries[i] && val as f64 <= boundaries[i + 1] {
+                                    counts[i] += 1; // Count each aggregated entry (duplicates across chunks counted separately)
+                                    break;
+                                }
                             }
                         }
                     }
-                }
-                counts
-            };
+                    counts
+                };
 
             let kll_counts = count_partition(&kll_boundaries);
             let res_counts = count_partition(&res_boundaries);
             // For preaggregated: partition the naive combination of aggregated results
-            let preagg_kll_counts = count_partition_preagg(&preagg_kll_boundaries, &chunk_freq_maps);
-            let preagg_res_counts = count_partition_preagg(&preagg_res_boundaries, &chunk_freq_maps);
+            let preagg_kll_counts =
+                count_partition_preagg(&preagg_kll_boundaries, &chunk_freq_maps);
+            let preagg_res_counts =
+                count_partition_preagg(&preagg_res_boundaries, &chunk_freq_maps);
 
             // Standard approaches partition the original dataset
             let optimal_size = total_samples / num_partitions;
 
             // Preaggregated approaches partition aggregated entries (sum of unique items per chunk)
             // This counts duplicates across chunks separately (naive combination)
-            let total_preagg_entries: usize = chunk_freq_maps.iter()
-                .map(|freq_map| freq_map.len())
-                .sum();
+            let total_preagg_entries: usize =
+                chunk_freq_maps.iter().map(|freq_map| freq_map.len()).sum();
             let optimal_preagg_size = total_preagg_entries / num_partitions;
 
             // Also track globally unique items for reporting
@@ -192,8 +194,7 @@ fn main() {
             let calculate_stats = |counts: &[usize], opt_size: usize| -> (usize, usize, f64, f64) {
                 let min = *counts.iter().min().unwrap();
                 let max = *counts.iter().max().unwrap();
-                let imbalance =
-                    ((max as f64 - opt_size as f64) / opt_size as f64 * 100.0).abs();
+                let imbalance = ((max as f64 - opt_size as f64) / opt_size as f64 * 100.0).abs();
 
                 // Calculate variance
                 let mean = counts.iter().sum::<usize>() as f64 / counts.len() as f64;
@@ -209,10 +210,14 @@ fn main() {
                 (min, max, imbalance, variance)
             };
 
-            let (kll_min, kll_max, kll_imbalance, kll_variance) = calculate_stats(&kll_counts, optimal_size);
-            let (res_min, res_max, res_imbalance, res_variance) = calculate_stats(&res_counts, optimal_size);
-            let (preagg_kll_min, preagg_kll_max, preagg_kll_imbalance, preagg_kll_variance) = calculate_stats(&preagg_kll_counts, optimal_preagg_size);
-            let (preagg_res_min, preagg_res_max, preagg_res_imbalance, preagg_res_variance) = calculate_stats(&preagg_res_counts, optimal_preagg_size);
+            let (kll_min, kll_max, kll_imbalance, kll_variance) =
+                calculate_stats(&kll_counts, optimal_size);
+            let (res_min, res_max, res_imbalance, res_variance) =
+                calculate_stats(&res_counts, optimal_size);
+            let (preagg_kll_min, preagg_kll_max, preagg_kll_imbalance, preagg_kll_variance) =
+                calculate_stats(&preagg_kll_counts, optimal_preagg_size);
+            let (preagg_res_min, preagg_res_max, preagg_res_imbalance, preagg_res_variance) =
+                calculate_stats(&preagg_res_counts, optimal_preagg_size);
 
             // Output KLL stats
             println!(

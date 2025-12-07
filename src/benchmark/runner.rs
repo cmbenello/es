@@ -81,7 +81,6 @@ impl BenchmarkRunner {
         println!("Merge threads: {}", self.config.merge_threads);
         println!("Merge fan-in: {}", self.config.merge_fanin);
         println!("Merge memory (MB): {:.1}", self.config.merge_memory_mb);
-        println!("OVC enabled: {}", self.config.ovc);
         println!("Sketch type: {}", self.config.sketch_type);
         println!("Sketch size: {}", self.config.sketch_size);
         println!(
@@ -118,7 +117,7 @@ impl BenchmarkRunner {
 
             let input = self.input_provider.create_sort_input()?;
 
-            let (run_gen_stats, multi_merge_stats) = if self.config.ovc {
+            let (run_gen_stats, multi_merge_stats) = if run_gen_algorithm.uses_ovc() {
                 let (runs, sketch, run_gen_stats) = ExternalSorterWithOVC::run_generation(
                     input,
                     self.config.run_gen_threads as usize,
@@ -128,7 +127,6 @@ impl BenchmarkRunner {
                     self.config.sketch_sampling_interval,
                     self.config.run_indexing_interval,
                     &temp_dir,
-                    run_gen_algorithm,
                 )?;
 
                 let (_merged_runs, multi_merge_stats) = ExternalSorterWithOVC::multi_merge(
@@ -152,7 +150,6 @@ impl BenchmarkRunner {
                     self.config.sketch_sampling_interval,
                     self.config.run_indexing_interval,
                     &temp_dir,
-                    run_gen_algorithm,
                 )?;
 
                 let mergeable_runs: Vec<crate::sort::sorter::MergeableRun> = runs;
@@ -266,7 +263,7 @@ impl BenchmarkRunner {
         temp_dir: &Path,
     ) -> Result<Box<dyn SortOutput>, Box<dyn std::error::Error>> {
         let run_gen_algorithm = self.config.run_gen_algorithm;
-        let output = if self.config.ovc {
+        let output = if run_gen_algorithm.uses_ovc() {
             let (runs, sketch, run_gen_stats) = ExternalSorterWithOVC::run_generation(
                 input,
                 self.config.run_gen_threads as usize,
@@ -276,7 +273,6 @@ impl BenchmarkRunner {
                 self.config.sketch_sampling_interval,
                 self.config.run_indexing_interval,
                 temp_dir,
-                run_gen_algorithm,
             )?;
 
             let (merged_run, multi_merge_stats) = ExternalSorterWithOVC::multi_merge(
@@ -302,7 +298,6 @@ impl BenchmarkRunner {
                 self.config.sketch_sampling_interval,
                 self.config.run_indexing_interval,
                 temp_dir,
-                run_gen_algorithm,
             )?;
 
             let (merged_run, multi_merge_stats) = ExternalSorter::multi_merge(

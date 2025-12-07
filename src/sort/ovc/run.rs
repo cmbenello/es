@@ -3,8 +3,7 @@ use crate::diskio::aligned_writer::AlignedWriter;
 use crate::diskio::constants::align_down;
 use crate::diskio::file::SharedFd;
 use crate::diskio::io_stats::IoStatsTracker;
-use crate::ovc::offset_value_coding::OVCFlag;
-use crate::ovc::offset_value_coding_u64::OVCU64;
+use crate::ovc::offset_value_coding::{OVCFlag, OVCU64};
 use crate::sort::core::engine::RunSummary;
 use std::io::{Read, Write};
 use std::sync::Arc;
@@ -118,14 +117,24 @@ impl RunWithOVC {
 
         let value_len = value.len() as u32;
 
+        // Optimize for duplicate keys: skip key_len field since it's always 0
+        if ovc.flag() == OVCFlag::DuplicateValue {
+            writer.write_all(&ovc.to_le_bytes()).unwrap();
+            writer.write_all(&value_len.to_le_bytes()).unwrap();
+            writer.write_all(&value).unwrap();
+            self.total_bytes += 8 + 4 + value.len();
+            self.total_entries += 1;
+            return;
+        }
+
         // Write entry directly to DirectFileWriter (it handles buffering)
         let offset = match ovc.flag() {
             OVCFlag::EarlyFence | OVCFlag::LateFence => {
                 panic!("EarlyFence and LateFence OVC flags are not supported in RunWithOVC");
             }
             OVCFlag::InitialValue => 0,
-            OVCFlag::DuplicateValue => key.len(),
             OVCFlag::NormalValue => ovc.offset(),
+            OVCFlag::DuplicateValue => unreachable!(),
         };
         let truncated_key = &key[offset..];
         let truncated_key_len = truncated_key.len() as u32;
@@ -256,6 +265,38 @@ impl Iterator for RunIteratorWithOVC {
             }
             let ovc = OVCU64::from_le_bytes(ovc_bytes);
 
+            // Optimize for duplicate keys: skip reading key_len, just use prev_key
+            if ovc.flag() == OVCFlag::DuplicateValue {
+                // Read value length
+                let mut value_len_bytes = [0u8; 4];
+                self.reader
+                    .read_exact(&mut value_len_bytes)
+                    .expect("Failed to read value length");
+                let value_len = u32::from_le_bytes(value_len_bytes) as usize;
+
+                // Read value
+                let mut value = vec![0u8; value_len];
+                self.reader
+                    .read_exact(&mut value)
+                    .expect("Failed to read value");
+
+                // Update bytes read (no key_len field for duplicates)
+                self.bytes_read += 8 + 4 + value_len;
+
+                // Use previous key
+                let key = self.prev_key.clone();
+
+                // Check if key is in range [lower_inc, upper_exc)
+                if !self.lower_bound.is_empty() && key < self.lower_bound {
+                    continue;
+                }
+                if !self.upper_bound.is_empty() && key >= self.upper_bound {
+                    return None;
+                }
+
+                return Some((ovc, key, value));
+            }
+
             // Read key length
             let mut key_len_bytes = [0u8; 4];
             self.reader
@@ -275,8 +316,8 @@ impl Iterator for RunIteratorWithOVC {
                     panic!("EarlyFence and LateFence OVC flags are not supported in RunWithOVC");
                 }
                 OVCFlag::InitialValue => 0,
-                OVCFlag::DuplicateValue => self.prev_key.len(),
                 OVCFlag::NormalValue => ovc.offset(),
+                OVCFlag::DuplicateValue => unreachable!(),
             };
             let mut key = vec![0u8; offset + truncated_key_len];
             key[..offset].copy_from_slice(&self.prev_key[..offset]);
@@ -326,7 +367,6 @@ mod tests {
     use super::*;
     use crate::diskio::aligned_writer::AlignedWriter;
     use crate::diskio::file::SharedFd;
-    use crate::sort::ovc::sort_buffer_with_ovc::SortBufferOVC;
     use std::fs;
     use std::path::PathBuf;
 
@@ -573,72 +613,5 @@ mod tests {
         assert_eq!(results[0].0, OVCU64::normal_value(&[10], 0));
         assert_eq!(results[1].0, OVCU64::normal_value(&[20], 0));
         assert_eq!(results[2].0, OVCU64::normal_value(&[30], 0));
-    }
-
-    #[test]
-    fn test_ovc_data_read_ok() {
-        let fd = create_test_file("test_ovc_data_read.dat");
-        let mut buffer = SortBufferOVC::new(1024 * 1024);
-
-        let n = 1000;
-        for i in 0..n {
-            let key = format!("key_{:08}", n - i);
-            let value = format!("value_{:08}", n - i);
-            buffer.append(key.into_bytes(), value.into_bytes());
-        }
-
-        // Write the results of the sorted buffer to a run
-        let writer = AlignedWriter::from_fd(fd.clone()).unwrap();
-        let mut run = RunWithOVC::from_writer(writer).unwrap();
-        for (ovc, key, value) in buffer.sorted_iter() {
-            run.append(ovc, &key, &value);
-        }
-        let writer = run.finalize_write();
-        drop(writer); // Close writer to flush data
-
-        let results: Vec<_> = run.scan_range(&[], &[]).collect();
-        assert_eq!(results.len(), n);
-        // Verify sorted order
-        for i in 0..n {
-            let expected_key = format!("key_{:08}", i + 1);
-            let expected_value = format!("value_{:08}", i + 1);
-            let results = &results[i];
-            println!("OVC: {:?}", results.0);
-            println!(
-                "Result {}: key={:?}, value={:?}",
-                i,
-                String::from_utf8_lossy(&results.1),
-                String::from_utf8_lossy(&results.2)
-            );
-            println!(
-                "Expected {}: key={:?}, value={:?}",
-                i, expected_key, expected_value
-            );
-            assert_eq!(results.1, expected_key.as_bytes());
-            assert_eq!(results.2, expected_value.as_bytes());
-        }
-
-        let results = run
-            .scan_range(b"key_00000050", b"key_00000060")
-            .collect::<Vec<_>>();
-        assert_eq!(results.len(), 10);
-        for i in 0..10 {
-            let expected_key = format!("key_{:08}", i + 50);
-            let expected_value = format!("value_{:08}", i + 50);
-            let results = &results[i];
-            println!("OVC: {:?}", results.0);
-            println!(
-                "Result {}: key={:?}, value={:?}",
-                i,
-                String::from_utf8_lossy(&results.1),
-                String::from_utf8_lossy(&results.2)
-            );
-            println!(
-                "Expected {}: key={:?}, value={:?}",
-                i, expected_key, expected_value
-            );
-            assert_eq!(results.1, expected_key.as_bytes());
-            assert_eq!(results.2, expected_value.as_bytes());
-        }
     }
 }

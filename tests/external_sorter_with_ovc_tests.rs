@@ -9,15 +9,6 @@ fn test_basic_sort_with_ovc() {
 }
 
 #[test]
-fn test_load_sort_store_run_generation_with_ovc() {
-    sorter_behavior::load_sort_store(|| {
-        let mut sorter = ExternalSorterWithOVC::new(2, 4 * 1024, 2, 10000, ovc_test_dir());
-        sorter.set_run_generation_algorithm(RunGenerationAlgorithm::LoadSortStore);
-        sorter
-    });
-}
-
-#[test]
 fn test_external_sort_with_ovc() {
     sorter_behavior::small_buffer_external_sort(|| {
         ExternalSorterWithOVC::new(2, 512, 2, 10000, ovc_test_dir())

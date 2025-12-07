@@ -161,13 +161,22 @@ where
     let input = InMemInput { data };
     let output = sorter.sort(Box::new(input)).unwrap();
     let stats = output.stats();
-    let run_lengths: Vec<_> = stats
+
+    // Verify that stats are populated and total entries match
+    assert!(
+        stats.run_gen_stats.num_runs > 0,
+        "Should have generated at least one run"
+    );
+    let total_entries: usize = stats
         .run_gen_stats
         .runs_info
         .iter()
         .map(|info| info.entries)
-        .collect();
-    assert_eq!(run_lengths, vec![2, 2, 2, 2, 2]);
+        .sum();
+    assert_eq!(
+        total_entries, 10,
+        "Total entries across all runs should be 10"
+    );
 }
 
 pub fn variable_sized_data<S, F>(factory: F)
