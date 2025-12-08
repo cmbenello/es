@@ -2,126 +2,149 @@ use crate::rand::small_thread_rng;
 use crate::sketch::{CDF, MergeableSampler, Quantile, QuantileSampler};
 use rand::Rng;
 use std::cmp::Ordering;
+use std::collections::BinaryHeap;
 use std::fmt;
 
-/// Reservoir sampling data structure for uniform random sampling.
-///
-/// This maintains a fixed-size reservoir of k samples from a potentially
-/// infinite stream, ensuring each item has equal probability of being sampled.
+/// A mergeable Reservoir Sampler using Priority Sampling.
+#[derive(Clone)]
 pub struct ReservoirSampler<T> {
-    /// The reservoir holding k samples.
-    reservoir: Vec<T>,
-
-    /// Maximum capacity of the reservoir.
     k: usize,
+    /// Total items processed (needed for scaling rank estimates)
+    total_seen: usize,
+    /// Min-Heap of (priority, item)
+    heap: BinaryHeap<WeightedItem<T>>,
+}
 
-    /// Total number of items seen so far.
-    n: usize,
+#[derive(Clone)]
+struct WeightedItem<T> {
+    priority: f64,
+    value: T,
+}
+
+// (Ord implementations omitted for brevity, assuming same as previous response:
+// WeightedItem creates a Min-Heap based on priority)
+impl<T> PartialEq for WeightedItem<T> {
+    fn eq(&self, other: &Self) -> bool {
+        self.priority == other.priority
+    }
+}
+impl<T> Eq for WeightedItem<T> {}
+impl<T> PartialOrd for WeightedItem<T> {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        other.priority.partial_cmp(&self.priority)
+    }
+}
+impl<T> Ord for WeightedItem<T> {
+    fn cmp(&self, other: &Self) -> Ordering {
+        self.partial_cmp(other).unwrap_or(Ordering::Equal)
+    }
 }
 
 impl<T> ReservoirSampler<T>
 where
-    T: PartialOrd + Clone,
+    T: Clone + PartialOrd,
 {
     pub fn new(k: usize) -> Self {
         ReservoirSampler {
-            reservoir: Vec::with_capacity(k),
             k,
-            n: 0,
+            total_seen: 0,
+            heap: BinaryHeap::with_capacity(k),
         }
     }
 
-    fn update_internal(&mut self, x: T) {
-        self.n += 1;
+    fn update_internal(&mut self, item: T) {
+        self.total_seen += 1;
+        let mut rng = small_thread_rng();
+        let priority: f64 = rng.random();
 
-        if self.reservoir.len() < self.k {
-            // Reservoir not full yet, just add the item
-            self.reservoir.push(x);
-        } else {
-            // Reservoir is full, randomly decide whether to include this item
-            let j = small_thread_rng().random_range(0..self.n);
-            if j < self.k {
-                self.reservoir[j] = x;
+        if self.heap.len() < self.k {
+            self.heap.push(WeightedItem {
+                priority,
+                value: item,
+            });
+        } else if let Some(min_item) = self.heap.peek() {
+            if priority > min_item.priority {
+                self.heap.pop();
+                self.heap.push(WeightedItem {
+                    priority,
+                    value: item,
+                });
             }
         }
     }
 
     fn merge_internal(&mut self, other: &ReservoirSampler<T>) {
-        // Merge two reservoir samplers
-        // This uses weighted reservoir sampling where each sampler contributes
-        // proportionally to its observed count
-
-        let total_n = self.n + other.n;
-
-        if total_n == 0 {
-            return;
-        }
-
-        // First, combine all samples
-        let mut combined = Vec::with_capacity(self.reservoir.len() + other.reservoir.len());
-        combined.extend(self.reservoir.iter().cloned());
-        combined.extend(other.reservoir.iter().cloned());
-
-        // Randomly sample k items from the combined set, weighted by their counts
-        self.reservoir.clear();
-
-        if combined.len() <= self.k {
-            self.reservoir = combined;
-        } else {
-            // Use reservoir sampling to select k items from combined
-            for (i, item) in combined.into_iter().enumerate() {
-                if i < self.k {
-                    self.reservoir.push(item);
-                } else {
-                    let j = small_thread_rng().random_range(0..=i);
-                    if j < self.k {
-                        self.reservoir[j] = item;
-                    }
+        self.total_seen += other.total_seen;
+        for weighted_item in &other.heap {
+            if self.heap.len() < self.k {
+                self.heap.push(weighted_item.clone());
+            } else if let Some(min_item) = self.heap.peek() {
+                if weighted_item.priority > min_item.priority {
+                    self.heap.pop();
+                    self.heap.push(weighted_item.clone());
                 }
             }
         }
-
-        self.n = total_n;
     }
 
-    fn rank_internal(&self, x: T) -> usize {
+    // --- NEW METHODS START HERE ---
+
+    /// Returns the total number of items seen by this sampler (and merged samplers).
+    pub fn count_internal(&self) -> usize {
+        self.total_seen
+    }
+
+    /// Estimates the rank of `x` in the total stream.
+    /// Rank = Number of items <= x
+    pub fn rank_internal(&self, x: &T) -> usize {
+        if self.heap.is_empty() {
+            return 0;
+        }
+
+        // Count how many items in the reservoir are <= x
         let mut r = 0;
-        for v in &self.reservoir {
-            if v <= &x {
+        for wi in &self.heap {
+            if &wi.value <= x {
                 r += 1;
             }
         }
 
-        // Scale the rank based on the total count
-        if self.reservoir.is_empty() {
-            0
-        } else {
-            (r * self.n) / self.reservoir.len()
-        }
+        // Scale up: (ReservoirRank / ReservoirSize) * TotalSeen
+        // We use floating point math to avoid early truncation, then cast back.
+        let scaling_factor = self.total_seen as f64 / self.heap.len() as f64;
+        (r as f64 * scaling_factor) as usize
     }
 
-    fn count_internal(&self) -> usize {
-        self.n
-    }
-
-    fn quantile_internal(&self, x: T) -> f64 {
-        if self.reservoir.is_empty() {
+    /// Estimates the quantile of `x` (Rank / Total).
+    /// Returns value in [0.0, 1.0]
+    pub fn quantile_internal(&self, x: &T) -> f64 {
+        if self.total_seen == 0 {
             return 0.0;
         }
-
         let rank = self.rank_internal(x);
-        rank as f64 / self.n as f64
+        rank as f64 / self.total_seen as f64
     }
 
-    fn cdf_internal(&self) -> CDF<T> {
-        let mut samples = self.reservoir.clone();
+    /// Returns the full CDF approximation.
+    pub fn cdf_internal(&self) -> CDF<T> {
+        // Extract values
+        let mut samples: Vec<T> = self.heap.iter().map(|wi| wi.value.clone()).collect();
+
+        // Sort to determine order
         samples.sort_unstable_by(|a, b| a.partial_cmp(b).unwrap_or(Ordering::Equal));
 
-        let weight = self.n as f64 / self.reservoir.len() as f64;
-        let mut quantiles = Vec::with_capacity(samples.len());
+        let len = samples.len();
+        if len == 0 {
+            return CDF(vec![]);
+        }
 
+        let mut quantiles = Vec::with_capacity(len);
+
+        // In a uniform reservoir sample, every item represents an equal
+        // chunk of the original probability mass (1 / len).
         for (i, v) in samples.into_iter().enumerate() {
-            let q = ((i + 1) as f64 * weight) / self.n as f64;
+            // q is the cumulative probability up to this item
+            let q = (i + 1) as f64 / len as f64;
             quantiles.push(Quantile { q, v });
         }
 
@@ -138,7 +161,7 @@ where
     }
 
     fn rank(&self, x: T) -> usize {
-        self.rank_internal(x)
+        self.rank_internal(&x)
     }
 
     fn count(&self) -> usize {
@@ -146,7 +169,7 @@ where
     }
 
     fn quantile(&self, x: T) -> f64 {
-        self.quantile_internal(x)
+        self.quantile_internal(&x)
     }
 
     fn cdf(&self) -> CDF<T> {
@@ -160,34 +183,6 @@ where
 {
     fn merge(&mut self, other: &Self) {
         self.merge_internal(other);
-    }
-}
-
-impl<T> fmt::Display for ReservoirSampler<T>
-where
-    T: fmt::Display,
-{
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        writeln!(f, "Reservoir Sampler (k={})", self.k)?;
-        writeln!(f, "Total items seen: {}", self.n)?;
-        writeln!(f, "Current samples: {}", self.reservoir.len())?;
-
-        if !self.reservoir.is_empty() {
-            write!(f, "Sample values: [")?;
-            let display_count = self.reservoir.len().min(10);
-            for (i, v) in self.reservoir.iter().take(display_count).enumerate() {
-                if i > 0 {
-                    write!(f, ", ")?;
-                }
-                write!(f, "{}", v)?;
-            }
-            if self.reservoir.len() > display_count {
-                write!(f, ", ... ({} more)", self.reservoir.len() - display_count)?;
-            }
-            writeln!(f, "]")?;
-        }
-
-        Ok(())
     }
 }
 
@@ -205,7 +200,7 @@ mod tests {
         }
 
         assert_eq!(sampler.count(), 1000);
-        assert_eq!(sampler.reservoir.len(), 100);
+        assert_eq!(sampler.heap.len(), 100);
 
         // Test that rank is reasonable
         let rank500 = sampler.rank(500.0);

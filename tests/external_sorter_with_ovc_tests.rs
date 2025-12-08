@@ -1,7 +1,7 @@
 mod common;
 
 use common::{ovc_test_dir, sorter_behavior};
-use es::{ExternalSorterWithOVC, RunGenerationAlgorithm};
+use es::ExternalSorterWithOVC;
 
 #[test]
 fn test_basic_sort_with_ovc() {

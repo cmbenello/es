@@ -312,7 +312,6 @@ pub use diskio::file::{file_size_fd, pread_fd, pwrite_fd}; // , GlobalFileManage
 pub use diskio::io_stats::{IoStats, IoStatsTracker};
 pub use input_reader::csv_input_direct::{CsvDirectConfig, CsvInputDirect};
 pub use input_reader::gensort_input_direct::GenSortInputDirect;
-pub use sort::engine::RunGenerationAlgorithm;
 pub use sort::ovc::sorter::{ExternalSorterWithOVC, RunsOutputWithOVC};
 pub use sort::plain::run::Run;
 pub use sort::sorter::{ExternalSorter, RunsOutput};

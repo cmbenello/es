@@ -1,5 +1,5 @@
 use clap::Parser;
-use es::RunGenerationAlgorithm;
+
 use es::benchmark::input::KvBinInputProvider;
 use es::benchmark::{
     BenchmarkConfig, BenchmarkInputProvider, BenchmarkResult, BenchmarkRunner,
@@ -77,13 +77,9 @@ struct Args {
     #[arg(long, required_unless_present = "estimate_size")]
     run_gen_threads: Option<usize>,
 
-    /// Run generation algorithm (`replacement-selection` or `load-sort-store`)
-    #[arg(
-        long,
-        default_value = "replacement-selection",
-        value_name = "ALGORITHM"
-    )]
-    run_gen_algorithm: RunGenerationAlgorithm,
+    /// Use OVC (Offset Value Coding) format
+    #[arg(long, default_value = "true")]
+    ovc: bool,
 
     /// Threads for merge phase
     #[arg(long, required_unless_present = "estimate_size")]
@@ -242,7 +238,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         sketch_sampling_interval: args.sketch_sampling_interval,
         run_indexing_interval: args.run_indexing_interval,
         run_gen_threads,
-        run_gen_algorithm: args.run_gen_algorithm,
+        use_ovc: args.ovc,
         run_size_mb,
         run_gen_memory_mb: run_size_mb * run_gen_threads as f64,
         merge_threads,

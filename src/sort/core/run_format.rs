@@ -8,7 +8,7 @@ use crate::diskio::io_stats::IoStatsTracker;
 use crate::ovc::offset_value_coding::OVCU64;
 use crate::sketch::{QuantileSampler, Sketch, SketchType};
 use crate::sort::core::engine::SortHooks;
-use crate::sort::core::engine::{RunGenerationAlgorithm, RunSummary};
+use crate::sort::core::engine::{RunSummary, Scanner};
 use crate::sort::run_sink::RunSink;
 use crate::{SortOutput, SortStats};
 
@@ -61,8 +61,12 @@ pub trait RunFormat: Clone + Send + Sync + 'static {
     fn record_value<'a>(record: &'a Self::Record) -> &'a [u8];
     fn record_into_kv(record: Self::Record) -> (Vec<u8>, Vec<u8>);
 
-    /// Returns the run generation algorithm that this format should use
-    fn algorithm() -> RunGenerationAlgorithm;
+    /// Run replacement selection for this format
+    fn run_replacement_selection<S: RunSink<MergeableRun = MergeableRun<Self>>>(
+        scanner: Scanner,
+        sink: &mut S,
+        run_size: usize,
+    ) -> crate::replacement_selection::ReplacementSelectionStats;
 }
 
 pub enum MergeableRun<F: RunFormat> {
@@ -411,7 +415,12 @@ impl<F: RunFormat> SortHooks for FormatSortHooks<F> {
         Box::new(RunsOutput::<F> { run, stats })
     }
 
-    fn algorithm(&self) -> crate::sort::core::engine::RunGenerationAlgorithm {
-        F::algorithm()
+    fn run_replacement_selection(
+        &self,
+        scanner: Scanner,
+        sink: &mut Self::Sink,
+        run_size: usize,
+    ) -> crate::replacement_selection::ReplacementSelectionStats {
+        F::run_replacement_selection(scanner, sink, run_size)
     }
 }

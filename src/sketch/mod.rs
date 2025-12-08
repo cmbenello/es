@@ -64,6 +64,24 @@ where
             _ => panic!("Cannot merge different sketch types"),
         }
     }
+
+    /// Merge multiple sketches into one
+    /// Returns None if the input vector is empty
+    /// Panics if sketches are of different types
+    pub fn merge_multiple(sketches: Vec<Sketch<T>>) -> Option<Sketch<T>> {
+        if sketches.is_empty() {
+            return None;
+        }
+
+        let mut iter = sketches.into_iter();
+        let mut result = iter.next().unwrap();
+
+        for sketch in iter {
+            result.merge(&sketch);
+        }
+
+        Some(result)
+    }
 }
 
 impl<T> QuantileSampler<T> for Sketch<T>

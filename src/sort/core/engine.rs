@@ -7,9 +7,6 @@ use crate::diskio::aligned_writer::AlignedWriter;
 use crate::diskio::file::SharedFd;
 use crate::diskio::io_stats::IoStatsTracker;
 use crate::rand::small_thread_rng;
-use crate::replacement_selection::{
-    run_replacement_selection, run_replacement_selection_ovc, run_replacement_selection_tol,
-};
 use crate::sketch::{QuantileSampler, Sketch, SketchType};
 use crate::sort::run_sink::RunSink;
 use crate::{
@@ -173,46 +170,13 @@ pub trait SortHooks: Clone + Send + Sync + 'static {
 
     fn into_output(&self, run: Self::MergeableRun, stats: SortStats) -> Box<dyn SortOutput>;
 
-    /// Returns the run generation algorithm that this sorter should use
-    fn algorithm(&self) -> RunGenerationAlgorithm;
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum RunGenerationAlgorithm {
-    // ReplacementSelection,   // Heap-based replacement selection, plain format
-    TreeOfLosers,        // Tree of Losers replacement selection, plain format
-    TreeOfLosersWithOVC, // Tree of Losers replacement selection, OVC format
-}
-
-impl std::fmt::Display for RunGenerationAlgorithm {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::TreeOfLosers => write!(f, "tree-of-losers"),
-            Self::TreeOfLosersWithOVC => write!(f, "tree-of-losers-ovc"),
-        }
-    }
-}
-
-impl std::str::FromStr for RunGenerationAlgorithm {
-    type Err = String;
-
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        let normalized = s.trim().to_ascii_lowercase();
-        match normalized.as_str() {
-            "tree-of-losers" | "tree_of_losers" | "treeoflosers" | "tol" => Ok(Self::TreeOfLosers),
-            "tree-of-losers-ovc" | "tree_of_losers_ovc" | "treeoflosersovc" | "tol-ovc"
-            | "tol_ovc" | "tolovc" => Ok(Self::TreeOfLosersWithOVC),
-            other => Err(format!(
-                "Invalid run generation algorithm '{other}'. Expected 'replacement-selection', 'tree-of-losers', 'tree-of-losers-ovc', or 'load-sort-store'."
-            )),
-        }
-    }
-}
-
-impl RunGenerationAlgorithm {
-    pub fn uses_ovc(&self) -> bool {
-        matches!(self, Self::TreeOfLosersWithOVC)
-    }
+    /// Run replacement selection for this sorter
+    fn run_replacement_selection(
+        &self,
+        scanner: Scanner,
+        sink: &mut Self::Sink,
+        run_size: usize,
+    ) -> crate::replacement_selection::ReplacementSelectionStats;
 }
 
 pub struct SorterCore<H: SortHooks> {
@@ -227,7 +191,6 @@ pub struct SorterCore<H: SortHooks> {
     run_indexing_interval: usize,
     imbalance_factor: f64,
     temp_dir_info: Arc<TempDirInfo>,
-    run_gen_algorithm: RunGenerationAlgorithm,
 }
 
 impl<H: SortHooks> SorterCore<H> {
@@ -264,20 +227,11 @@ impl<H: SortHooks> SorterCore<H> {
                 path: temp_dir,
                 should_delete: true,
             }),
-            run_gen_algorithm: RunGenerationAlgorithm::TreeOfLosers,
         }
     }
 
     pub fn temp_dir(&self) -> &Path {
         self.temp_dir_info.as_ref().as_ref()
-    }
-
-    pub fn set_run_generation_algorithm(&mut self, algorithm: RunGenerationAlgorithm) {
-        self.run_gen_algorithm = algorithm;
-    }
-
-    pub fn run_generation_algorithm(&self) -> RunGenerationAlgorithm {
-        self.run_gen_algorithm
     }
 
     pub fn set_sketch_sampling_interval(&mut self, interval: usize) {
@@ -429,7 +383,6 @@ fn run_generation_with_hooks<H: SortHooks>(
     dir: impl AsRef<Path>,
 ) -> Result<(Vec<H::MergeableRun>, Sketch<Vec<u8>>, RunGenerationStats), String> {
     let dir = dir.as_ref();
-    let algorithm = hooks.algorithm();
     let hooks = hooks.clone();
     let worker_hooks = hooks.clone();
     let worker =
@@ -448,47 +401,22 @@ fn run_generation_with_hooks<H: SortHooks>(
                 sketch_size,
                 sketch_sampling_interval,
             );
-            match algorithm {
-                RunGenerationAlgorithm::TreeOfLosers => {
-                    let thread_start = Instant::now();
-                    let _ = run_replacement_selection_tol(scanner, &mut sink, run_size);
-                    let (local_runs, sketch) = sink.finalize();
-                    let total_time_ms = thread_start.elapsed().as_millis();
-                    println!(
-                        "Run gen thread {} ({}) {} ms, {} runs generated",
-                        thread_id,
-                        algorithm,
-                        total_time_ms,
-                        local_runs.len()
-                    );
-                    RunGenerationThreadResult {
-                        runs: local_runs,
-                        sketch,
-                        load_ms: 0,
-                        sort_ms: total_time_ms,
-                        store_ms: 0,
-                    }
-                }
-                RunGenerationAlgorithm::TreeOfLosersWithOVC => {
-                    let thread_start = Instant::now();
-                    let _ = run_replacement_selection_ovc(scanner, &mut sink, run_size);
-                    let (local_runs, sketch) = sink.finalize();
-                    let total_time_ms = thread_start.elapsed().as_millis();
-                    println!(
-                        "Run gen thread {} ({}) {} ms, {} runs generated",
-                        thread_id,
-                        algorithm,
-                        total_time_ms,
-                        local_runs.len()
-                    );
-                    RunGenerationThreadResult {
-                        runs: local_runs,
-                        sketch,
-                        load_ms: 0,
-                        sort_ms: total_time_ms,
-                        store_ms: 0,
-                    }
-                }
+            let thread_start = Instant::now();
+            let _ = worker_hooks.run_replacement_selection(scanner, &mut sink, run_size);
+            let (local_runs, sketch) = sink.finalize();
+            let total_time_ms = thread_start.elapsed().as_millis();
+            println!(
+                "Run gen thread {} {} ms, {} runs generated",
+                thread_id,
+                total_time_ms,
+                local_runs.len()
+            );
+            RunGenerationThreadResult {
+                runs: local_runs,
+                sketch,
+                load_ms: 0,
+                sort_ms: total_time_ms,
+                store_ms: 0,
             }
         };
 

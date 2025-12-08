@@ -96,8 +96,16 @@ impl RunFormat for OvcRunFormat {
         (record.1, record.2)
     }
 
-    fn algorithm() -> crate::sort::core::engine::RunGenerationAlgorithm {
-        crate::sort::core::engine::RunGenerationAlgorithm::TreeOfLosersWithOVC
+    fn run_replacement_selection<
+        S: crate::sort::run_sink::RunSink<
+                MergeableRun = crate::sort::core::run_format::MergeableRun<Self>,
+            >,
+    >(
+        scanner: crate::sort::core::engine::Scanner,
+        sink: &mut S,
+        run_size: usize,
+    ) -> crate::replacement_selection::ReplacementSelectionStats {
+        crate::replacement_selection::run_replacement_selection_ovc(scanner, sink, run_size)
     }
 }
 
@@ -127,7 +135,6 @@ mod tests {
     use crate::ovc::offset_value_coding::compute_ovc_delta;
     use crate::rand::small_thread_rng;
     use crate::sort::core::run_format::RunWriterSink;
-    use crate::sort::engine::RunGenerationAlgorithm;
     use crate::sort::ovc::run::RunWithOVC;
     use crate::sort::run_sink::RunSink;
     use crate::{InMemInput, sketch::SketchType};

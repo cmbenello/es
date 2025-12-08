@@ -69,8 +69,16 @@ impl RunFormat for PlainRunFormat {
         record
     }
 
-    fn algorithm() -> crate::sort::core::engine::RunGenerationAlgorithm {
-        crate::sort::core::engine::RunGenerationAlgorithm::TreeOfLosers
+    fn run_replacement_selection<
+        S: crate::sort::run_sink::RunSink<
+                MergeableRun = crate::sort::core::run_format::MergeableRun<Self>,
+            >,
+    >(
+        scanner: crate::sort::core::engine::Scanner,
+        sink: &mut S,
+        run_size: usize,
+    ) -> crate::replacement_selection::ReplacementSelectionStats {
+        crate::replacement_selection::run_replacement_selection_tol(scanner, sink, run_size)
     }
 }
 
@@ -100,7 +108,6 @@ mod tests {
     use crate::diskio::file::SharedFd;
     use crate::rand::small_thread_rng;
     use crate::sketch::SketchType;
-    use crate::sort::engine::RunGenerationAlgorithm;
     use rand::seq::SliceRandom;
     use std::sync::Arc;
     use tempfile::TempDir;
