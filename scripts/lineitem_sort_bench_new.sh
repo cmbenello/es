@@ -79,7 +79,7 @@ run_calculated_case() {
 echo "=== EXP 1: SCALABILITY (2GB RAM) ==="
 # 4, 8, 16 should be Safe. 24 Borderline. 32, 40 Fail.
 for t in 4 8 16 24 32 40 44; do
-  run_calculated_case "Exp1" "$t" "2" "--ovc"
+  run_calculated_case "Exp1" "$t" "2"
   cooldown
 done
 
@@ -89,12 +89,42 @@ done
 echo "=== EXP 2: MEMORY CLIFF (40 THREADS) ==="
 # 8, 6, 4 should be Safe. 2, 1 Fail.
 # We skip 2 to avoid overlap with Exp 1.
-for m in 8 6 4 2 1; do
+for m in 32 24 16 8 6 4 2 1; do
   # Skip overlap with Exp 1
   if [[ "$m" == "2" ]]; then continue; fi
 
-  run_calculated_case "Exp2" "40" "$m" "--ovc"
+  run_calculated_case "Exp2" "40" "$m"
   cooldown
 done
+
+
+# ==============================================================================
+# EXPERIMENT 3: OVC VS NO-OVC (40 Threads)
+# ==============================================================================
+echo "=== EXP 3: NO-OVC (40 THREADS) ==="
+for m in 32 24 16 8 6 4 2 1; do
+  run_calculated_case "Exp3" "40" "$m" "--ovc false"
+  cooldown
+done
+
+
+# ==============================================================================
+# EXPERIMENT 4: Reservoir Sampling vs KLL (Fixed 2GB RAM)
+# ==============================================================================
+echo "=== EXP 4: SKETCHING IMPACT (2GB RAM) ==="
+for t in 4 8 16 24 32 40 44; do
+  run_calculated_case "Exp4" "$t" "2" "--sketch-type reservoir-sampling"
+  cooldown
+done
+
+# ==============================================================================
+# EXPERIMENT 5: Imbalance Impact (Fixed 2GB RAM, 24 Threads)
+# ==============================================================================
+echo "=== EXP 5: IMBALANCE FACTOR IMPACT (24 THREADS, 2GB RAM) ==="
+for i in 1.0 1.5 2.0 3.0 4.0; do
+  run_calculated_case "Exp5_Imbalance${i}" "24" "2" "--imbalance-factor ${i}"
+  cooldown
+done
+
 
 echo "Done. Results in ${OUT_DIR}"
