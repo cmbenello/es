@@ -6,8 +6,7 @@ set -euo pipefail
 # =========================
 ES_ROOT="/mnt/nvme1/cmbenello/es"            # repo root (where the bench script lives)
 SCRIPT="${ES_ROOT}/lineitem_csv_bin.sh"       # your benchmark driver
-SRC_DIR="/mnt/nvme1/cmbenello/es/sf500"       # where the data lives on NVMe
-TANK_DIR="/tank/local/cb"                     # where you store final files on ZFS
+SRC_DIR="/mnt/nvme1/cmbenello/data/sf100"       # where the data lives on NVMe
 CLEAN_DIR="${ES_ROOT}"                        # directory where warmup*/176* temp dirs live
 
 CSV="${SRC_DIR}/lineitem.csv"
@@ -92,54 +91,3 @@ done
 echo "[2/6] Global cleanup after KVBin phase" | tee -a "${LOG}"
 clean_temps
 
-# =========================
-# 3) Rsync KVBin + idx -> tank
-# =========================
-echo "[3/6] Rsync KVBin + idx to ${TANK_DIR} ..." | tee -a "${LOG}"
-if [[ -f "${KVBIN}" ]]; then
-  rsync -aHAX --progress "${KVBIN}" "${TANK_DIR}/" 2>&1 | tee -a "${LOG}"
-else
-  echo "WARN: ${KVBIN} not found; skipping copy." | tee -a "${LOG}"
-fi
-
-if [[ -f "${IDX}" ]]; then
-  rsync -aHAX --progress "${IDX}" "${TANK_DIR}/" 2>&1 | tee -a "${LOG}"
-else
-  echo "WARN: ${IDX} not found; skipping copy." | tee -a "${LOG}"
-fi
-
-# =========================
-# 4) Remove CSV on NVMe
-# =========================
-echo "[4/6] Removing CSV on NVMe: ${CSV}" | tee -a "${LOG}"
-rm -f "${CSV}"
-
-# =========================
-# 5) Rsync CSV back from tank -> NVMe
-# =========================
-echo "[5/6] Copy CSV from ${TANK_DIR} -> ${SRC_DIR} ..." | tee -a "${LOG}"
-if [[ -f "${TANK_DIR}/lineitem.csv" ]]; then
-  rsync -aHAX --progress "${TANK_DIR}/lineitem.csv" "${SRC_DIR}/" 2>&1 | tee -a "${LOG}"
-else
-  echo "ERROR: ${TANK_DIR}/lineitem.csv not found; cannot copy back." | tee -a "${LOG}"
-  # Keep going, but CSV phase will likely fail; still clean and exit gracefully later.
-fi
-
-# Touch zero-length placeholders if you want to ensure paths exist
-touch "${KVBIN}" "${IDX}" 2>/dev/null || true
-
-# =========================
-# 6) CSV-only benchmarks (per run-size, OVC=both)
-# =========================
-echo "[6/6] CSV benchmarks, per run-size..." | tee -a "${LOG}"
-for rs in "${RUN_SIZES[@]}"; do
-  run_with_cleanup \
-    "CSV --ovc=both --rs=${rs}" \
-    "${SCRIPT}" \
-      --mode=csv --ovc=both \
-      --csv="${CSV}" \
-      --kvbin="${KVBIN}" \
-      --rs="${rs}"
-done
-
-echo "==== Overnight run finished @ $(date -Is) ====" | tee -a "${LOG}"
