@@ -9,10 +9,10 @@ if [[ ${1-} == "" ]]; then
 fi
 
 INPUT_CSV=$1
-if [[ ! -f "$INPUT_CSV" ]]; then
-  echo "Input CSV not found: $INPUT_CSV" >&2
-  exit 1
-fi
+# if [[ ! -f "$INPUT_CSV" ]]; then
+#   echo "Input CSV not found: $INPUT_CSV" >&2
+#   exit 1
+# fi
 
 TS=$(date +"%Y-%m-%d_%H-%M-%S")
 OUT_DIR=${2:-"logs/lineitem_bench_${TS}"}
