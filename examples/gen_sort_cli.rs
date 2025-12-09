@@ -1,4 +1,4 @@
-use clap::Parser;
+use clap::{ArgAction, Parser};
 use es::benchmark::{
     BenchmarkConfig, BenchmarkInputProvider, BenchmarkResult, BenchmarkRunner,
     GenSortInputProvider, SimpleVerifier, print_benchmark_summary,
@@ -53,7 +53,7 @@ struct SortArgs {
     cooldown_seconds: u64,
 
     /// Use OVC (Offset Value Coding) format
-    #[arg(long, default_value = "true")]
+    #[arg(long, default_value_t = true, action = ArgAction::Set)]
     ovc: bool,
 
     /// Threads for run generation

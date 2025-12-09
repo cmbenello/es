@@ -1,4 +1,4 @@
-use clap::Parser;
+use clap::{ArgAction, Parser};
 
 use es::benchmark::input::KvBinInputProvider;
 use es::benchmark::{
@@ -78,7 +78,7 @@ struct Args {
     run_gen_threads: Option<usize>,
 
     /// Use OVC (Offset Value Coding) format
-    #[arg(long, default_value = "true")]
+    #[arg(long, default_value_t = true, action = ArgAction::Set)]
     ovc: bool,
 
     /// Threads for merge phase
