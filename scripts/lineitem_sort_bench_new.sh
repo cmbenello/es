@@ -103,7 +103,7 @@ done
 # ==============================================================================
 echo "=== EXP 3: NO-OVC (40 THREADS) ==="
 for m in 32 24 16 8 6 4 2 1; do
-  run_calculated_case "Exp3" "40" "$m" "--ovc false"
+  run_calculated_case "Exp3" "40" "$m" "--ovc=false"
   cooldown
 done
 
