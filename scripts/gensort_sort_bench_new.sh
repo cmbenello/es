@@ -107,6 +107,14 @@ for m in 32 24 16 8 6 4 2 1; do
   cooldown
 done
 
+# ==============================================================================
+# EXPERIMENT 3.1: OVC VS NO-OVC (40 Threads)
+# ==============================================================================
+echo "=== EXP 3.1: NO-OVC (Scalability, 2GB RAM) ==="
+for t in 4 8 16 24 32 40 44; do
+  run_calculated_case "Exp3.1" "$t" "2" "--ovc=false"
+  cooldown
+done
 
 # ==============================================================================
 # EXPERIMENT 4: Reservoir Sampling vs KLL (Fixed 2GB RAM)
@@ -125,6 +133,7 @@ for i in 1.0 1.5 2.0 3.0 4.0; do
   run_calculated_case "Exp5_Imbalance${i}" "24" "2" "--imbalance-factor ${i}"
   cooldown
 done
+
 
 
 echo "Done. Results in ${OUT_DIR}"
