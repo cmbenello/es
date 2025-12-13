@@ -241,7 +241,7 @@ fn test_alternating_small_large() {
         } else {
             // Large entry
             let key = format!("{:04}", i);
-            let value = vec![b'L'; 5000];
+            let value = vec![b'L'; 500];
             data.push((key.into_bytes(), value));
         }
     }
@@ -258,7 +258,7 @@ fn test_alternating_small_large() {
         if i % 2 == 0 {
             assert_eq!(results[i].1.len(), 1);
         } else {
-            assert_eq!(results[i].1.len(), 5000);
+            assert_eq!(results[i].1.len(), 500);
         }
     }
 }

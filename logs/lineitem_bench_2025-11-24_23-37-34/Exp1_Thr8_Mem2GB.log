@@ -1,0 +1,113 @@
+warning[E0133]: call to unsafe function `libc::posix_fadvise` is unsafe and requires unsafe block
+   --> src/kvbin.rs:267:19
+    |
+267 |         let ret = libc::posix_fadvise(fd, 0, 0, libc::POSIX_FADV_DONTNEED);
+    |                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ call to unsafe function
+    |
+    = note: for more information, see <https://doc.rust-lang.org/nightly/edition-guide/rust-2024/unsafe-op-in-unsafe-fn.html>
+    = note: consult the function's documentation for information on how to avoid undefined behavior
+note: an unsafe function restricts its caller, but its body is safe by default
+   --> src/kvbin.rs:263:1
+    |
+263 | unsafe fn drop_cache(fd: i32) {
+    | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    = note: `#[warn(unsafe_op_in_unsafe_fn)]` on by default
+
+For more information about this error, try `rustc --explain E0133`.
+warning: `es` (lib) generated 1 warning (run `cargo fix --lib -p es` to apply 1 suggestion)
+    Finished `release` profile [optimized] target(s) in 0.19s
+     Running `target/release/examples/lineitem_benchmark_cli -n Exp1_Thr8_Mem2GB -i /tank/local/riki/lineitem_sf500.csv --run-gen-threads 8 --merge-threads 8 --run-size-mb 256.00 --merge-fanin 4096 --warmup-runs 0 --benchmark-runs 1 --cooldown-seconds 30 --dir logs/lineitem_bench_2025-11-24_23-37-34/Exp1_Thr8_Mem2GB_tmp --ovc`
+Using existing KVBin file: "./datasets/lineitem_sf500.k-8-9-13-14-15.v-0-3.kvbin"
+
+=== BENCHMARK MODE ===
+KVBin data: ./datasets/lineitem_sf500.k-8-9-13-14-15.v-0-3.kvbin, index: ./datasets/lineitem_sf500.k-8-9-13-14-15.v-0-3.kvbin.idx
+Estimated data size: 199659.46 MB
+Run generation threads: 8
+Run generation algorithm: replacement-selection
+Run size (MB): 256.00
+Run generation memory (MB): 2048.0
+Merge threads: 8
+Merge fan-in: 4096
+Merge memory (MB): 2048.0
+OVC enabled: true
+Temporary directory: "logs/lineitem_bench_2025-11-24_23-37-34/Exp1_Thr8_Mem2GB_tmp"
+Warmup runs: 0
+Runs per configuration: 1
+Cooldown between runs (s): 30
+Verify output: false
+
+Running benchmark for config: Exp1_Thr8_Mem2GB
+Parameters: Run Gen Threads: 8, Run Gen Algorithm: replacement-selection, Run Size: 256.00 MB, Run Gen Memory: 2048.0 MB, Merge Threads: 8, Merge Fanin: 4096, Merge Memory: 2048.0 MB, Imbalance Factor: 1.0
+================================================================================
+  Run 1/1: Starting sort with 8 parallel scanners for run generation
+Run gen thread 6 (ReplacementSelection) 1610732 ms, 50 runs generated
+Run gen thread 0 (ReplacementSelection) 1613149 ms, 50 runs generated
+Run gen thread 5 (ReplacementSelection) 1767929 ms, 50 runs generated
+Run gen thread 4 (ReplacementSelection) 1792847 ms, 50 runs generated
+Run gen thread 3 (ReplacementSelection) 1793120 ms, 50 runs generated
+Run gen thread 7 (ReplacementSelection) 1798386 ms, 50 runs generated
+Run gen thread 2 (ReplacementSelection) 1813297 ms, 50 runs generated
+Run gen thread 1 (ReplacementSelection) 1820745 ms, 50 runs generated
+Generated 400 runs in 1820896 ms
+Merging 400 runs using 8 threads
+Merge phase took 500284 ms | Merged 3000028242 entries across 8 runs | Thread timing: min=446997 ms, max=500282 ms | Partition sizes: imbalance=1.04x
+SortStats:
+  Number of runs: 400
+  (R) time: 1820896 ms
+  (R) breakdown: load=0 ms, sort=1751275 ms, store=0 ms
+  (R) I/O stats: I/O Stats: Read Ops: 3194554, Read Bytes: 209358278501, Write Ops: 2029219, Write Bytes: 132986652672
+  (M) time: 500284 ms
+  Read amplification:
+    Run generation writes: 132986652672 bytes (123.85 GB)
+    Merge phase reads: 133257610752 bytes (124.11 GB)
+    Read amplification factor: 1.00x
+    Excess reads: 0.2% (sparse indexing overhead)
+  Thread timing:
+    Min thread time: 446997 ms
+    Max thread time: 500282 ms
+    Avg thread time: 482364 ms
+    Time imbalance factor (max/avg): 1.04x
+    Thread times: [488995, 495263, 461796, 497949, 500282, 446997, 494353, 473278]
+
+2321.18s
+
+
+================================================================================================================================================================
+Benchmark Results Summary
+================================================================================================================================================================
+Config               Run Size   RG Runs    Gen Thr    Merge Thr  Total (s)  RunGen (s)   Merge (s)  Entries      Throughput       Read MB    Write MB  
+                     (MB)                                                                                        (M entries/s)                         
+----------------------------------------------------------------------------------------------------------------------------------------------------------------
+Exp1_Thr8_Mem2GB[1]  256.0      400        8          8          2321.18      1820.90    500.28     3000028242   1.29             326744.0   223593.5  
+Exp1_Thr8_Mem2GB[avg] 256.0      400        8          8          2321.18      1820.90    500.28     3000028242   1.29             326744.0   223593.5  
+================================================================================================================================================================
+
+================================================================================================================================================================
+Merge Operations Summary (showing last 1 of 1 merge passes)
+================================================================================================================================================================
+Config               M1PAvg     M1PMax     M1Imbal    M1Slow       M1Fast      
+----------------------------------------------------------------------------------------------------------------------------------------------------------------
+Exp1_Thr8_Mem2GB[1]  375003530  388885007  1.04       500.28       500.28      
+----------------------------------------------------------------------------------------------------------------------------------------------------------------
+Exp1_Thr8_Mem2GB[avg] 375003530  388885007  1.04       500.28       500.28      
+================================================================================================================================================================
+
+================================================================================================================================================================
+Detailed I/O Statistics
+================================================================================================================================================================
+Config               RG Read MB   RG Write MB  M1Read MB    M1Write MB  
+----------------------------------------------------------------------------------------------------------------------------------------------------------------
+Exp1_Thr8_Mem2GB[1]  199659.6     126826.0     127084.4     96767.6     
+----------------------------------------------------------------------------------------------------------------------------------------------------------------
+Exp1_Thr8_Mem2GB[avg] 199659.6     126826.0     127084.4     96767.6     
+================================================================================================================================================================
+
+====================================================================================================
+Run Generation Time Breakdown
+====================================================================================================
+Config               RG Total s   Load s       Sort s       Store s     
+----------------------------------------------------------------------------------------------------
+Exp1_Thr8_Mem2GB[1]  1820.90      0            1751.275     0           
+----------------------------------------------------------------------------------------------------
+Exp1_Thr8_Mem2GB[avg] 1820.90      0.00         1751.28      0.00        
+====================================================================================================

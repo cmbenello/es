@@ -1,10 +1,13 @@
-use clap::Parser;
+use clap::{ArgAction, Parser};
+
 use es::benchmark::input::KvBinInputProvider;
 use es::benchmark::{
     BenchmarkConfig, BenchmarkInputProvider, BenchmarkResult, BenchmarkRunner,
     LineitemCsvInputProvider, LineitemCsvVerifier, print_benchmark_summary,
 };
 use es::diskio::constants::DEFAULT_BUFFER_SIZE;
+use es::kvbin::{binary_file_name, create_kvbin_from_input};
+use es::sketch::SketchType;
 use std::path::PathBuf;
 
 // TPC-H lineitem column cardinality reference table
@@ -47,19 +50,26 @@ use std::path::PathBuf;
 
 #[derive(Parser)]
 #[command(name = "lineitem_benchmark")]
-#[command(about = "TPC-H Lineitem Sort Benchmark (CSV or KVBin)")]
+#[command(about = "TPC-H Lineitem CSV Sort Benchmark")]
 struct Args {
-    /// Friendly name recorded in results
     #[arg(short, default_value = "no_name")]
     name: String,
 
-    /// Input file path (.csv or .kvbin)
+    /// Input CSV file path
     #[arg(short, long)]
     input: PathBuf,
+
+    /// Use KVBin binary format for input. Create if not existing.
+    #[arg(long, default_value = "true")]
+    use_binary_format: bool,
 
     /// Threads for run generation
     #[arg(long, required_unless_present = "estimate_size")]
     run_gen_threads: Option<usize>,
+
+    /// Use OVC (Offset Value Coding) format
+    #[arg(long, default_value_t = true, action = ArgAction::Set)]
+    ovc: bool,
 
     /// Threads for merge phase
     #[arg(long, required_unless_present = "estimate_size")]
@@ -77,15 +87,19 @@ struct Args {
     #[arg(long, default_value = "1.0")]
     imbalance_factor: f64,
 
-    /// Key column indices (CSV only; comma-separated)
+    /// Key column indices (comma-separated)
     #[arg(short = 'k', long, default_value = "8,9,13,14,15")]
     key_columns: String,
 
-    /// Value column indices (CSV only; comma-separated)
+    /// Value column indices (comma-separated)
     #[arg(short = 'v', long, default_value = "0,3")]
     value_columns: String,
 
-    /// Sketch size for quantile estimation (KLL)
+    /// Sketch type for quantile estimation (`kll` or `reservoir-sampling`)
+    #[arg(long, default_value = "kll", value_name = "SKETCH")]
+    sketch_type: SketchType,
+
+    /// Sketch size for quantile estimation
     #[arg(long, default_value = "200")]
     sketch_size: usize,
 
@@ -97,23 +111,19 @@ struct Args {
     #[arg(long, default_value = "1000")]
     run_indexing_interval: usize,
 
-    /// Use OVC encoding for keys
-    #[arg(long, default_value = "false")]
-    ovc: bool,
-
     /// Directory for temporary files
     #[arg(short, long, default_value = ".")]
     dir: PathBuf,
 
-    /// CSV delimiter character (CSV only)
+    /// CSV delimiter character
     #[arg(long, default_value = ",")]
     delimiter: char,
 
-    /// CSV has headers (CSV only)
+    /// CSV has headers
     #[arg(long, default_value = "true")]
     headers: bool,
 
-    /// Verify sorted output (CSV verifier)
+    /// Verify sorted output
     #[arg(long, default_value = "false")]
     verify: bool,
 
@@ -144,40 +154,51 @@ fn parse_columns(column_str: &str) -> Vec<usize> {
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args = Args::parse();
 
-    // Decide CSV vs KVBin by extension
-    let ext = args
-        .input
-        .extension()
-        .and_then(|e| e.to_str())
-        .unwrap_or("")
-        .to_ascii_lowercase();
+    // Parse column indices
+    let key_columns = parse_columns(&args.key_columns);
+    let value_columns = parse_columns(&args.value_columns);
 
-    // Build provider
-    let input_provider: Box<dyn BenchmarkInputProvider> = if ext == "kvbin" {
-        Box::new(KvBinInputProvider {
-            path: args.input.clone(),
-        })
+    let input_provider = if args.use_binary_format {
+        let (data_path, idx_path) = binary_file_name(&args.input, &key_columns, &value_columns)?;
+        if data_path.exists() && idx_path.exists() {
+            println!("Using existing KVBin file: {:?}", data_path);
+            Box::new(KvBinInputProvider::new(data_path, idx_path))
+                as Box<dyn BenchmarkInputProvider>
+        } else {
+            println!("Creating KVBin file: {:?}", data_path);
+            let start = std::time::Instant::now();
+            // Create KVBin input provider by converting from CSV
+            let csv_provider = LineitemCsvInputProvider::new(
+                args.input,
+                key_columns.clone(),
+                value_columns,
+                args.delimiter,
+                args.headers,
+            );
+            create_kvbin_from_input(csv_provider.create_sort_input()?, &data_path, &idx_path, 0)?;
+            let duration = start.elapsed();
+            println!("KVBin file created in {:.2?}", duration);
+            Box::new(KvBinInputProvider::new(data_path, idx_path))
+                as Box<dyn BenchmarkInputProvider>
+        }
     } else {
-        let key_columns = parse_columns(&args.key_columns);
-        let value_columns = parse_columns(&args.value_columns);
-
         Box::new(LineitemCsvInputProvider::new(
-            args.input.clone(),
+            args.input,
             key_columns.clone(),
             value_columns,
             args.delimiter,
             args.headers,
-        ))
+        )) as Box<dyn BenchmarkInputProvider>
     };
 
-    // Estimate-only mode
+    // If only estimating size, compute and print, then exit
     if args.estimate_size {
         let estimated_mb = input_provider.estimate_data_size_mb()?;
         println!("Estimated data size: {:.2} MB", estimated_mb);
         return Ok(());
     }
 
-    // Required params for full run
+    // Unwrap required args (clap enforces presence when not estimating)
     let run_gen_threads = args
         .run_gen_threads
         .expect("--run-gen-threads required unless --estimate-size");
@@ -191,19 +212,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .merge_fanin
         .expect("--merge-fanin required unless --estimate-size");
 
-    // Benchmark config
+    // Create benchmark configuration
     let config = BenchmarkConfig {
         config_name: args.name,
         warmup_runs: args.warmup_runs,
         benchmark_runs: args.benchmark_runs,
         cooldown_seconds: args.cooldown_seconds,
         verify: args.verify,
-        ovc: args.ovc,
         temp_dir: args.dir,
+        sketch_type: args.sketch_type,
         sketch_size: args.sketch_size,
         sketch_sampling_interval: args.sketch_sampling_interval,
         run_indexing_interval: args.run_indexing_interval,
         run_gen_threads,
+        use_ovc: args.ovc,
         run_size_mb,
         run_gen_memory_mb: run_size_mb * run_gen_threads as f64,
         merge_threads,
@@ -214,18 +236,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         imbalance_factor: args.imbalance_factor,
     };
 
-    // Runner
+    // Create benchmark runner
     let mut runner = BenchmarkRunner::new(config, input_provider);
 
-    // CSV-only verification
-    if args.verify && ext != "kvbin" {
-        let key_columns = parse_columns(&args.key_columns);
+    // Set up verification if requested
+    if args.verify {
         let verifier = LineitemCsvVerifier::new(key_columns);
         runner.set_verifier(Box::new(verifier));
     }
 
-    // Run and summarize
+    // Run single benchmark configuration
     let result: BenchmarkResult = runner.run_configuration()?;
+
+    // Print comprehensive summary
     print_benchmark_summary(&result);
+
     Ok(())
 }

@@ -1,9 +1,13 @@
-use clap::Parser;
+use clap::{ArgAction, Parser};
+
+use es::benchmark::input::KvBinInputProvider;
 use es::benchmark::{
     BenchmarkConfig, BenchmarkInputProvider, BenchmarkResult, BenchmarkRunner,
     YellowTaxiCsvInputProvider, YellowTaxiCsvVerifier, print_benchmark_summary,
 };
 use es::diskio::constants::DEFAULT_BUFFER_SIZE;
+use es::kvbin::{binary_file_name, create_kvbin_from_input};
+use es::sketch::SketchType;
 use std::path::PathBuf;
 
 // NYC Yellow Taxi Dataset Column Reference
@@ -61,6 +65,10 @@ struct Args {
     #[arg(short, long)]
     input: PathBuf,
 
+    /// Use KVBin binary format for input. Create if not existing.
+    #[arg(long, default_value = "true")]
+    use_binary_format: bool,
+
     /// Only estimate dataset size (MB) and exit
     #[arg(long, default_value = "false")]
     estimate_size: bool,
@@ -68,6 +76,10 @@ struct Args {
     /// Threads for run generation
     #[arg(long, required_unless_present = "estimate_size")]
     run_gen_threads: Option<usize>,
+
+    /// Use OVC (Offset Value Coding) format
+    #[arg(long, default_value_t = true, action = ArgAction::Set)]
+    ovc: bool,
 
     /// Threads for merge phase
     #[arg(long, required_unless_present = "estimate_size")]
@@ -99,7 +111,11 @@ struct Args {
     #[arg(short = 'v', long, default_value = "0")]
     value_columns: String,
 
-    /// Sketch size for quantile estimation (KLL)
+    /// Sketch type for quantile estimation (`kll` or `reservoir-sampling`)
+    #[arg(long, default_value = "kll", value_name = "SKETCH")]
+    sketch_type: SketchType,
+
+    /// Sketch size for quantile estimation
     #[arg(long, default_value = "200")]
     sketch_size: usize,
 
@@ -110,10 +126,6 @@ struct Args {
     /// Run indexing interval (store every Nth key in the run index)
     #[arg(long, default_value = "1000")]
     run_indexing_interval: usize,
-
-    /// Use OVC encoding for keys
-    #[arg(long, default_value = "false")]
-    ovc: bool,
 
     /// Directory for temporary files
     #[arg(short, long, default_value = ".")]
@@ -159,13 +171,38 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let value_columns = parse_columns(&args.value_columns);
 
     // Create input provider for CSV files
-    let input_provider = YellowTaxiCsvInputProvider::new(
-        args.input,
-        key_columns.clone(),
-        value_columns,
-        args.delimiter,
-        args.headers,
-    );
+    let input_provider = if args.use_binary_format {
+        let (data_path, idx_path) = binary_file_name(&args.input, &key_columns, &value_columns)?;
+        if data_path.exists() && idx_path.exists() {
+            println!("Using existing KVBin file: {:?}", data_path);
+            Box::new(KvBinInputProvider::new(data_path, idx_path))
+                as Box<dyn BenchmarkInputProvider>
+        } else {
+            println!("Creating KVBin file: {:?}", data_path);
+            let start = std::time::Instant::now();
+            // Create KVBin input provider by converting from CSV
+            let csv_provider = YellowTaxiCsvInputProvider::new(
+                args.input,
+                key_columns.clone(),
+                value_columns,
+                args.delimiter,
+                args.headers,
+            );
+            create_kvbin_from_input(csv_provider.create_sort_input()?, &data_path, &idx_path, 0)?;
+            let duration = start.elapsed();
+            println!("KVBin file created in {:.2?}", duration);
+            Box::new(KvBinInputProvider::new(data_path, idx_path))
+                as Box<dyn BenchmarkInputProvider>
+        }
+    } else {
+        Box::new(YellowTaxiCsvInputProvider::new(
+            args.input,
+            key_columns.clone(),
+            value_columns,
+            args.delimiter,
+            args.headers,
+        ))
+    };
 
     // If only estimating size, compute and print, then exit
     if args.estimate_size {
@@ -195,12 +232,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         benchmark_runs: args.benchmark_runs,
         cooldown_seconds: args.cooldown_seconds,
         verify: args.verify,
-        ovc: args.ovc,
         temp_dir: args.dir,
+        sketch_type: args.sketch_type,
         sketch_size: args.sketch_size,
         sketch_sampling_interval: args.sketch_sampling_interval,
         run_indexing_interval: args.run_indexing_interval,
         run_gen_threads,
+        use_ovc: args.ovc,
         run_size_mb,
         run_gen_memory_mb: run_size_mb * run_gen_threads as f64,
         merge_threads,
@@ -210,8 +248,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             * (DEFAULT_BUFFER_SIZE as f64 / 1024.0 / 1024.0),
         imbalance_factor: args.imbalance_factor,
     };
-
-    let input_provider = Box::new(input_provider);
 
     // Create benchmark runner
     let mut runner = BenchmarkRunner::new(config, input_provider);

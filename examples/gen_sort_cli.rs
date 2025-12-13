@@ -1,9 +1,10 @@
-use clap::Parser;
+use clap::{ArgAction, Parser};
 use es::benchmark::{
     BenchmarkConfig, BenchmarkInputProvider, BenchmarkResult, BenchmarkRunner,
     GenSortInputProvider, SimpleVerifier, print_benchmark_summary,
 };
 use es::diskio::constants::DEFAULT_BUFFER_SIZE;
+use es::sketch::SketchType;
 use std::path::PathBuf;
 
 #[derive(Parser)]
@@ -15,7 +16,11 @@ struct SortArgs {
     #[arg(short, long)]
     input: PathBuf,
 
-    /// Sketch size for quantile estimation (KLL)
+    /// Sketch type for quantile estimation (`kll` or `reservoir-sampling`)
+    #[arg(long, default_value = "kll", value_name = "SKETCH")]
+    sketch_type: SketchType,
+
+    /// Sketch size for quantile estimation
     #[arg(long, default_value = "200")]
     sketch_size: usize,
 
@@ -26,10 +31,6 @@ struct SortArgs {
     /// Run indexing interval (store every Nth key in the run index)
     #[arg(long, default_value = "1000")]
     run_indexing_interval: usize,
-
-    /// Use OVC encoding for keys
-    #[arg(long, default_value = "false")]
-    ovc: bool,
 
     /// Directory for temporary files
     #[arg(short, long, default_value = ".")]
@@ -50,6 +51,10 @@ struct SortArgs {
     /// Cooldown seconds between runs
     #[arg(long, default_value = "0")]
     cooldown_seconds: u64,
+
+    /// Use OVC (Offset Value Coding) format
+    #[arg(long, default_value_t = true, action = ArgAction::Set)]
+    ovc: bool,
 
     /// Threads for run generation
     #[arg(long, required_unless_present = "estimate_size")]
@@ -110,12 +115,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         benchmark_runs: args.benchmark_runs,
         cooldown_seconds: args.cooldown_seconds,
         verify: args.verify,
-        ovc: args.ovc,
         temp_dir: args.dir,
+        sketch_type: args.sketch_type,
         sketch_size: args.sketch_size,
         sketch_sampling_interval: args.sketch_sampling_interval,
         run_indexing_interval: args.run_indexing_interval,
         run_gen_threads,
+        use_ovc: args.ovc,
         run_size_mb,
         run_gen_memory_mb: run_size_mb * run_gen_threads as f64,
         merge_threads,

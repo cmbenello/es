@@ -36,8 +36,9 @@ impl BenchmarkRunner {
 
         println!("Running benchmark for config: {}", self.config.config_name);
         println!(
-            "Parameters: Run Gen Threads: {}, Run Size: {:.2} MB, Run Gen Memory: {:.1} MB, Merge Threads: {}, Merge Fanin: {}, Merge Memory: {:.1} MB, Imbalance Factor: {:.1}",
+            "Parameters: Run Gen Threads: {}, Use OVC: {}, Run Size: {:.2} MB, Run Gen Memory: {:.1} MB, Merge Threads: {}, Merge Fanin: {}, Merge Memory: {:.1} MB, Imbalance Factor: {:.1}",
             self.config.run_gen_threads,
+            self.config.use_ovc,
             self.config.run_size_mb,
             self.config.run_gen_memory_mb,
             self.config.merge_threads,
@@ -68,6 +69,7 @@ impl BenchmarkRunner {
         }
         println!("Estimated data size: {:.2} MB", dataset_mb);
         println!("Run generation threads: {}", self.config.run_gen_threads);
+        println!("Use OVC: {}", self.config.use_ovc);
         println!("Run size (MB): {:.2}", self.config.run_size_mb);
         println!(
             "Run generation memory (MB): {:.1}",
@@ -76,7 +78,12 @@ impl BenchmarkRunner {
         println!("Merge threads: {}", self.config.merge_threads);
         println!("Merge fan-in: {}", self.config.merge_fanin);
         println!("Merge memory (MB): {:.1}", self.config.merge_memory_mb);
-        println!("OVC enabled: {}", self.config.ovc);
+        println!("Sketch type: {}", self.config.sketch_type);
+        println!("Sketch size: {}", self.config.sketch_size);
+        println!(
+            "Run indexing interval: {}",
+            self.config.run_indexing_interval
+        );
         println!("Temporary directory: {:?}", self.config.temp_dir);
         println!("Warmup runs: {}", self.config.warmup_runs);
         println!("Runs per configuration: {}", self.config.benchmark_runs);
@@ -106,11 +113,12 @@ impl BenchmarkRunner {
 
             let input = self.input_provider.create_sort_input()?;
 
-            let (run_gen_stats, multi_merge_stats) = if self.config.ovc {
+            let (run_gen_stats, multi_merge_stats) = if self.config.use_ovc {
                 let (runs, sketch, run_gen_stats) = ExternalSorterWithOVC::run_generation(
                     input,
                     self.config.run_gen_threads as usize,
                     (self.config.run_size_mb * 1024.0 * 1024.0) as usize,
+                    self.config.sketch_type,
                     self.config.sketch_size,
                     self.config.sketch_sampling_interval,
                     self.config.run_indexing_interval,
@@ -133,6 +141,7 @@ impl BenchmarkRunner {
                     input,
                     self.config.run_gen_threads as usize,
                     (self.config.run_size_mb * 1024.0 * 1024.0) as usize,
+                    self.config.sketch_type,
                     self.config.sketch_size,
                     self.config.sketch_sampling_interval,
                     self.config.run_indexing_interval,
@@ -249,11 +258,12 @@ impl BenchmarkRunner {
         input: Box<dyn SortInput>,
         temp_dir: &Path,
     ) -> Result<Box<dyn SortOutput>, Box<dyn std::error::Error>> {
-        let output = if self.config.ovc {
+        let output = if self.config.use_ovc {
             let (runs, sketch, run_gen_stats) = ExternalSorterWithOVC::run_generation(
                 input,
                 self.config.run_gen_threads as usize,
                 (self.config.run_size_mb * 1024.0 * 1024.0) as usize,
+                self.config.sketch_type,
                 self.config.sketch_size,
                 self.config.sketch_sampling_interval,
                 self.config.run_indexing_interval,
@@ -278,6 +288,7 @@ impl BenchmarkRunner {
                 input,
                 self.config.run_gen_threads as usize,
                 (self.config.run_size_mb * 1024.0 * 1024.0) as usize,
+                self.config.sketch_type,
                 self.config.sketch_size,
                 self.config.sketch_sampling_interval,
                 self.config.run_indexing_interval,

@@ -1,295 +1,285 @@
 // src/kvbin.rs
+use std::fs;
+use std::os::fd::AsRawFd;
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
+
+use crate::SortInput;
 use std::fs::{File, OpenOptions};
-use std::io::{BufRead, BufReader, BufWriter, Seek, SeekFrom, Write};
-use std::path::Path;
+use std::os::unix::fs::FileExt;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::thread; // Linux/Mac用: 位置指定書き込み
 
-use arrow::datatypes::{DataType, Schema};
-use memchr::memchr;
-use smallvec::SmallVec;
-
-use crate::input_reader::csv_input_direct::CsvDirectConfig;
-use crate::order_preserving_encoding::*;
-
-// --------------------- fast parsers ---------------------
-
-#[inline(always)]
-fn fast_parse_i64(s: &[u8]) -> Result<i64, String> {
-    if s.is_empty() {
-        return Ok(0);
-    }
-    let mut i = 0usize;
-    let mut neg = false;
-    if s[0] == b'-' {
-        neg = true;
-        i = 1;
-    }
-    let mut v: i64 = 0;
-    while i < s.len() {
-        let d = s[i].wrapping_sub(b'0');
-        if d > 9 {
-            return Err(format!("bad i64 digit in {:?}", String::from_utf8_lossy(s)));
-        }
-        v = v * 10 + d as i64;
-        i += 1;
-    }
-    Ok(if neg { -v } else { v })
-}
-
-#[inline(always)]
-fn fast_parse_i32(s: &[u8]) -> Result<i32, String> {
-    Ok(fast_parse_i64(s)? as i32)
-}
-
-#[inline(always)]
-fn fast_parse_f64(s: &[u8]) -> Result<f64, String> {
-    if s.is_empty() {
-        return Ok(0.0);
-    }
-    let mut i = 0usize;
-    let mut neg = false;
-    if s[0] == b'-' {
-        neg = true;
-        i = 1;
-    }
-    let mut int: i64 = 0;
-    while i < s.len() && s[i] != b'.' {
-        let d = s[i].wrapping_sub(b'0');
-        if d > 9 {
-            return Err(format!("bad f64 int in {:?}", String::from_utf8_lossy(s)));
-        }
-        int = int * 10 + d as i64;
-        i += 1;
-    }
-    let mut frac: i64 = 0;
-    let mut flen = 0i32;
-    if i < s.len() && s[i] == b'.' {
-        i += 1;
-        while i < s.len() {
-            let d = s[i].wrapping_sub(b'0');
-            if d > 9 {
-                return Err(format!("bad f64 frac in {:?}", String::from_utf8_lossy(s)));
-            }
-            frac = frac * 10 + d as i64;
-            flen += 1;
-            i += 1;
-        }
-    }
-    let mut v = int as f64;
-    if flen > 0 {
-        v += (frac as f64) / 10f64.powi(flen);
-    }
-    Ok(if neg { -v } else { v })
-}
-
-// days-from-civil (Howard Hinnant)
-#[inline(always)]
-fn days_from_civil(y: i32, m: i32, d: i32) -> i32 {
-    let (y, m) = if m <= 2 { (y - 1, m + 12) } else { (y, m) };
-    let era = if y >= 0 { y } else { y - 399 } / 400;
-    let yoe = y - era * 400;
-    let doy = (153 * (m - 3) + 2) / 5 + d - 1;
-    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
-    era * 146_097 + doe
-}
-
-#[inline(always)]
-fn fast_parse_date32_yyyy_mm_dd(s: &[u8]) -> Result<i32, String> {
-    // expects "YYYY-MM-DD"
-    if s.len() < 10 {
-        return Err("date too short".into());
-    }
-    let y = (s[0] - b'0') as i32 * 1000
-        + (s[1] - b'0') as i32 * 100
-        + (s[2] - b'0') as i32 * 10
-        + (s[3] - b'0') as i32;
-    let m = (s[5] - b'0') as i32 * 10 + (s[6] - b'0') as i32;
-    let d = (s[8] - b'0') as i32 * 10 + (s[9] - b'0') as i32;
-    Ok(days_from_civil(y, m, d) - days_from_civil(1970, 1, 1))
-}
-
-// --------------------- CSV split & type conversion ---------------------
-
-#[inline(always)]
-fn split_fields_bytes<'a>(row: &'a [u8], delim: u8) -> SmallVec<[&'a [u8]; 32]> {
-    let mut out: SmallVec<[&[u8]; 32]> = SmallVec::new();
-
-    // trim trailing CR/LF
-    let mut end = row.len();
-    while end > 0 && (row[end - 1] == b'\n' || row[end - 1] == b'\r') {
-        end -= 1;
-    }
-
-    let mut s = 0usize;
-    let mut i = 0usize;
-    while i <= end {
-        let e = if i == end {
-            end
-        } else if let Some(j) = memchr(delim, &row[i..end]) {
-            i + j
-        } else {
-            end
-        };
-        out.push(&row[s..e]);
-        if e == end {
-            break;
-        }
-        i = e + 1;
-        s = i;
-    }
-    out
-}
-
-#[inline(always)]
-fn convert_bytes(s: &[u8], dt: &DataType) -> Result<Vec<u8>, String> {
-    use DataType::*;
-    match dt {
-        Int64 => Ok(i64_to_order_preserving_bytes(fast_parse_i64(s)?).to_vec()),
-        Int32 => Ok(i32_to_order_preserving_bytes(fast_parse_i32(s)?).to_vec()),
-        Float64 => Ok(f64_to_order_preserving_bytes(fast_parse_f64(s)?).to_vec()),
-        Float32 => Ok(f32_to_order_preserving_bytes(fast_parse_f64(s)? as f32).to_vec()),
-        Date32 => Ok(i32_to_order_preserving_bytes(fast_parse_date32_yyyy_mm_dd(s)?).to_vec()),
-        Utf8 | LargeUtf8 | Binary | LargeBinary => Ok(s.to_vec()),
-        other => Err(format!("unsupported type: {:?}", other)),
-    }
-}
-
-// --------------------- Public converters ---------------------
-
-/// Convert CSV → KVBin using std::io::BufReader (robust line path).
-/// Writes optional checkpoint index (.idx) every `idx_every` records (0 = none).
-/// Returns (rows_written, checkpoints_written).
-pub fn convert_csv_to_bin_with_index_bufio(
-    input: impl AsRef<Path>,
-    output: impl AsRef<Path>,
-    cfg: CsvDirectConfig,
-    idx_every: usize,
-) -> Result<(u64, u64), String> {
-    // input
-    let f_in = File::open(&input).map_err(|e| format!("open input: {e}"))?;
-    let mut rdr = BufReader::new(f_in);
-
-    // output
-    let f_out = File::create(&output).map_err(|e| format!("create out: {e}"))?;
-    let mut out = BufWriter::new(f_out);
-
-    // optional index file
-    let mut idx_file = if idx_every > 0 {
-        let idx_path = output.as_ref().with_extension("idx");
-        Some(BufWriter::new(
-            File::create(&idx_path).map_err(|e| format!("create idx: {e}"))?,
-        ))
-    } else {
-        None
+pub fn binary_file_name(
+    input_path: &Path,
+    key_columns: &[usize],
+    value_columns: &[usize],
+) -> Result<(PathBuf, PathBuf), String> {
+    // Helper to stringify column indices like "0-2-5"
+    let cols_to_str = |cols: &[usize]| {
+        cols.iter()
+            .map(usize::to_string)
+            .collect::<Vec<_>>()
+            .join("-")
     };
 
-    // separate handle to query current output length when checkpointing
-    let mut out_len_handle = OpenOptions::new()
-        .read(true)
-        .write(true)
-        .open(&output)
-        .map_err(|e| format!("reopen out for pos: {e}"))?;
+    let key_str = cols_to_str(key_columns);
+    let value_str = cols_to_str(value_columns);
 
-    let schema: &Schema = &cfg.schema;
+    let file_stem = input_path
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .ok_or_else(|| "invalid input file name".to_string())?;
 
-    // skip header if present
-    let mut line = String::new();
-    if cfg.has_headers {
-        line.clear();
-        rdr.read_line(&mut line)
-            .map_err(|e| format!("read header: {e}"))?;
-    }
+    // Use ./datasets directory and create it if it doesn't exist
+    let datasets_dir = PathBuf::from("./datasets");
+    fs::create_dir_all(&datasets_dir)
+        .map_err(|e| format!("failed to create datasets directory: {}", e))?;
 
-    // bounds check
-    let max_needed = cfg
-        .key_columns
-        .iter()
-        .chain(cfg.value_columns.iter())
-        .copied()
-        .max()
-        .unwrap_or(0);
+    // e.g. input: data.csv -> data.k-0-2.v-3-4.kvbin
+    let data_file = format!("{file_stem}.k-{key_str}.v-{value_str}.kvbin");
+    let idx_file = format!("{data_file}.idx");
 
-    let mut rows: u64 = 0;
-    let mut checkpoints: u64 = 0;
-
-    loop {
-        line.clear();
-        let n = rdr
-            .read_line(&mut line)
-            .map_err(|e| format!("read line: {e}"))?;
-        if n == 0 {
-            break; // EOF
-        }
-        if line.trim().is_empty() {
-            continue;
-        }
-
-        let fields = split_fields_bytes(line.as_bytes(), cfg.delimiter);
-        if fields.len() <= max_needed {
-            // malformed line, skip
-            continue;
-        }
-
-        // build key
-        let mut key = Vec::with_capacity(64);
-        for (i, &col) in cfg.key_columns.iter().enumerate() {
-            if i > 0 {
-                key.push(0);
-            }
-            let dt = schema.field(col).data_type();
-            key.extend(convert_bytes(fields[col], dt)?);
-        }
-
-        // build value
-        let mut val = Vec::with_capacity(64);
-        for (i, &col) in cfg.value_columns.iter().enumerate() {
-            if i > 0 {
-                val.push(0);
-            }
-            let dt = schema.field(col).data_type();
-            val.extend(convert_bytes(fields[col], dt)?);
-        }
-
-        // write [klen][key][vlen][val]
-        let klen = key.len() as u32;
-        let vlen = val.len() as u32;
-        out.write_all(&klen.to_le_bytes())
-            .map_err(|e| e.to_string())?;
-        out.write_all(&key).map_err(|e| e.to_string())?;
-        out.write_all(&vlen.to_le_bytes())
-            .map_err(|e| e.to_string())?;
-        out.write_all(&val).map_err(|e| e.to_string())?;
-
-        rows += 1;
-
-        // periodic checkpoint
-        if idx_every > 0 && rows % (idx_every as u64) == 0 {
-            out.flush().map_err(|e| e.to_string())?;
-            // current output length = seek to end
-            let pos = out_len_handle
-                .seek(SeekFrom::End(0))
-                .map_err(|e| format!("seek out for pos: {e}"))?;
-            if let Some(ref mut idx) = idx_file {
-                idx.write_all(&pos.to_le_bytes())
-                    .map_err(|e| e.to_string())?;
-                checkpoints += 1;
-            }
-        }
-    }
-
-    out.flush().map_err(|e| e.to_string())?;
-    if let Some(mut idx) = idx_file {
-        idx.flush().map_err(|e| e.to_string())?;
-    }
-
-    Ok((rows, checkpoints))
+    Ok((datasets_dir.join(data_file), datasets_dir.join(idx_file)))
 }
 
-/// Back-compat wrapper (no index).
-pub fn convert_csv_to_bin(
-    input: impl AsRef<Path>,
-    output: impl AsRef<Path>,
-    cfg: CsvDirectConfig,
+// --- Configuration Constants ---
+
+// Flush data buffer every 4MB.
+// This size is chosen to maximize throughput on SSDs/HDDs by issuing large sequential writes.
+const DATA_FLUSH_THRESHOLD: usize = 4 * 1024 * 1024;
+
+// Flush index buffer every 64KB.
+// Since we only write one index entry per 4MB data block, this buffer will fill up very slowly.
+// This is extremely efficient (very few syscalls for the index file).
+const IDX_FLUSH_THRESHOLD: usize = 64 * 1024;
+
+/// Writes KV pairs to a binary file using multiple threads.
+///
+/// Format: [klen:u32][key][vlen:u32][val]
+/// Index:  [offset:u64]
+///         Points to the start of each 4MB data block.
+///
+/// # Architecture
+/// - Block-based Indexing: Instead of indexing every N rows, we index the start of every flushed block.
+/// - Lock-free file positioning: Uses `AtomicU64` to reserve file space.
+pub fn create_kvbin_from_input(
+    sort_input: Box<dyn SortInput>,
+    data_path: impl AsRef<Path>,
+    idx_path: impl AsRef<Path>,
+    mut num_threads: usize,
+) -> Result<(u64, u64), String> {
+    // Auto-detect threads if 0 is passed
+    if num_threads == 0 {
+        num_threads = std::thread::available_parallelism()
+            .map(|n| n.get().saturating_sub(4).max(4))
+            .unwrap_or(4);
+    }
+
+    println!(
+        "[kvbin] Starting PARALLEL creation with {} threads...",
+        num_threads
+    );
+    println!(
+        "[kvbin] Indexing strategy: One checkpoint every ~{} MB block",
+        DATA_FLUSH_THRESHOLD / 1024 / 1024
+    );
+
+    // 1. Open files (Shared via Arc)
+    let data_file = OpenOptions::new()
+        .create(true)
+        .write(true)
+        .truncate(true)
+        .open(data_path)
+        .map_err(|e| format!("failed to open data file: {}", e))?;
+    let data_file = Arc::new(data_file);
+
+    let idx_file = OpenOptions::new()
+        .create(true)
+        .write(true)
+        .truncate(true)
+        .open(idx_path)
+        .map_err(|e| format!("failed to open idx file: {}", e))?;
+    let idx_file = Arc::new(idx_file);
+
+    // 2. Global Atomic Offsets
+    let global_data_offset = Arc::new(AtomicU64::new(0));
+    let global_idx_offset = Arc::new(AtomicU64::new(0));
+
+    // Statistics
+    let total_rows = Arc::new(AtomicU64::new(0));
+    let total_checkpoints = Arc::new(AtomicU64::new(0));
+
+    // 3. Create Scanners
+    let scanners = sort_input.create_parallel_scanners(num_threads, None);
+
+    // 4. Thread Execution
+    thread::scope(|s| -> Result<(), String> {
+        let mut handles = vec![];
+
+        for scanner in scanners {
+            // Clone Arcs for the thread
+            let data_file = Arc::clone(&data_file);
+            let idx_file = Arc::clone(&idx_file);
+            let global_data_offset = Arc::clone(&global_data_offset);
+            let global_idx_offset = Arc::clone(&global_idx_offset);
+            let total_rows = Arc::clone(&total_rows);
+            let total_checkpoints = Arc::clone(&total_checkpoints);
+
+            let handle = s.spawn(move || -> Result<(), String> {
+                // Thread-local buffers
+                let mut data_buf: Vec<u8> = Vec::with_capacity(DATA_FLUSH_THRESHOLD + 4096);
+                let mut idx_buf: Vec<u8> = Vec::with_capacity(IDX_FLUSH_THRESHOLD + 4096);
+
+                let mut local_rows: u64 = 0;
+                let mut local_checkpoints: u64 = 0;
+
+                for (key, val) in scanner {
+                    local_rows += 1;
+
+                    // Serialize to buffer: [klen][key][vlen][val]
+                    data_buf.extend_from_slice(&(key.len() as u32).to_le_bytes());
+                    data_buf.extend_from_slice(&key);
+                    data_buf.extend_from_slice(&(val.len() as u32).to_le_bytes());
+                    data_buf.extend_from_slice(&val);
+
+                    // --- Flush Data Buffer Check ---
+                    if data_buf.len() >= DATA_FLUSH_THRESHOLD {
+                        let write_size = data_buf.len() as u64;
+                        let my_data_offset =
+                            global_data_offset.fetch_add(write_size, Ordering::Relaxed);
+                        data_file
+                            .write_all_at(&data_buf, my_data_offset)
+                            .map_err(|e| format!("pwrite data failed: {}", e))?;
+                        idx_buf.extend_from_slice(&my_data_offset.to_le_bytes());
+                        local_checkpoints += 1;
+                        data_buf.clear();
+                    }
+
+                    if idx_buf.len() >= IDX_FLUSH_THRESHOLD {
+                        flush_index_buf(&idx_file, &global_idx_offset, &mut idx_buf)?;
+                    }
+                }
+
+                // --- Final Cleanup ---
+
+                // Flush remaining data
+                if !data_buf.is_empty() {
+                    let write_size = data_buf.len() as u64;
+                    let my_data_offset =
+                        global_data_offset.fetch_add(write_size, Ordering::Relaxed);
+                    data_file
+                        .write_all_at(&data_buf, my_data_offset)
+                        .map_err(|e| format!("pwrite remaining data failed: {}", e))?;
+                    idx_buf.extend_from_slice(&my_data_offset.to_le_bytes());
+                    local_checkpoints += 1;
+                }
+
+                if !idx_buf.is_empty() {
+                    flush_index_buf(&idx_file, &global_idx_offset, &mut idx_buf)?;
+                }
+
+                total_rows.fetch_add(local_rows, Ordering::Relaxed);
+                total_checkpoints.fetch_add(local_checkpoints, Ordering::Relaxed);
+
+                Ok(())
+            });
+            handles.push(handle);
+        }
+
+        let mut errors = Vec::new();
+        for h in handles {
+            match h.join() {
+                Ok(Ok(())) => {}
+                Ok(Err(e)) => {
+                    eprintln!("[kvbin] Error in worker thread: {}", e);
+                    errors.push(e);
+                }
+                Err(_) => {
+                    let err = "worker thread panicked".to_string();
+                    eprintln!("[kvbin] {}", err);
+                    errors.push(err);
+                }
+            }
+        }
+
+        if !errors.is_empty() {
+            return Err(format!(
+                "kvbin creation failed: {} thread(s) encountered errors",
+                errors.len()
+            ));
+        }
+
+        Ok(())
+    })?;
+
+    println!("[kvbin] Flushing file buffers to disk...");
+    data_file
+        .sync_all()
+        .map_err(|e| format!("sync data failed: {}", e))?;
+    idx_file
+        .sync_all()
+        .map_err(|e| format!("sync idx failed: {}", e))?;
+
+    println!("[kvbin] Evicting files from OS Page Cache...");
+
+    unsafe {
+        drop_cache(data_file.as_raw_fd());
+        drop_cache(idx_file.as_raw_fd());
+    }
+
+    let final_rows = total_rows.load(Ordering::Relaxed);
+    let final_checkpoints = total_checkpoints.load(Ordering::Relaxed);
+
+    println!(
+        "[kvbin] Completed. Rows: {}, Checkpoints (Blocks): {}",
+        final_rows, final_checkpoints
+    );
+
+    println!("[kvbin] Sleeping 30 seconds to allow OS to settle disk writes...");
+    std::thread::sleep(std::time::Duration::from_secs(30));
+
+    Ok((final_rows, final_checkpoints))
+}
+
+/// Helper: Flushes the index buffer to the file using atomic reservation.
+fn flush_index_buf(
+    file: &File,
+    global_offset: &AtomicU64,
+    buf: &mut Vec<u8>,
 ) -> Result<(), String> {
-    let (_rows, _ckpts) = convert_csv_to_bin_with_index_bufio(input, output, cfg, 0)?;
+    let size = buf.len() as u64;
+    // Reserve space
+    let offset = global_offset.fetch_add(size, Ordering::Relaxed);
+    // Write at reserved position
+    file.write_all_at(buf, offset)
+        .map_err(|e| format!("pwrite index failed: {}", e))?;
+
+    buf.clear();
     Ok(())
+}
+
+// OSごとの実装を分けるヘルパー関数
+unsafe fn drop_cache(fd: i32) {
+    // --- Linux の場合 ---
+    #[cfg(target_os = "linux")]
+    {
+        let ret = unsafe { libc::posix_fadvise(fd, 0, 0, libc::POSIX_FADV_DONTNEED) };
+        if ret != 0 {
+            eprintln!(
+                "[kvbin] Warning: posix_fadvise failed on Linux (err: {})",
+                ret
+            );
+        }
+    }
+
+    // --- macOS の場合 ---
+    #[cfg(target_os = "macos")]
+    {
+        // F_NOCACHE: このファイルに対するキャッシュを無効化する
+        let ret = unsafe { libc::fcntl(fd, libc::F_NOCACHE, 1) };
+        if ret == -1 {
+            eprintln!("[kvbin] Warning: fcntl(F_NOCACHE) failed on macOS");
+        }
+    }
 }

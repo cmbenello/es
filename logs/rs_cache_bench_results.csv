@@ -1,0 +1,11 @@
+HeapSize_KB,Algo,Ops_Per_Sec,Latency_ns,Latency_StdDev_ns
+32,TournamentTree,42761906,23.39,0.66
+32,BinaryHeap,14764597,67.73,1.00
+256,TournamentTree,33483881,29.87,0.14
+256,BinaryHeap,8269785,120.92,0.56
+4096,TournamentTree,24963494,40.06,0.11
+4096,BinaryHeap,4063090,246.12,3.97
+32768,TournamentTree,19561068,51.12,0.26
+32768,BinaryHeap,3168440,315.61,37.85
+131072,TournamentTree,17061539,58.61,0.93
+131072,BinaryHeap,1446935,691.12,39.14

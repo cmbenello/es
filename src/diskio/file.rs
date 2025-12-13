@@ -1,30 +1,25 @@
 use libc::{c_void, fstat, off_t, pread, pwrite};
 use std::os::unix::io::RawFd;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::{io, os::fd::IntoRawFd};
 
 use crate::diskio::constants::{DIRECT_IO_ALIGNMENT, open_file_with_direct_io};
 
 pub struct SharedFd {
     fd: RawFd,
-}
-
-impl From<RawFd> for SharedFd {
-    fn from(fd: RawFd) -> Self {
-        Self { fd }
-    }
+    path: PathBuf,
+    delete_on_drop: bool,
 }
 
 impl SharedFd {
-    /// Create a new SharedFd from a raw file descriptor
-    pub fn new(fd: RawFd) -> Self {
-        Self { fd }
-    }
-
-    pub fn new_from_path(path: impl AsRef<Path>) -> io::Result<Self> {
+    pub fn new_from_path(path: impl AsRef<Path>, delete_on_drop: bool) -> io::Result<Self> {
         let file = open_file_with_direct_io(path.as_ref())?;
         let fd = file.into_raw_fd();
-        Ok(Self { fd })
+        Ok(Self {
+            fd,
+            path: path.as_ref().to_path_buf(),
+            delete_on_drop,
+        })
     }
 
     /// Get the raw file descriptor
@@ -35,12 +30,56 @@ impl SharedFd {
 
 impl Drop for SharedFd {
     fn drop(&mut self) {
-        // Close the file descriptor when SharedFd is dropped
+        // 1. CHECK LOGIC: Only attempt cleanup if requested
+        if self.delete_on_drop {
+            unsafe {
+                // 2. TRUNCATE (Critical Step):
+                // We must do this BEFORE closing the FD.
+                // This forces the OS to free the blocks immediately.
+                libc::ftruncate(self.fd, 0);
+            }
+
+            // 3. REMOVE PATH:
+            // Unlink the filename from the directory.
+            // We ignore errors here because Drop cannot return a Result
+            // and we don't want to panic if the file is already gone.
+            if std::fs::remove_file(&self.path).is_ok() {
+                // Optional: Sync parent directory to persist the removal
+                sync_parent_directory(&self.path);
+            }
+        }
+
+        // 4. CLOSE FD:
+        // Now it is safe to close the descriptor.
         unsafe {
             libc::close(self.fd);
         }
     }
 }
+
+#[cfg(target_family = "unix")]
+fn sync_parent_directory(path: &std::path::Path) {
+    if let Some(parent) = path.parent() {
+        // Rust's File::open creates a read-only FD, which is sufficient
+        // for fsyncing a directory on Linux/Unix.
+        if let Ok(dir_file) = std::fs::File::open(parent) {
+            unsafe {
+                use std::os::unix::io::AsRawFd;
+                // Use fsync on Linux too. It is standard, faster, and sufficient.
+                libc::fsync(dir_file.as_raw_fd());
+            }
+            return;
+        }
+    }
+
+    // Fallback: only nuking the whole system sync if we couldn't open the parent
+    unsafe {
+        libc::sync();
+    }
+}
+
+#[cfg(not(target_family = "unix"))]
+fn sync_parent_directory(_path: &Path) {}
 
 /// Get the size of a file using its raw file descriptor
 pub fn file_size_fd(fd: RawFd) -> io::Result<u64> {
@@ -119,5 +158,40 @@ pub fn pwrite_fd(fd: RawFd, buf: &[u8], offset: u64) -> io::Result<usize> {
         Err(io::Error::last_os_error())
     } else {
         Ok(result as usize)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::NamedTempFile;
+
+    #[test]
+    fn test_file_deleted_on_drop() {
+        // Create a temporary file
+        let temp_file = NamedTempFile::new().unwrap();
+        let path = temp_file.path().to_path_buf();
+
+        // Keep the file by persisting it (so it's not deleted when NamedTempFile drops)
+        let file = temp_file.persist(&path).unwrap();
+        drop(file);
+
+        // Verify file exists
+        assert!(
+            path.exists(),
+            "File should exist before SharedFd is created"
+        );
+
+        // Create SharedFd with delete_on_drop = true
+        {
+            let _shared_fd = SharedFd::new_from_path(&path, true).unwrap();
+            // SharedFd will be dropped at the end of this scope
+        }
+
+        // Verify file is deleted after drop
+        assert!(
+            !path.exists(),
+            "File should be deleted after SharedFd is dropped"
+        );
     }
 }
