@@ -72,6 +72,54 @@ run_calculated_case() {
   rm -rf "$temp_dir"
 }
 
+run_asymmetric_case() {
+  local exp_prefix="$1"
+  local run_gen_threads="$2"
+  local merge_threads="$3"
+  local mem_gb="$4"
+  local extra_flags="${5-}"
+
+  # Use the max of run_gen and merge threads for buffer calculations
+  local max_threads=$(( run_gen_threads > merge_threads ? run_gen_threads : merge_threads ))
+
+  # 1. Calculate Buffer Size (MB) per thread
+  # run_size_mb = (MemGB * 1024) / MaxThreads
+  local run_size_mb=$(echo "scale=2; ($mem_gb * 1024) / $max_threads" | bc)
+
+  # 2. Calculate Max Feasible Fan-In (Physical Limit)
+  # FanIn <= (MemGB * 1024^2) / (MergeThreads * PageKB)
+  local max_fanin=$(echo "($mem_gb * 1024 * 1024) / ($merge_threads * $PAGE_SIZE_KB)" | bc)
+
+  local name="${exp_prefix}_RunGen${run_gen_threads}_Merge${merge_threads}_Mem${mem_gb}GB"
+  local temp_dir="${OUT_DIR}/${name}_tmp"
+  mkdir -p "$temp_dir"
+
+  echo "----------------------------------------------------------------"
+  echo "BENCHMARK: $name"
+  echo "  Mem Constraint: ${mem_gb} GB"
+  echo "  Run Gen Threads: $run_gen_threads"
+  echo "  Merge Threads:   $merge_threads"
+  echo "  Buffer/Thread:   $run_size_mb MB"
+  echo "  Max Fan-In:      $max_fanin"
+  echo "----------------------------------------------------------------"
+
+  cargo run --release --example gen_sort_cli -- \
+    -n "$name" \
+    -i "$INPUT_DATA" \
+    --run-gen-threads "$run_gen_threads" \
+    --merge-threads "$merge_threads" \
+    --run-size-mb "$run_size_mb" \
+    --merge-fanin "$max_fanin" \
+    --warmup-runs 1 \
+    --benchmark-runs 3 \
+    --cooldown-seconds 30 \
+    --dir "$temp_dir" \
+    $extra_flags 2>&1 | tee -a "${OUT_DIR}/${name}.log"
+
+  rm -rf "$temp_dir"
+}
+
+
 # ==============================================================================
 # EXPERIMENT 1: SCALABILITY TRAP (Fixed 2GB RAM)
 # ==============================================================================
@@ -81,6 +129,25 @@ for t in 4 8 16 24 32 40 44; do
   run_calculated_case "Exp1" "$t" "2"
   cooldown
 done
+
+# ==============================================================================
+# EXPERIMENT 1.1: ASYMMETRIC THREADS - Fixed Run Gen 40, Vary Merge (2GB RAM)
+# ==============================================================================
+echo "=== EXP 1.1: ASYMMETRIC (Fixed RunGen=40, Vary Merge, 2GB RAM) ==="
+for merge_t in 4 8 16 24 32 40; do
+  run_asymmetric_case "Exp1.1" "40" "$merge_t" "2"
+  cooldown
+done
+
+# ==============================================================================
+# EXPERIMENT 1.2: ASYMMETRIC THREADS - Fixed Merge 40, Vary Run Gen (2GB RAM)
+# ==============================================================================
+echo "=== EXP 1.2: ASYMMETRIC (Fixed Merge=40, Vary RunGen, 2GB RAM) ==="
+for rungen_t in 4 8 16 24 32 40; do
+  run_asymmetric_case "Exp1.2" "$rungen_t" "40" "2"
+  cooldown
+done
+
 
 # ==============================================================================
 # EXPERIMENT 2: MEMORY CLIFF (Fixed 40 Threads)
