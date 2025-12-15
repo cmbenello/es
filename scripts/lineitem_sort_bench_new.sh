@@ -122,6 +122,16 @@ run_asymmetric_case() {
 }
 
 # ==============================================================================
+# EXPERIMENT 1: SCALABILITY TRAP (Fixed 2GB RAM)
+# ==============================================================================
+echo "=== EXP 1: SCALABILITY (2GB RAM) ==="
+# 4, 8, 16 should be Safe. 24 Borderline. 32, 40 Fail.
+for t in 4 8 16 24 32 40 44; do
+  run_calculated_case "Exp1" "$t" "2"
+  cooldown
+done
+
+# ==============================================================================
 # EXPERIMENT 1.1: ASYMMETRIC THREADS - Fixed Run Gen 40, Vary Merge (2GB RAM)
 # ==============================================================================
 echo "=== EXP 1.1: ASYMMETRIC (Fixed RunGen=40, Vary Merge, 2GB RAM) ==="
@@ -136,16 +146,6 @@ done
 echo "=== EXP 1.2: ASYMMETRIC (Fixed Merge=40, Vary RunGen, 2GB RAM) ==="
 for rungen_t in 4 8 16 24 32 40; do
   run_asymmetric_case "Exp1.2" "$rungen_t" "40" "2"
-  cooldown
-done
-
-# ==============================================================================
-# EXPERIMENT 1: SCALABILITY TRAP (Fixed 2GB RAM)
-# ==============================================================================
-echo "=== EXP 1: SCALABILITY (2GB RAM) ==="
-# 4, 8, 16 should be Safe. 24 Borderline. 32, 40 Fail.
-for t in 4 8 16 24 32 40 44; do
-  run_calculated_case "Exp1" "$t" "2"
   cooldown
 done
 
