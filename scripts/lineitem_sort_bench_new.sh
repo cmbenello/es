@@ -80,12 +80,9 @@ run_asymmetric_case() {
   local mem_gb="$4"
   local extra_flags="${5-}"
 
-  # Use the max of run_gen and merge threads for buffer calculations
-  local max_threads=$(( run_gen_threads > merge_threads ? run_gen_threads : merge_threads ))
-
   # 1. Calculate Buffer Size (MB) per thread
-  # run_size_mb = (MemGB * 1024) / MaxThreads
-  local run_size_mb=$(echo "scale=2; ($mem_gb * 1024) / $max_threads" | bc)
+  # run_size_mb = (MemGB * 1024) / RunGenThreads
+  local run_size_mb=$(echo "scale=2; ($mem_gb * 1024) / $run_gen_threads" | bc)
 
   # 2. Calculate Max Feasible Fan-In (Physical Limit)
   # FanIn <= (MemGB * 1024^2) / (MergeThreads * PageKB)
