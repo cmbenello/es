@@ -128,51 +128,32 @@ for t in 4 8 16 24 32 40 44; do
 done
 
 # ==============================================================================
-# EXPERIMENT 1.1: ASYMMETRIC THREADS - Fixed Run Gen 40, Vary Merge (2GB RAM)
+# EXPERIMENT 2: MEMORY CLIFF (Fixed 44 Threads)
 # ==============================================================================
-echo "=== EXP 1.1: ASYMMETRIC (Fixed RunGen=40, Vary Merge, 2GB RAM) ==="
-for merge_t in 4 8 16 24 32 40; do
-  run_asymmetric_case "Exp1.1" "40" "$merge_t" "2"
-  cooldown
-done
-
-# ==============================================================================
-# EXPERIMENT 1.2: ASYMMETRIC THREADS - Fixed Merge 40, Vary Run Gen (2GB RAM)
-# ==============================================================================
-echo "=== EXP 1.2: ASYMMETRIC (Fixed Merge=40, Vary RunGen, 2GB RAM) ==="
-for rungen_t in 4 8 16 24 32 40; do
-  run_asymmetric_case "Exp1.2" "$rungen_t" "40" "2"
-  cooldown
-done
-
-
-# ==============================================================================
-# EXPERIMENT 2: MEMORY CLIFF (Fixed 40 Threads)
-# ==============================================================================
-echo "=== EXP 2: MEMORY CLIFF (40 THREADS) ==="
+echo "=== EXP 2: MEMORY CLIFF (44 THREADS) ==="
 # 8, 6, 4 should be Safe. 2, 1 Fail. 
 # We skip 2 to avoid overlap with Exp 1. 
 for m in 32 24 16 8 6 4 2 1; do
   # Skip overlap with Exp 1
   if [[ "$m" == "2" ]]; then continue; fi
   
-  run_calculated_case "Exp2" "40" "$m"
+  run_calculated_case "Exp2" "44" "$m"
   cooldown
 done
 
 
 # ==============================================================================
-# EXPERIMENT 3: OVC VS NO-OVC (40 Threads)
+# EXPERIMENT 3: OVC VS NO-OVC (44 Threads)
 # ==============================================================================
-echo "=== EXP 3: NO-OVC (40 THREADS) ==="
+echo "=== EXP 3: NO-OVC (44 THREADS) ==="
 for m in 32 24 16 8 6 4 2 1; do
   # Skip overlap with Exp 1
-  run_calculated_case "Exp3" "40" "$m" "--ovc=false"
+  run_calculated_case "Exp3" "44" "$m" "--ovc=false"
   cooldown
 done
 
 # ==============================================================================
-# EXPERIMENT 3.1: OVC VS NO-OVC (40 Threads)
+# EXPERIMENT 3.1: OVC VS NO-OVC (2GB RAM)
 # ==============================================================================
 echo "=== EXP 3.1: NO-OVC (Scalability, 2GB RAM) ==="
 for t in 4 8 16 24 32 40 44; do
@@ -198,6 +179,36 @@ for i in 1.0 1.5 2.0 3.0 4.0; do
   cooldown
 done
 
+# ==============================================================================
+# EXPERIMENT 6: THREAD CONFIGURATION GRID SEARCH (RunGen × Merge)
+# ==============================================================================
+# Purpose: Systematic exploration of thread configuration space to identify
+#          optimal (RunGen, Merge) combinations and phase interactions
+# ==============================================================================
+echo "=== EXP 6: THREAD CONFIGURATION GRID (RunGen × Merge, 2GB RAM) ==="
 
+RUNGEN_GRID=(4 8 16 24 32 40 44)
+MERGE_GRID=(4 8 16 24 32 40 44)
+
+config_count=0
+total_grid_configs=$((${#RUNGEN_GRID[@]} * ${#MERGE_GRID[@]}))
+
+echo "Grid dimensions: ${#RUNGEN_GRID[@]} × ${#MERGE_GRID[@]} = $total_grid_configs configs"
+
+for rg in "${RUNGEN_GRID[@]}"; do
+  for mg in "${MERGE_GRID[@]}"; do
+    # Skip symmetric cases (already covered in Exp1)
+    if [[ "$rg" == "$mg" ]]; then
+      echo ">>> Skipping ($rg, $mg) - symmetric case already in Exp1 <<<"
+      continue
+    fi
+
+    config_count=$((config_count + 1))
+    echo ">>> Grid Progress: $config_count / $total_grid_configs (asymmetric only) <<<"
+
+    run_asymmetric_case "Exp6" "$rg" "$mg" "2"
+    cooldown
+  done
+done
 
 echo "Done. Results in ${OUT_DIR}"
