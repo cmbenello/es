@@ -197,18 +197,26 @@ echo "Grid dimensions: ${#RUNGEN_GRID[@]} × ${#MERGE_GRID[@]} = $total_grid_con
 
 for rg in "${RUNGEN_GRID[@]}"; do
   for mg in "${MERGE_GRID[@]}"; do
-    # Skip symmetric cases (already covered in Exp1)
-    if [[ "$rg" == "$mg" ]]; then
-      echo ">>> Skipping ($rg, $mg) - symmetric case already in Exp1 <<<"
-      continue
-    fi
-
     config_count=$((config_count + 1))
     echo ">>> Grid Progress: $config_count / $total_grid_configs (asymmetric only) <<<"
 
     run_asymmetric_case "Exp6" "$rg" "$mg" "2"
     cooldown
   done
+done
+
+# ==============================================================================
+# EXPERIMENT 6_SYMMETRIC: SYMMETRIC THREAD CONFIGURATIONS ONLY
+# ==============================================================================
+echo "=== EXP 6_SYMMETRIC: SYMMETRIC THREAD CONFIGURATIONS (RunGen = Merge, 2GB RAM) ==="
+
+config_count=0
+for threads in "${RUNGEN_GRID[@]}"; do
+  config_count=$((config_count + 1))
+  echo ">>> Symmetric Progress: $config_count / ${#RUNGEN_GRID[@]} <<<"
+
+  run_asymmetric_case "Exp6_Symmetric" "$threads" "$threads" "2"
+  cooldown
 done
 
 echo "Done. Results in ${OUT_DIR}"
