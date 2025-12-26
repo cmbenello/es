@@ -171,12 +171,14 @@ for t in 4 8 16 24 32 40 44; do
 done
 
 # ==============================================================================
-# EXPERIMENT 5: Imbalance Impact (Fixed 2GB RAM, 24 Threads)
+# EXPERIMENT 5: Imbalance Impact (Fixed 2GB RAM, 4/24/44 Threads)
 # ==============================================================================
-echo "=== EXP 5: IMBALANCE FACTOR IMPACT (24 THREADS, 2GB RAM) ==="
-for i in 1.0 1.5 2.0 3.0 4.0; do
-  run_calculated_case "Exp5_Imbalance${i}" "24" "2" "--imbalance-factor ${i}"
-  cooldown
+echo "=== EXP 5: IMBALANCE FACTOR IMPACT (4/24/44 THREADS, 2GB RAM) ==="
+for t in 4 24 44; do
+  for i in 1.0 1.5 2.0 3.0 4.0; do
+    run_calculated_case "Exp5_Thr${t}_Imbalance${i}" "$t" "2" "--imbalance-factor ${i}"
+    cooldown
+  done
 done
 
 # ==============================================================================
@@ -204,19 +206,3 @@ for rg in "${RUNGEN_GRID[@]}"; do
     cooldown
   done
 done
-
-# ==============================================================================
-# EXPERIMENT 6_SYMMETRIC: SYMMETRIC THREAD CONFIGURATIONS ONLY
-# ==============================================================================
-echo "=== EXP 6_SYMMETRIC: SYMMETRIC THREAD CONFIGURATIONS (RunGen = Merge, 2GB RAM) ==="
-
-config_count=0
-for threads in "${RUNGEN_GRID[@]}"; do
-  config_count=$((config_count + 1))
-  echo ">>> Symmetric Progress: $config_count / ${#RUNGEN_GRID[@]} <<<"
-
-  run_asymmetric_case "Exp6_Symmetric" "$threads" "$threads" "2"
-  cooldown
-done
-
-echo "Done. Results in ${OUT_DIR}"
