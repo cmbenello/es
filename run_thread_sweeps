@@ -1,0 +1,10 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+echo "=== Running thread_mem_sweep.sh ==="
+./thread_mem_sweep.sh
+
+echo "=== Running thread_mem_sweep_fixed.sh ==="
+./thread_mem_sweep_fixed.sh
+
+echo "=== All sweeps complete ==="

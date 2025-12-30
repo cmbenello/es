@@ -5,18 +5,18 @@ set -euo pipefail
 # CONFIG — adjust paths as needed
 ########################################
 ES_ROOT="/mnt/nvme1/cmbenello/es"           # repo root
-SRC_DIR="/mnt/nvme1/cmbenello/data/sf100"   # where lineitem.{csv,kvbin,idx} live
+SRC_DIR="/mnt/nvme1/cmbenello/data/sf200"   # where lineitem.{csv,kvbin,idx} live
 
 CSV="${SRC_DIR}/lineitem.csv"
 KVBIN="${SRC_DIR}/lineitem.kvbin"
 
 # Thread sweeps
-RUN_GEN_THREADS=(32 24 16 8 4 2 1)
-MERGE_THREADS=(32 24 16 8 4 2 1)
+RUN_GEN_THREADS=(48 40 32 24 16 8 4 2 1)
+MERGE_THREADS=(48 40 32 24 16 8 4 2 1)
 
 # >>> Fixed total run-generation memory budgets (MB) <<<
 # Put just 2048 here if you only want 2 GB:
-MEM_BUDGETS_MB=(2048)
+MEM_BUDGETS_MB=(512 1024 256)
 
 # Bench config
 BENCHMARK_RUNS=1
