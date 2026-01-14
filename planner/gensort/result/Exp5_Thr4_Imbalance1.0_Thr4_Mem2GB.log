@@ -1,0 +1,237 @@
+warning: unused imports: `SeedableRng` and `rngs::SmallRng`
+ --> src/fastzipf.rs:2:12
+  |
+2 | use rand::{SeedableRng, rngs::SmallRng};
+  |            ^^^^^^^^^^^  ^^^^^^^^^^^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused import: `std::fmt`
+ --> src/sketch/reservoir_sampler.rs:6:5
+  |
+6 | use std::fmt;
+  |     ^^^^^^^^
+
+warning: unused import: `crate::sketch::kll::KLL`
+   --> src/sketch/reservoir_sampler.rs:190:9
+    |
+190 |     use crate::sketch::kll::KLL;
+    |         ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `super::*`
+   --> src/sketch/reservoir_sampler.rs:192:9
+    |
+192 |     use super::*;
+    |         ^^^^^^^^
+
+warning: unused import: `std::collections::HashMap`
+   --> src/sketch/mod.rs:226:9
+    |
+226 |     use std::collections::HashMap;
+    |         ^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `super::kll::*`
+   --> src/sketch/mod.rs:228:9
+    |
+228 |     use super::kll::*;
+    |         ^^^^^^^^^^^^^
+
+warning: unused import: `super::reservoir_sampler::*`
+   --> src/sketch/mod.rs:229:9
+    |
+229 |     use super::reservoir_sampler::*;
+    |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `super::*`
+   --> src/sketch/mod.rs:230:9
+    |
+230 |     use super::*;
+    |         ^^^^^^^^
+
+warning: unused import: `Duration`
+ --> src/sort/core/engine.rs:4:17
+  |
+4 | use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+  |                 ^^^^^^^^
+
+warning: function `compute_ovc_delta` is never used
+    --> src/ovc/offset_value_coding.rs:1136:15
+     |
+1136 | pub(crate) fn compute_ovc_delta(prev_key: Option<&[u8]>, key: &[u8]) -> OVCU64 {
+     |               ^^^^^^^^^^^^^^^^^
+     |
+     = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: `es` (lib) generated 10 warnings (run `cargo fix --lib -p es` to apply 9 suggestions)
+    Finished `release` profile [optimized] target(s) in 0.20s
+     Running `target/release/examples/gen_sort_cli -n Exp5_Thr4_Imbalance1.0_Thr4_Mem2GB -i ./datasets/gensort_200GiB.data --run-gen-threads 4 --merge-threads 4 --run-size-mb 512.00 --merge-fanin 8192 --warmup-runs 1 --benchmark-runs 3 --cooldown-seconds 30 --dir logs/resource_bench_2025-12-26_02-02-31/Exp5_Thr4_Imbalance1.0_Thr4_Mem2GB_tmp --imbalance-factor 1.0`
+
+=== BENCHMARK MODE ===
+GenSort file: "./datasets/gensort_200GiB.data"
+Total entries: 2147483648
+Estimated data size: 204800.00 MB
+Run generation threads: 4
+Use OVC: true
+Run size (MB): 512.00
+Run generation memory (MB): 2048.0
+Merge threads: 4
+Merge fan-in: 8192
+Merge memory (MB): 2048.0
+Sketch type: kll
+Sketch size: 200
+Run indexing interval: 1000
+Temporary directory: "logs/resource_bench_2025-12-26_02-02-31/Exp5_Thr4_Imbalance1.0_Thr4_Mem2GB_tmp"
+Warmup runs: 1
+Runs per configuration: 3
+Cooldown between runs (s): 30
+Verify output: false
+
+Running benchmark for config: Exp5_Thr4_Imbalance1.0_Thr4_Mem2GB
+Parameters: Run Gen Threads: 4, Use OVC: true, Run Size: 512.00 MB, Run Gen Memory: 2048.0 MB, Merge Threads: 4, Merge Fanin: 8192, Merge Memory: 2048.0 MB, Imbalance Factor: 1.0
+================================================================================
+  Performing 1 warmup run(s)...
+    Warmup 1/1: Starting sort with 4 parallel scanners for run generation
+Run gen thread 3 1458884 ms, 51 runs generated
+Run gen thread 0 1473844 ms, 51 runs generated
+Run gen thread 1 1481141 ms, 51 runs generated
+Run gen thread 2 1484179 ms, 51 runs generated
+Generated 204 runs in 1484247 ms
+Merging 204 runs using 4 threads
+Merge phase took 782056 ms | Merged 2147483648 entries across 4 runs | Thread timing: min=755950 ms, max=782055 ms | Partition sizes: imbalance=1.02x
+2266.30s
+  Warmup complete.
+
+  Run 1/3: Starting sort with 4 parallel scanners for run generation
+Run gen thread 0 1379974 ms, 51 runs generated
+Run gen thread 2 1392571 ms, 51 runs generated
+Run gen thread 3 1392961 ms, 51 runs generated
+Run gen thread 1 1407941 ms, 51 runs generated
+Generated 204 runs in 1408279 ms
+Merging 204 runs using 4 threads
+Merge phase took 815960 ms | Merged 2147483648 entries across 4 runs | Thread timing: min=790969 ms, max=815959 ms | Partition sizes: imbalance=1.01x
+SortStats:
+  Number of runs: 204
+  (R) time: 1408279 ms
+  (R) breakdown: load=0 ms, sort=1393361 ms, store=0 ms
+  (R) I/O stats: I/O Stats: Read Ops: 3276800, Read Bytes: 214748364800, Write Ops: 3801088, Write Bytes: 249108103168
+  (M) time: 815960 ms
+  Read amplification:
+    Run generation writes: 249108103168 bytes (232.00 GB)
+    Merge phase reads: 249195462656 bytes (232.08 GB)
+    Read amplification factor: 1.00x
+    Excess reads: 0.0% (sparse indexing overhead)
+  Thread timing:
+    Min thread time: 790969 ms
+    Max thread time: 815959 ms
+    Avg thread time: 807771 ms
+    Time imbalance factor (max/avg): 1.01x
+    Thread times: [808559, 815959, 815597, 790969]
+
+2224.24s
+
+  Cooling down for 30s before next run...
+  Run 2/3: Starting sort with 4 parallel scanners for run generation
+Run gen thread 3 1693500 ms, 51 runs generated
+Run gen thread 2 1700360 ms, 51 runs generated
+Run gen thread 0 1714222 ms, 51 runs generated
+Run gen thread 1 1734703 ms, 51 runs generated
+Generated 204 runs in 1734886 ms
+Merging 204 runs using 4 threads
+Merge phase took 890355 ms | Merged 2147483648 entries across 4 runs | Thread timing: min=872560 ms, max=890353 ms | Partition sizes: imbalance=1.02x
+SortStats:
+  Number of runs: 204
+  (R) time: 1734886 ms
+  (R) breakdown: load=0 ms, sort=1710696 ms, store=0 ms
+  (R) I/O stats: I/O Stats: Read Ops: 3276800, Read Bytes: 214748364800, Write Ops: 3801088, Write Bytes: 249108103168
+  (M) time: 890355 ms
+  Read amplification:
+    Run generation writes: 249108103168 bytes (232.00 GB)
+    Merge phase reads: 249195921408 bytes (232.08 GB)
+    Read amplification factor: 1.00x
+    Excess reads: 0.0% (sparse indexing overhead)
+  Thread timing:
+    Min thread time: 872560 ms
+    Max thread time: 890353 ms
+    Avg thread time: 880867 ms
+    Time imbalance factor (max/avg): 1.01x
+    Thread times: [874797, 872560, 885757, 890353]
+
+2625.24s
+
+  Cooling down for 30s before next run...
+  Run 3/3: Starting sort with 4 parallel scanners for run generation
+Run gen thread 3 1592246 ms, 51 runs generated
+Run gen thread 1 1612960 ms, 51 runs generated
+Run gen thread 0 1613574 ms, 51 runs generated
+Run gen thread 2 1629746 ms, 51 runs generated
+Generated 204 runs in 1629875 ms
+Merging 204 runs using 4 threads
+Merge phase took 836611 ms | Merged 2147483648 entries across 4 runs | Thread timing: min=829150 ms, max=836610 ms | Partition sizes: imbalance=1.01x
+SortStats:
+  Number of runs: 204
+  (R) time: 1629875 ms
+  (R) breakdown: load=0 ms, sort=1612131 ms, store=0 ms
+  (R) I/O stats: I/O Stats: Read Ops: 3276800, Read Bytes: 214748364800, Write Ops: 3801088, Write Bytes: 249108103168
+  (M) time: 836611 ms
+  Read amplification:
+    Run generation writes: 249108103168 bytes (232.00 GB)
+    Merge phase reads: 249194872832 bytes (232.08 GB)
+    Read amplification factor: 1.00x
+    Excess reads: 0.0% (sparse indexing overhead)
+  Thread timing:
+    Min thread time: 829150 ms
+    Max thread time: 836610 ms
+    Avg thread time: 832536 ms
+    Time imbalance factor (max/avg): 1.00x
+    Thread times: [835133, 829150, 836610, 829251]
+
+2466.49s
+
+
+================================================================================================================================================================
+Benchmark Results Summary
+================================================================================================================================================================
+Config               Run Size   RG Runs    Gen Thr    Merge Thr  Total (s)  RunGen (s)   Merge (s)  Entries      Throughput       Read MB    Write MB  
+                     (MB)                                                                                        (M entries/s)                         
+----------------------------------------------------------------------------------------------------------------------------------------------------------------
+Exp5_Thr4_Imbalance1.0_Thr4_Mem2GB[1] 512.0      204        4          4          2224.24      1408.28    815.96     2147483648   0.97             442451.3   475136.0  
+Exp5_Thr4_Imbalance1.0_Thr4_Mem2GB[2] 512.0      204        4          4          2625.24      1734.89    890.36     2147483648   0.82             442451.8   475136.0  
+Exp5_Thr4_Imbalance1.0_Thr4_Mem2GB[3] 512.0      204        4          4          2466.49      1629.88    836.61     2147483648   0.87             442450.8   475136.0  
+Exp5_Thr4_Imbalance1.0_Thr4_Mem2GB[avg] 512.0      204        4          4          2438.66      1591.01    847.64     2147483648   0.88             442451.3   475136.0  
+================================================================================================================================================================
+
+================================================================================================================================================================
+Merge Operations Summary (showing last 1 of 1 merge passes)
+================================================================================================================================================================
+Config               M1PAvg     M1PMax     M1Imbal    M1Slow       M1Fast      
+----------------------------------------------------------------------------------------------------------------------------------------------------------------
+Exp5_Thr4_Imbalance1.0_Thr4_Mem2GB[1] 536870912  542595928  1.01       815.96       815.96      
+Exp5_Thr4_Imbalance1.0_Thr4_Mem2GB[2] 536870912  549383162  1.02       890.36       890.36      
+Exp5_Thr4_Imbalance1.0_Thr4_Mem2GB[3] 536870912  541651206  1.01       836.61       836.61      
+----------------------------------------------------------------------------------------------------------------------------------------------------------------
+Exp5_Thr4_Imbalance1.0_Thr4_Mem2GB[avg] 536870912  544543432  1.01       890.36       815.96      
+================================================================================================================================================================
+
+================================================================================================================================================================
+Detailed I/O Statistics
+================================================================================================================================================================
+Config               RG Read MB   RG Write MB  M1Read MB    M1Write MB  
+----------------------------------------------------------------------------------------------------------------------------------------------------------------
+Exp5_Thr4_Imbalance1.0_Thr4_Mem2GB[1] 204800.0     237568.0     237651.3     237568.0    
+Exp5_Thr4_Imbalance1.0_Thr4_Mem2GB[2] 204800.0     237568.0     237651.8     237568.0    
+Exp5_Thr4_Imbalance1.0_Thr4_Mem2GB[3] 204800.0     237568.0     237650.8     237568.0    
+----------------------------------------------------------------------------------------------------------------------------------------------------------------
+Exp5_Thr4_Imbalance1.0_Thr4_Mem2GB[avg] 204800.0     237568.0     237651.3     237568.0    
+================================================================================================================================================================
+
+====================================================================================================
+Run Generation Time Breakdown
+====================================================================================================
+Config               RG Total s   Load s       Sort s       Store s     
+----------------------------------------------------------------------------------------------------
+Exp5_Thr4_Imbalance1.0_Thr4_Mem2GB[1] 1408.28      0            1393.361     0           
+Exp5_Thr4_Imbalance1.0_Thr4_Mem2GB[2] 1734.89      0            1710.696     0           
+Exp5_Thr4_Imbalance1.0_Thr4_Mem2GB[3] 1629.88      0            1612.131     0           
+----------------------------------------------------------------------------------------------------
+Exp5_Thr4_Imbalance1.0_Thr4_Mem2GB[avg] 1591.01      0.00         1572.06      0.00        
+====================================================================================================

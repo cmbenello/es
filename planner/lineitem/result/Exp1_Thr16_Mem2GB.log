@@ -1,0 +1,285 @@
+warning: unused imports: `SeedableRng` and `rngs::SmallRng`
+ --> src/fastzipf.rs:2:12
+  |
+2 | use rand::{SeedableRng, rngs::SmallRng};
+  |            ^^^^^^^^^^^  ^^^^^^^^^^^^^^
+  |
+  = note: `#[warn(unused_imports)]` on by default
+
+warning: unused import: `std::fmt`
+ --> src/sketch/reservoir_sampler.rs:6:5
+  |
+6 | use std::fmt;
+  |     ^^^^^^^^
+
+warning: unused import: `crate::sketch::kll::KLL`
+   --> src/sketch/reservoir_sampler.rs:190:9
+    |
+190 |     use crate::sketch::kll::KLL;
+    |         ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `super::*`
+   --> src/sketch/reservoir_sampler.rs:192:9
+    |
+192 |     use super::*;
+    |         ^^^^^^^^
+
+warning: unused import: `std::collections::HashMap`
+   --> src/sketch/mod.rs:226:9
+    |
+226 |     use std::collections::HashMap;
+    |         ^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `super::kll::*`
+   --> src/sketch/mod.rs:228:9
+    |
+228 |     use super::kll::*;
+    |         ^^^^^^^^^^^^^
+
+warning: unused import: `super::reservoir_sampler::*`
+   --> src/sketch/mod.rs:229:9
+    |
+229 |     use super::reservoir_sampler::*;
+    |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `super::*`
+   --> src/sketch/mod.rs:230:9
+    |
+230 |     use super::*;
+    |         ^^^^^^^^
+
+warning: unused import: `Duration`
+ --> src/sort/core/engine.rs:4:17
+  |
+4 | use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+  |                 ^^^^^^^^
+
+warning: function `compute_ovc_delta` is never used
+    --> src/ovc/offset_value_coding.rs:1136:15
+     |
+1136 | pub(crate) fn compute_ovc_delta(prev_key: Option<&[u8]>, key: &[u8]) -> OVCU64 {
+     |               ^^^^^^^^^^^^^^^^^
+     |
+     = note: `#[warn(dead_code)]` on by default
+
+warning: `es` (lib) generated 10 warnings (run `cargo fix --lib -p es` to apply 9 suggestions)
+    Finished `release` profile [optimized] target(s) in 0.24s
+     Running `target/release/examples/lineitem_benchmark_cli -n Exp1_Thr16_Mem2GB -i lineitem_sf500.csv --run-gen-threads 16 --merge-threads 16 --run-size-mb 128.00 --merge-fanin 2048 --warmup-runs 1 --benchmark-runs 3 --cooldown-seconds 30 --dir logs/lineitem_bench_2025-12-10_18-04-34/Exp1_Thr16_Mem2GB_tmp`
+Using existing KVBin file: "./datasets/lineitem_sf500.k-8-9-13-14-15.v-0-3.kvbin"
+
+=== BENCHMARK MODE ===
+KVBin data: ./datasets/lineitem_sf500.k-8-9-13-14-15.v-0-3.kvbin, index: ./datasets/lineitem_sf500.k-8-9-13-14-15.v-0-3.kvbin.idx
+Estimated data size: 199659.46 MB
+Run generation threads: 16
+Use OVC: true
+Run size (MB): 128.00
+Run generation memory (MB): 2048.0
+Merge threads: 16
+Merge fan-in: 2048
+Merge memory (MB): 2048.0
+Sketch type: kll
+Sketch size: 200
+Run indexing interval: 1000
+Temporary directory: "logs/lineitem_bench_2025-12-10_18-04-34/Exp1_Thr16_Mem2GB_tmp"
+Warmup runs: 1
+Runs per configuration: 3
+Cooldown between runs (s): 30
+Verify output: false
+
+Running benchmark for config: Exp1_Thr16_Mem2GB
+Parameters: Run Gen Threads: 16, Use OVC: true, Run Size: 128.00 MB, Run Gen Memory: 2048.0 MB, Merge Threads: 16, Merge Fanin: 2048, Merge Memory: 2048.0 MB, Imbalance Factor: 1.0
+================================================================================
+  Performing 1 warmup run(s)...
+    Warmup 1/1: Starting sort with 16 parallel scanners for run generation
+Run gen thread 12 605124 ms, 44 runs generated
+Run gen thread 8 611828 ms, 44 runs generated
+Run gen thread 4 613208 ms, 44 runs generated
+Run gen thread 2 615473 ms, 44 runs generated
+Run gen thread 0 616730 ms, 44 runs generated
+Run gen thread 6 618274 ms, 44 runs generated
+Run gen thread 9 619323 ms, 44 runs generated
+Run gen thread 11 622225 ms, 44 runs generated
+Run gen thread 5 623850 ms, 44 runs generated
+Run gen thread 14 624920 ms, 44 runs generated
+Run gen thread 13 633375 ms, 44 runs generated
+Run gen thread 15 634154 ms, 44 runs generated
+Run gen thread 7 636306 ms, 44 runs generated
+Run gen thread 1 636445 ms, 44 runs generated
+Run gen thread 3 636555 ms, 44 runs generated
+Run gen thread 10 637644 ms, 44 runs generated
+Generated 704 runs in 637854 ms
+Merging 704 runs using 16 threads
+Merge phase took 319664 ms | Merged 3000028242 entries across 16 runs | Thread timing: min=290783 ms, max=319662 ms | Partition sizes: imbalance=1.08x
+957.52s
+  Warmup complete.
+
+  Run 1/3: Starting sort with 16 parallel scanners for run generation
+Run gen thread 11 589582 ms, 44 runs generated
+Run gen thread 13 594208 ms, 44 runs generated
+Run gen thread 15 595338 ms, 44 runs generated
+Run gen thread 6 595487 ms, 44 runs generated
+Run gen thread 14 597254 ms, 44 runs generated
+Run gen thread 10 598168 ms, 44 runs generated
+Run gen thread 4 605872 ms, 44 runs generated
+Run gen thread 5 605912 ms, 44 runs generated
+Run gen thread 7 606714 ms, 44 runs generated
+Run gen thread 3 607702 ms, 44 runs generated
+Run gen thread 2 607991 ms, 44 runs generated
+Run gen thread 0 610020 ms, 44 runs generated
+Run gen thread 12 610805 ms, 44 runs generated
+Run gen thread 1 615194 ms, 44 runs generated
+Run gen thread 9 618657 ms, 44 runs generated
+Run gen thread 8 622690 ms, 44 runs generated
+Generated 704 runs in 623113 ms
+Merging 704 runs using 16 threads
+Merge phase took 309049 ms | Merged 3000028242 entries across 16 runs | Thread timing: min=259738 ms, max=309031 ms | Partition sizes: imbalance=1.08x
+SortStats:
+  Number of runs: 704
+  (R) time: 623113 ms
+  (R) breakdown: load=0 ms, sort=605099 ms, store=0 ms
+  (R) I/O stats: I/O Stats: Read Ops: 3194557, Read Bytes: 209358422373, Write Ops: 2071283, Write Bytes: 135743009280
+  (M) time: 309049 ms
+  Read amplification:
+    Run generation writes: 135743009280 bytes (126.42 GB)
+    Merge phase reads: 136719198720 bytes (127.33 GB)
+    Read amplification factor: 1.01x
+    Excess reads: 0.7% (sparse indexing overhead)
+  Thread timing:
+    Min thread time: 259738 ms
+    Max thread time: 309031 ms
+    Avg thread time: 292992 ms
+    Time imbalance factor (max/avg): 1.05x
+    Thread times: [301105, 295907, 286484, 309031, 279074, 294314, 306318, 259738, 306010, 296368, 289762, 289066, 291282, 300885, 299515, 283020]
+
+932.16s
+
+  Cooling down for 30s before next run...
+  Run 2/3: Starting sort with 16 parallel scanners for run generation
+Run gen thread 2 595305 ms, 44 runs generated
+Run gen thread 11 596829 ms, 44 runs generated
+Run gen thread 8 599367 ms, 44 runs generated
+Run gen thread 15 600442 ms, 44 runs generated
+Run gen thread 0 601744 ms, 44 runs generated
+Run gen thread 6 601830 ms, 44 runs generated
+Run gen thread 3 604919 ms, 44 runs generated
+Run gen thread 5 607176 ms, 44 runs generated
+Run gen thread 13 608108 ms, 44 runs generated
+Run gen thread 12 608455 ms, 44 runs generated
+Run gen thread 10 608965 ms, 44 runs generated
+Run gen thread 14 609632 ms, 44 runs generated
+Run gen thread 7 615499 ms, 44 runs generated
+Run gen thread 1 616515 ms, 44 runs generated
+Run gen thread 9 617120 ms, 44 runs generated
+Run gen thread 4 617793 ms, 44 runs generated
+Generated 704 runs in 618518 ms
+Merging 704 runs using 16 threads
+Merge phase took 312072 ms | Merged 3000028242 entries across 16 runs | Thread timing: min=272342 ms, max=312070 ms | Partition sizes: imbalance=1.08x
+SortStats:
+  Number of runs: 704
+  (R) time: 618518 ms
+  (R) breakdown: load=0 ms, sort=606856 ms, store=0 ms
+  (R) I/O stats: I/O Stats: Read Ops: 3194557, Read Bytes: 209358422373, Write Ops: 2071283, Write Bytes: 135743009280
+  (M) time: 312072 ms
+  Read amplification:
+    Run generation writes: 135743009280 bytes (126.42 GB)
+    Merge phase reads: 136721623552 bytes (127.33 GB)
+    Read amplification factor: 1.01x
+    Excess reads: 0.7% (sparse indexing overhead)
+  Thread timing:
+    Min thread time: 272342 ms
+    Max thread time: 312070 ms
+    Avg thread time: 298838 ms
+    Time imbalance factor (max/avg): 1.04x
+    Thread times: [298439, 294508, 306503, 302213, 285142, 303351, 311438, 272342, 305144, 305675, 287757, 294673, 300313, 312070, 302219, 299618]
+
+930.59s
+
+  Cooling down for 30s before next run...
+  Run 3/3: Starting sort with 16 parallel scanners for run generation
+Run gen thread 12 584561 ms, 44 runs generated
+Run gen thread 0 585072 ms, 44 runs generated
+Run gen thread 2 591980 ms, 44 runs generated
+Run gen thread 11 592962 ms, 44 runs generated
+Run gen thread 4 593111 ms, 44 runs generated
+Run gen thread 1 593135 ms, 44 runs generated
+Run gen thread 5 597886 ms, 44 runs generated
+Run gen thread 6 598169 ms, 44 runs generated
+Run gen thread 9 599892 ms, 44 runs generated
+Run gen thread 13 603251 ms, 44 runs generated
+Run gen thread 3 603774 ms, 44 runs generated
+Run gen thread 15 604388 ms, 44 runs generated
+Run gen thread 7 607908 ms, 44 runs generated
+Run gen thread 14 607951 ms, 44 runs generated
+Run gen thread 8 608966 ms, 44 runs generated
+Run gen thread 10 613445 ms, 44 runs generated
+Generated 704 runs in 613926 ms
+Merging 704 runs using 16 threads
+Merge phase took 310008 ms | Merged 3000028242 entries across 16 runs | Thread timing: min=253740 ms, max=310005 ms | Partition sizes: imbalance=1.13x
+SortStats:
+  Number of runs: 704
+  (R) time: 613926 ms
+  (R) breakdown: load=0 ms, sort=599153 ms, store=0 ms
+  (R) I/O stats: I/O Stats: Read Ops: 3194557, Read Bytes: 209358422373, Write Ops: 2071283, Write Bytes: 135743009280
+  (M) time: 310008 ms
+  Read amplification:
+    Run generation writes: 135743009280 bytes (126.42 GB)
+    Merge phase reads: 136720247296 bytes (127.33 GB)
+    Read amplification factor: 1.01x
+    Excess reads: 0.7% (sparse indexing overhead)
+  Thread timing:
+    Min thread time: 253740 ms
+    Max thread time: 310005 ms
+    Avg thread time: 284944 ms
+    Time imbalance factor (max/avg): 1.09x
+    Thread times: [292289, 282785, 293320, 293640, 287858, 281170, 287174, 253740, 288287, 285866, 293548, 275525, 266454, 310005, 279638, 287803]
+
+923.93s
+
+
+================================================================================================================================================================
+Benchmark Results Summary
+================================================================================================================================================================
+Config               Run Size   RG Runs    Gen Thr    Merge Thr  Total (s)  RunGen (s)   Merge (s)  Entries      Throughput       Read MB    Write MB  
+                     (MB)                                                                                        (M entries/s)                         
+----------------------------------------------------------------------------------------------------------------------------------------------------------------
+Exp1_Thr16_Mem2GB[1] 128.0      704        16         16         932.16       623.11     309.05     3000028242   3.22             330045.3   220366.5  
+Exp1_Thr16_Mem2GB[2] 128.0      704        16         16         930.59       618.52     312.07     3000028242   3.22             330047.7   220365.2  
+Exp1_Thr16_Mem2GB[3] 128.0      704        16         16         923.93       613.93     310.01     3000028242   3.25             330046.3   220365.7  
+Exp1_Thr16_Mem2GB[avg] 128.0      704        16         16         928.90       618.52     310.38     3000028242   3.23             330046.4   220365.8  
+================================================================================================================================================================
+
+================================================================================================================================================================
+Merge Operations Summary (showing last 1 of 1 merge passes)
+================================================================================================================================================================
+Config               M1PAvg     M1PMax     M1Imbal    M1Slow       M1Fast      
+----------------------------------------------------------------------------------------------------------------------------------------------------------------
+Exp1_Thr16_Mem2GB[1] 187501765  202552071  1.08       309.05       309.05      
+Exp1_Thr16_Mem2GB[2] 187501765  202539404  1.08       312.07       312.07      
+Exp1_Thr16_Mem2GB[3] 187501765  211578543  1.13       310.01       310.01      
+----------------------------------------------------------------------------------------------------------------------------------------------------------------
+Exp1_Thr16_Mem2GB[avg] 187501765  205556672  1.10       312.07       309.05      
+================================================================================================================================================================
+
+================================================================================================================================================================
+Detailed I/O Statistics
+================================================================================================================================================================
+Config               RG Read MB   RG Write MB  M1Read MB    M1Write MB  
+----------------------------------------------------------------------------------------------------------------------------------------------------------------
+Exp1_Thr16_Mem2GB[1] 199659.8     129454.6     130385.6     90911.9     
+Exp1_Thr16_Mem2GB[2] 199659.8     129454.6     130387.9     90910.6     
+Exp1_Thr16_Mem2GB[3] 199659.8     129454.6     130386.6     90911.1     
+----------------------------------------------------------------------------------------------------------------------------------------------------------------
+Exp1_Thr16_Mem2GB[avg] 199659.8     129454.6     130386.7     90911.2     
+================================================================================================================================================================
+
+====================================================================================================
+Run Generation Time Breakdown
+====================================================================================================
+Config               RG Total s   Load s       Sort s       Store s     
+----------------------------------------------------------------------------------------------------
+Exp1_Thr16_Mem2GB[1] 623.11       0            605.099      0           
+Exp1_Thr16_Mem2GB[2] 618.52       0            606.856      0           
+Exp1_Thr16_Mem2GB[3] 613.93       0            599.153      0           
+----------------------------------------------------------------------------------------------------
+Exp1_Thr16_Mem2GB[avg] 618.52       0.00         603.70       0.00        
+====================================================================================================
