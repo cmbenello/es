@@ -28,4 +28,5 @@ pub struct BenchmarkConfig {
     pub merge_fanin: usize,
     pub merge_memory_mb: f64,
     pub imbalance_factor: f64,
+    pub discard_final_output: bool,
 }

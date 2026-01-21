@@ -253,6 +253,21 @@ impl SortOutput for InMemOutput {
     }
 }
 
+// Output implementation for discarded output (no data, only statistics)
+pub struct EmptySortOutput {
+    pub stats: SortStats,
+}
+
+impl SortOutput for EmptySortOutput {
+    fn iter(&self) -> Box<dyn Iterator<Item = (Vec<u8>, Vec<u8>)>> {
+        Box::new(std::iter::empty())
+    }
+
+    fn stats(&self) -> SortStats {
+        self.stats.clone()
+    }
+}
+
 // Shared directory info for cleanup coordination
 pub struct TempDirInfo {
     path: PathBuf,

@@ -87,6 +87,10 @@ struct Args {
     #[arg(long, default_value = "1.0")]
     imbalance_factor: f64,
 
+    /// Discard final output (no write) for benchmarking
+    #[arg(long, default_value = "false")]
+    discard_final_output: bool,
+
     /// Key column indices (comma-separated)
     #[arg(short = 'k', long, default_value = "8,9,13,14,15")]
     key_columns: String,
@@ -234,6 +238,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             * (merge_threads as f64)
             * (DEFAULT_BUFFER_SIZE as f64 / 1024.0 / 1024.0),
         imbalance_factor: args.imbalance_factor,
+        discard_final_output: args.discard_final_output,
     };
 
     // Create benchmark runner

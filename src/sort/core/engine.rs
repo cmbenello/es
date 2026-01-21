@@ -166,6 +166,7 @@ pub trait SortHooks: Clone + Send + Sync + 'static {
         upper_bound: Vec<u8>,
         dir: &Path,
         io_tracker: Arc<IoStatsTracker>,
+        discard_output: bool,
     ) -> Result<(Self::MergeableRun, u128), String>;
 
     fn into_output(&self, run: Self::MergeableRun, stats: SortStats) -> Box<dyn SortOutput>;
@@ -191,6 +192,7 @@ pub struct SorterCore<H: SortHooks> {
     run_indexing_interval: usize,
     imbalance_factor: f64,
     temp_dir_info: Arc<TempDirInfo>,
+    discard_final_output: bool,
 }
 
 impl<H: SortHooks> SorterCore<H> {
@@ -227,6 +229,7 @@ impl<H: SortHooks> SorterCore<H> {
                 path: temp_dir,
                 should_delete: true,
             }),
+            discard_final_output: false,
         }
     }
 
@@ -256,6 +259,10 @@ impl<H: SortHooks> SorterCore<H> {
 
     pub fn set_imbalance_factor(&mut self, factor: f64) {
         self.imbalance_factor = factor;
+    }
+
+    pub fn set_discard_final_output(&mut self, discard: bool) {
+        self.discard_final_output = discard;
     }
 
     fn run_generation_internal(
@@ -288,6 +295,7 @@ impl<H: SortHooks> SorterCore<H> {
             sketch,
             self.imbalance_factor,
             self.temp_dir_info.as_ref().as_ref(),
+            self.discard_final_output,
         )
     }
 
@@ -337,6 +345,7 @@ impl<H: SortHooks> SorterCore<H> {
             sketch,
             imbalance_factor,
             dir.as_ref(),
+            false,  // Default: don't discard output
         )
     }
 }
@@ -438,6 +447,7 @@ fn multi_merge_with_hooks<H: SortHooks>(
     sketch: &Sketch<Vec<u8>>,
     imbalance_factor: f64,
     dir: &Path,
+    discard_final_output: bool,
 ) -> Result<(H::MergeableRun, Vec<MergeStats>), String> {
     let dir = dir.as_ref();
     let mut per_merge_stats = Vec::new();
@@ -466,8 +476,9 @@ fn multi_merge_with_hooks<H: SortHooks>(
     }
 
     if fanin >= runs.len() {
+        // This is the final (and only) merge
         let (merged_run, stats) =
-            merge_once_with_hooks(hooks, runs, num_threads, sketch, imbalance_factor, dir)?;
+            merge_once_with_hooks(hooks, runs, num_threads, sketch, imbalance_factor, dir, discard_final_output)?;
         per_merge_stats.push(stats);
         return Ok((merged_run, per_merge_stats));
     }
@@ -495,8 +506,11 @@ fn multi_merge_with_hooks<H: SortHooks>(
         let batch_size = std::cmp::min(f, runs.len());
         let batch: Vec<H::MergeableRun> = runs.drain(..batch_size).collect();
         let total_entries: usize = batch.iter().map(|r| r.total_entries()).sum();
+        // Check if this will be the final merge (runs will have 0 after drain, 1 after push)
+        let is_final_merge = runs.is_empty();
+        let should_discard = is_final_merge && discard_final_output;
         let (merged_run, stats) =
-            merge_once_with_hooks(hooks, batch, num_threads, sketch, imbalance_factor, dir)?;
+            merge_once_with_hooks(hooks, batch, num_threads, sketch, imbalance_factor, dir, should_discard)?;
         println!(
             "Merge {}/{}: merging {} shortest runs ({} total entries)",
             merge_count, expected_merges, batch_size, total_entries
@@ -520,6 +534,7 @@ fn merge_once_with_hooks<H: SortHooks>(
     sketch: &Sketch<Vec<u8>>,
     imbalance_factor: f64,
     dir: &Path,
+    discard_output: bool,
 ) -> Result<(H::MergeableRun, MergeStats), String> {
     if output_runs.is_empty() {
         let merge_stats = MergeStats {
@@ -592,7 +607,7 @@ fn merge_once_with_hooks<H: SortHooks>(
                 vec![]
             };
 
-            hooks.merge_range(runs, thread_id, lower_bound, upper_bound, &dir, io_tracker)
+            hooks.merge_range(runs, thread_id, lower_bound, upper_bound, &dir, io_tracker, discard_output)
         });
 
         merge_handles.push(handle);

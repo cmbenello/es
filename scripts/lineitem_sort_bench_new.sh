@@ -68,6 +68,7 @@ run_calculated_case() {
     --benchmark-runs 3 \
     --cooldown-seconds 30 \
     --dir "$temp_dir" \
+    --discard-final-output \
     $extra_flags 2>&1 | tee -a "${OUT_DIR}/${name}.log"
 
   rm -rf "$temp_dir"
@@ -113,6 +114,7 @@ run_asymmetric_case() {
     --benchmark-runs 3 \
     --cooldown-seconds 30 \
     --dir "$temp_dir" \
+    --discard-final-output \
     $extra_flags 2>&1 | tee -a "${OUT_DIR}/${name}.log"
 
   rm -rf "$temp_dir"

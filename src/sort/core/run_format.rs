@@ -1,3 +1,4 @@
+use std::hint::black_box;
 use std::path::Path;
 use std::sync::Arc;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
@@ -372,6 +373,7 @@ impl<F: RunFormat> SortHooks for FormatSortHooks<F> {
         upper_bound: Vec<u8>,
         dir: &Path,
         io_tracker: Arc<IoStatsTracker>,
+        discard_output: bool,
     ) -> Result<(Self::MergeableRun, u128), String> {
         let thread_start = Instant::now();
         let iterators: Vec<_> = runs
@@ -387,28 +389,41 @@ impl<F: RunFormat> SortHooks for FormatSortHooks<F> {
 
         let merged_iter = F::merge_iterators(iterators);
 
-        let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap();
-        let ts = format!("{}{:09}", now.as_secs(), now.subsec_nanos());
-        let run_path = dir.join(format!("merge_output_{}_{}.dat", thread_id, ts));
-        let fd = Arc::new(
-            SharedFd::new_from_path(&run_path, true)
-                .map_err(|e| format!("Failed to open merge output file: {}", e))?,
-        );
-        let writer = AlignedWriter::from_fd_with_tracker(fd, Some((*io_tracker).clone()))
-            .map_err(|e| format!("Failed to create run writer: {}", e))?;
-        let mut output_run = F::create_merge_run(writer)
-            .map_err(|e| format!("Failed to create merge output run: {}", e))?;
-        let mut append_state = F::AppendState::default();
+        if discard_output {
+            // Discard mode: iterate through all records but don't write
+            for _record in merged_iter {
+                // Just consume the iterator without writing
+                black_box(_record);
+            }
 
-        for record in merged_iter {
-            F::append_record(&mut append_state, &mut output_run, record);
+            let thread_time_ms = thread_start.elapsed().as_millis();
+            // Return empty run list to indicate discarded output
+            Ok((MergeableRun::RangePartitioned(vec![]), thread_time_ms))
+        } else {
+            // Normal mode: write to file
+            let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap();
+            let ts = format!("{}{:09}", now.as_secs(), now.subsec_nanos());
+            let run_path = dir.join(format!("merge_output_{}_{}.dat", thread_id, ts));
+            let fd = Arc::new(
+                SharedFd::new_from_path(&run_path, true)
+                    .map_err(|e| format!("Failed to open merge output file: {}", e))?,
+            );
+            let writer = AlignedWriter::from_fd_with_tracker(fd, Some((*io_tracker).clone()))
+                .map_err(|e| format!("Failed to create run writer: {}", e))?;
+            let mut output_run = F::create_merge_run(writer)
+                .map_err(|e| format!("Failed to create merge output run: {}", e))?;
+            let mut append_state = F::AppendState::default();
+
+            for record in merged_iter {
+                F::append_record(&mut append_state, &mut output_run, record);
+            }
+
+            let writer = F::finalize_run(&mut output_run);
+            drop(writer);
+
+            let thread_time_ms = thread_start.elapsed().as_millis();
+            Ok((MergeableRun::Single(output_run), thread_time_ms))
         }
-
-        let writer = F::finalize_run(&mut output_run);
-        drop(writer);
-
-        let thread_time_ms = thread_start.elapsed().as_millis();
-        Ok((MergeableRun::Single(output_run), thread_time_ms))
     }
 
     fn into_output(&self, run: Self::MergeableRun, stats: SortStats) -> Box<dyn SortOutput> {

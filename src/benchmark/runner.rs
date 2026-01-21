@@ -2,7 +2,7 @@ use super::input::BenchmarkInputProvider;
 use super::types::{BenchmarkConfig, BenchmarkResult};
 use super::verification::OutputVerifier;
 use crate::{
-    ExternalSorter, ExternalSorterWithOVC, RunsOutput, RunsOutputWithOVC, SortInput, SortOutput,
+    ExternalSorter, ExternalSorterWithOVC, Sorter, SortInput, SortOutput,
     SortStats,
 };
 use std::fs::File;
@@ -113,55 +113,10 @@ impl BenchmarkRunner {
 
             let input = self.input_provider.create_sort_input()?;
 
-            let (run_gen_stats, multi_merge_stats) = if self.config.use_ovc {
-                let (runs, sketch, run_gen_stats) = ExternalSorterWithOVC::run_generation(
-                    input,
-                    self.config.run_gen_threads as usize,
-                    (self.config.run_size_mb * 1024.0 * 1024.0) as usize,
-                    self.config.sketch_type,
-                    self.config.sketch_size,
-                    self.config.sketch_sampling_interval,
-                    self.config.run_indexing_interval,
-                    &temp_dir,
-                )?;
-
-                let (_merged_runs, multi_merge_stats) = ExternalSorterWithOVC::multi_merge(
-                    runs,
-                    self.config.merge_fanin,
-                    self.config.merge_threads as usize,
-                    &sketch,
-                    self.config.imbalance_factor,
-                    &temp_dir,
-                )?;
-                drop(_merged_runs);
-
-                (run_gen_stats, multi_merge_stats)
-            } else {
-                let (runs, sketch, run_gen_stats) = ExternalSorter::run_generation(
-                    input,
-                    self.config.run_gen_threads as usize,
-                    (self.config.run_size_mb * 1024.0 * 1024.0) as usize,
-                    self.config.sketch_type,
-                    self.config.sketch_size,
-                    self.config.sketch_sampling_interval,
-                    self.config.run_indexing_interval,
-                    &temp_dir,
-                )?;
-
-                let mergeable_runs: Vec<crate::sort::sorter::MergeableRun> = runs;
-
-                let (_merged_run, per_merge_stats) = ExternalSorter::multi_merge(
-                    mergeable_runs,
-                    self.config.merge_fanin,
-                    self.config.merge_threads as usize,
-                    &sketch,
-                    self.config.imbalance_factor,
-                    &temp_dir,
-                )?;
-                drop(_merged_run);
-
-                (run_gen_stats, per_merge_stats)
-            };
+            let output = self.run_single_sort(input, &temp_dir)?;
+            let stats = output.stats();
+            let run_gen_stats = stats.run_gen_stats;
+            let multi_merge_stats = stats.per_merge_stats;
 
             let total_merge_time_ms: u128 = multi_merge_stats.iter().map(|s| s.time_ms).sum();
 
@@ -259,55 +214,37 @@ impl BenchmarkRunner {
         temp_dir: &Path,
     ) -> Result<Box<dyn SortOutput>, Box<dyn std::error::Error>> {
         let output = if self.config.use_ovc {
-            let (runs, sketch, run_gen_stats) = ExternalSorterWithOVC::run_generation(
-                input,
-                self.config.run_gen_threads as usize,
+            let mut sorter = ExternalSorterWithOVC::new(
+                self.config.run_gen_threads,
                 (self.config.run_size_mb * 1024.0 * 1024.0) as usize,
-                self.config.sketch_type,
-                self.config.sketch_size,
-                self.config.sketch_sampling_interval,
-                self.config.run_indexing_interval,
-                temp_dir,
-            )?;
-
-            let (merged_run, multi_merge_stats) = ExternalSorterWithOVC::multi_merge(
-                runs,
+                self.config.merge_threads,
                 self.config.merge_fanin,
-                self.config.merge_threads as usize,
-                &sketch,
-                self.config.imbalance_factor,
                 temp_dir,
-            )?;
+            );
+            sorter.set_sketch_type(self.config.sketch_type);
+            sorter.set_sketch_size(self.config.sketch_size);
+            sorter.set_sketch_sampling_interval(self.config.sketch_sampling_interval);
+            sorter.set_run_indexing_interval(self.config.run_indexing_interval);
+            sorter.set_imbalance_factor(self.config.imbalance_factor);
+            sorter.set_discard_final_output(self.config.discard_final_output);
 
-            Box::new(RunsOutputWithOVC {
-                run: merged_run,
-                stats: SortStats::new(run_gen_stats, multi_merge_stats),
-            }) as Box<dyn SortOutput>
+            sorter.sort(input)?
         } else {
-            let (runs, sketch, run_gen_stats) = ExternalSorter::run_generation(
-                input,
-                self.config.run_gen_threads as usize,
+            let mut sorter = ExternalSorter::new(
+                self.config.run_gen_threads,
                 (self.config.run_size_mb * 1024.0 * 1024.0) as usize,
-                self.config.sketch_type,
-                self.config.sketch_size,
-                self.config.sketch_sampling_interval,
-                self.config.run_indexing_interval,
-                temp_dir,
-            )?;
-
-            let (merged_run, multi_merge_stats) = ExternalSorter::multi_merge(
-                runs,
+                self.config.merge_threads,
                 self.config.merge_fanin,
-                self.config.merge_threads as usize,
-                &sketch,
-                self.config.imbalance_factor,
                 temp_dir,
-            )?;
+            );
+            sorter.set_sketch_type(self.config.sketch_type);
+            sorter.set_sketch_size(self.config.sketch_size);
+            sorter.set_sketch_sampling_interval(self.config.sketch_sampling_interval);
+            sorter.set_run_indexing_interval(self.config.run_indexing_interval);
+            sorter.set_imbalance_factor(self.config.imbalance_factor);
+            sorter.set_discard_final_output(self.config.discard_final_output);
 
-            Box::new(RunsOutput {
-                run: merged_run,
-                stats: SortStats::new(run_gen_stats, multi_merge_stats),
-            }) as Box<dyn SortOutput>
+            sorter.sort(input)?
         };
 
         Ok(output)
