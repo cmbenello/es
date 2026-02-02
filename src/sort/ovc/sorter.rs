@@ -134,13 +134,11 @@ mod tests {
     use crate::diskio::file::SharedFd;
     use crate::ovc::offset_value_coding::compute_ovc_delta;
     use crate::rand::small_thread_rng;
-    use crate::sort::core::run_format::RunWriterSink;
     use crate::sort::ovc::run::RunWithOVC;
-    use crate::sort::run_sink::RunSink;
     use crate::{InMemInput, sketch::SketchType};
     use rand::seq::SliceRandom;
     use std::sync::Arc;
-    use tempfile::{TempDir, tempdir};
+    use tempfile::TempDir;
 
     #[test]
     fn test_compute_ovc_delta_basic_cases() {

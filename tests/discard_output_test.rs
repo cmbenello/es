@@ -26,8 +26,14 @@ fn test_discard_final_output() {
 
     // Stats should still be populated
     let stats = output.stats();
-    assert!(stats.run_gen_stats.num_runs > 0, "Run generation should have occurred");
-    assert!(stats.per_merge_stats.len() > 0, "Merge should have occurred");
+    assert!(
+        stats.run_gen_stats.num_runs > 0,
+        "Run generation should have occurred"
+    );
+    assert!(
+        stats.per_merge_stats.len() > 0,
+        "Merge should have occurred"
+    );
 
     println!("✓ Discard mode test passed");
     println!("Stats: {}", stats);
@@ -53,7 +59,11 @@ fn test_normal_output_still_works() {
 
     // Output should have all records
     let results: Vec<_> = output.iter().collect();
-    assert_eq!(results.len(), 100, "Output should have all records in normal mode");
+    assert_eq!(
+        results.len(),
+        100,
+        "Output should have all records in normal mode"
+    );
 
     // Verify sorted
     for i in 0..100 {

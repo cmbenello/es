@@ -430,7 +430,7 @@ impl std::fmt::Display for OVCU64 {
 pub trait OVC64Trait: SentinelValue {
     fn ovc(&self) -> &OVCU64;
     fn ovc_mut(&mut self) -> &mut OVCU64;
-    fn key(&self) -> &Vec<u8>;
+    fn key(&self) -> &[u8];
 
     fn derive_ovc_from(&mut self, prev: &Self) -> bool {
         let min_len = self.key().len().min(prev.key().len());
@@ -626,13 +626,16 @@ pub trait OVC64Trait: SentinelValue {
 // Use `compare_and_update` method for ordering
 pub struct OVCEntry {
     ovc: OVCU64,
-    key: Vec<u8>,
+    key: Box<[u8]>,
 }
 
 impl OVCEntry {
     pub fn new(key: Vec<u8>) -> Self {
         let ovc = OVCU64::initial_value();
-        Self { ovc, key }
+        Self {
+            ovc,
+            key: key.into_boxed_slice(),
+        }
     }
 
     pub fn get_ovc(&self) -> OVCU64 {
@@ -653,7 +656,7 @@ impl OVC64Trait for OVCEntry {
         &mut self.ovc
     }
 
-    fn key(&self) -> &Vec<u8> {
+    fn key(&self) -> &[u8] {
         &self.key
     }
 }
@@ -662,14 +665,14 @@ impl SentinelValue for OVCEntry {
     fn early_fence() -> Self {
         Self {
             ovc: OVCU64::early_fence(),
-            key: Vec::new(),
+            key: Box::new([]),
         }
     }
 
     fn late_fence() -> Self {
         Self {
             ovc: OVCU64::late_fence(),
-            key: Vec::new(),
+            key: Box::new([]),
         }
     }
 
@@ -711,7 +714,10 @@ impl std::fmt::Display for OVCEntry {
 impl From<Vec<u8>> for OVCEntry {
     fn from(key: Vec<u8>) -> Self {
         let ovc = OVCU64::initial_value();
-        Self { ovc, key }
+        Self {
+            ovc,
+            key: key.into_boxed_slice(),
+        }
     }
 }
 
@@ -725,14 +731,14 @@ static OVC_META_COMPARISON_COUNT: AtomicUsize = AtomicUsize::new(0);
 #[derive(Clone, PartialEq, Eq)]
 pub struct OVCEntryWithCounter {
     ovc: OVCU64,
-    key: Vec<u8>,
+    key: Box<[u8]>,
 }
 
 impl OVCEntryWithCounter {
     pub fn new(key: Vec<u8>) -> Self {
         Self {
             ovc: OVCU64::initial_value(),
-            key,
+            key: key.into_boxed_slice(),
         }
     }
 
@@ -782,7 +788,7 @@ impl OVC64Trait for OVCEntryWithCounter {
         &mut self.ovc
     }
 
-    fn key(&self) -> &Vec<u8> {
+    fn key(&self) -> &[u8] {
         &self.key
     }
 
@@ -954,14 +960,14 @@ impl SentinelValue for OVCEntryWithCounter {
     fn early_fence() -> Self {
         Self {
             ovc: OVCU64::early_fence(),
-            key: Vec::new(),
+            key: Box::new([]),
         }
     }
 
     fn late_fence() -> Self {
         Self {
             ovc: OVCU64::late_fence(),
-            key: Vec::new(),
+            key: Box::new([]),
         }
     }
 
@@ -1002,7 +1008,7 @@ impl From<Vec<u8>> for OVCEntryWithCounter {
     fn from(key: Vec<u8>) -> Self {
         Self {
             ovc: OVCU64::initial_value(),
-            key,
+            key: key.into_boxed_slice(),
         }
     }
 }
@@ -1011,14 +1017,18 @@ impl From<OVCEntry> for OVCEntryWithCounter {
     fn from(entry: OVCEntry) -> Self {
         Self {
             ovc: entry.get_ovc(),
-            key: entry.get_key().to_vec(),
+            key: entry.get_key().to_vec().into_boxed_slice(),
         }
     }
 }
 
 impl RecordSize for OVCEntryWithCounter {
     fn size(&self) -> usize {
-        self.key.len()
+        // Struct overhead:
+        // - OVCU64 field: 8 bytes
+        // - Box<[u8]> header (key): 16 bytes (ptr + len on 64-bit)
+        const STRUCT_OVERHEAD: usize = 8 + 16; // 24 bytes
+        STRUCT_OVERHEAD + self.key.len()
     }
 }
 
@@ -1027,18 +1037,26 @@ impl RecordSize for OVCEntryWithCounter {
 // Use `compare_and_update` method for ordering
 pub struct OVCKeyValue {
     ovc: OVCU64,
-    key: Vec<u8>,
+    key: Box<[u8]>,
     value: Vec<u8>,
 }
 
 impl OVCKeyValue {
     pub fn new(key: Vec<u8>, value: Vec<u8>) -> Self {
         let ovc = OVCU64::initial_value();
-        Self { ovc, key, value }
+        Self {
+            ovc,
+            key: key.into_boxed_slice(),
+            value,
+        }
     }
 
     pub fn new_with_ovc(ovc: OVCU64, key: Vec<u8>, value: Vec<u8>) -> Self {
-        Self { ovc, key, value }
+        Self {
+            ovc,
+            key: key.into_boxed_slice(),
+            value,
+        }
     }
 
     pub fn value(&self) -> &[u8] {
@@ -1046,7 +1064,7 @@ impl OVCKeyValue {
     }
 
     pub fn take(self) -> (OVCU64, Vec<u8>, Vec<u8>) {
-        (self.ovc, self.key, self.value)
+        (self.ovc, self.key.into_vec(), self.value)
     }
 }
 
@@ -1059,7 +1077,7 @@ impl OVC64Trait for OVCKeyValue {
         &mut self.ovc
     }
 
-    fn key(&self) -> &Vec<u8> {
+    fn key(&self) -> &[u8] {
         &self.key
     }
 }
@@ -1068,7 +1086,7 @@ impl SentinelValue for OVCKeyValue {
     fn early_fence() -> Self {
         Self {
             ovc: OVCU64::early_fence(),
-            key: Vec::new(),
+            key: Box::new([]),
             value: Vec::new(),
         }
     }
@@ -1076,7 +1094,7 @@ impl SentinelValue for OVCKeyValue {
     fn late_fence() -> Self {
         Self {
             ovc: OVCU64::late_fence(),
-            key: Vec::new(),
+            key: Box::new([]),
             value: Vec::new(),
         }
     }
@@ -1117,19 +1135,32 @@ impl std::fmt::Display for OVCKeyValue {
 impl From<(Vec<u8>, Vec<u8>)> for OVCKeyValue {
     fn from((key, value): (Vec<u8>, Vec<u8>)) -> Self {
         let ovc = OVCU64::initial_value();
-        Self { ovc, key, value }
+        Self {
+            ovc,
+            key: key.into_boxed_slice(),
+            value,
+        }
     }
 }
 
 impl From<(OVCU64, Vec<u8>, Vec<u8>)> for OVCKeyValue {
     fn from((ovc, key, value): (OVCU64, Vec<u8>, Vec<u8>)) -> Self {
-        Self { ovc, key, value }
+        Self {
+            ovc,
+            key: key.into_boxed_slice(),
+            value,
+        }
     }
 }
 
 impl RecordSize for OVCKeyValue {
     fn size(&self) -> usize {
-        self.key.len() + self.value.len()
+        // Struct overhead:
+        // - OVCU64 field: 8 bytes
+        // - Box<[u8]> header (key): 16 bytes (ptr + len on 64-bit)
+        // - Vec<u8> header (value): 24 bytes
+        const STRUCT_OVERHEAD: usize = 8 + 16 + 24; // 48 bytes
+        STRUCT_OVERHEAD + self.key.len() + self.value.len()
     }
 }
 

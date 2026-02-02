@@ -1,7 +1,7 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::thread;
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use crate::diskio::aligned_writer::AlignedWriter;
 use crate::diskio::file::SharedFd;
@@ -345,7 +345,7 @@ impl<H: SortHooks> SorterCore<H> {
             sketch,
             imbalance_factor,
             dir.as_ref(),
-            false,  // Default: don't discard output
+            false, // Default: don't discard output
         )
     }
 }
@@ -477,8 +477,15 @@ fn multi_merge_with_hooks<H: SortHooks>(
 
     if fanin >= runs.len() {
         // This is the final (and only) merge
-        let (merged_run, stats) =
-            merge_once_with_hooks(hooks, runs, num_threads, sketch, imbalance_factor, dir, discard_final_output)?;
+        let (merged_run, stats) = merge_once_with_hooks(
+            hooks,
+            runs,
+            num_threads,
+            sketch,
+            imbalance_factor,
+            dir,
+            discard_final_output,
+        )?;
         per_merge_stats.push(stats);
         return Ok((merged_run, per_merge_stats));
     }
@@ -509,8 +516,15 @@ fn multi_merge_with_hooks<H: SortHooks>(
         // Check if this will be the final merge (runs will have 0 after drain, 1 after push)
         let is_final_merge = runs.is_empty();
         let should_discard = is_final_merge && discard_final_output;
-        let (merged_run, stats) =
-            merge_once_with_hooks(hooks, batch, num_threads, sketch, imbalance_factor, dir, should_discard)?;
+        let (merged_run, stats) = merge_once_with_hooks(
+            hooks,
+            batch,
+            num_threads,
+            sketch,
+            imbalance_factor,
+            dir,
+            should_discard,
+        )?;
         println!(
             "Merge {}/{}: merging {} shortest runs ({} total entries)",
             merge_count, expected_merges, batch_size, total_entries
@@ -607,7 +621,15 @@ fn merge_once_with_hooks<H: SortHooks>(
                 vec![]
             };
 
-            hooks.merge_range(runs, thread_id, lower_bound, upper_bound, &dir, io_tracker, discard_output)
+            hooks.merge_range(
+                runs,
+                thread_id,
+                lower_bound,
+                upper_bound,
+                &dir,
+                io_tracker,
+                discard_output,
+            )
         });
 
         merge_handles.push(handle);

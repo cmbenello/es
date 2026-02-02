@@ -17,13 +17,29 @@ pub struct LoserTreeOVC<T> {
 /// A node in the Loser Tree.
 #[derive(Clone, Debug)]
 struct Node<T> {
-    key: T,       // The value of the LOSER at this node
-    index: usize, // The run ID of the LOSER
+    key: T,     // The value of the LOSER at this node
+    index: u32, // The run ID of the LOSER
 }
 
 impl<T> Node<T> {
-    pub fn new(key: T, index: usize) -> Self {
+    pub fn new(key: T, index: u32) -> Self {
         Node { key, index }
+    }
+}
+
+impl<T> LoserTreeOVC<T> {
+    /// Estimated structural overhead of the tree (excluding T's own size).
+    pub fn structure_overhead_bytes_for_capacity(capacity: usize) -> usize {
+        if capacity == 0 {
+            return 0;
+        }
+        let vec_header = mem::size_of::<Vec<Node<T>>>();
+        let node_overhead = mem::size_of::<Node<T>>() - mem::size_of::<T>();
+        vec_header + capacity * node_overhead
+    }
+
+    pub fn structure_overhead_bytes(&self) -> usize {
+        Self::structure_overhead_bytes_for_capacity(self.capacity)
     }
 }
 
@@ -45,7 +61,7 @@ impl<T: OVC64Trait> LoserTreeOVC<T> {
         for _ in 0..capacity {
             nodes.push(Node {
                 key: T::early_fence(),
-                index: usize::MAX,
+                index: u32::MAX,
             });
         }
 
@@ -72,7 +88,7 @@ impl<T: OVC64Trait> LoserTreeOVC<T> {
             return None;
         }
         debug_assert!(!self.nodes[0].key.is_early_fence());
-        return Some((&self.nodes[0].key, self.nodes[0].index));
+        return Some((&self.nodes[0].key, self.nodes[0].index as usize));
     }
 
     /// Replaces the current winner with `new_val`, replays the tournament,
@@ -83,7 +99,7 @@ impl<T: OVC64Trait> LoserTreeOVC<T> {
             panic!("Cannot push to an empty LoserTree");
         }
 
-        let source_idx = self.nodes[0].index;
+        let source_idx = self.nodes[0].index as usize;
         let old_node = self.pass(source_idx, new_val);
         return old_node.key;
     }
@@ -118,7 +134,7 @@ impl<T: OVC64Trait> LoserTreeOVC<T> {
             return None;
         }
 
-        let source_idx = self.nodes[0].index;
+        let source_idx = self.nodes[0].index as usize;
         let old_node = self.pass(source_idx, T::late_fence());
 
         if old_node.key.is_late_fence() {
@@ -129,8 +145,8 @@ impl<T: OVC64Trait> LoserTreeOVC<T> {
     }
 
     fn pass(&mut self, index: usize, key: T) -> Node<T> {
-        let mut candidate = Node::new(key, index);
-        let mut slot = Self::parent_index(self.leaf_index(index));
+        let mut candidate = Node::new(key, index as u32);
+        let mut slot = Self::parent_index(self.leaf_index(index as u32));
 
         while slot != self.root_index() {
             if self.nodes[slot].key.compare_and_update(&mut candidate.key) == Ordering::Less {
@@ -150,16 +166,16 @@ impl<T: OVC64Trait> LoserTreeOVC<T> {
     /// - Performs full comparison at root when candidate wins to maintain OVC correctness
     /// - Uses copy-down optimization to efficiently update multiple tree levels
     fn pass_for_update(&mut self, index: usize, key: T, mut full_comp: bool) -> Node<T> {
-        let mut candidate = Node::new(key, index);
+        let mut candidate = Node::new(key, index as u32);
 
         // Initialize OVC - we don't know the relationship to previous value
         self.init_candidate_ovc(&mut candidate);
 
-        let mut slot = Self::parent_index(self.leaf_index(index));
+        let mut slot = Self::parent_index(self.leaf_index(index as u32));
         let mut level = 1;
 
         // Phase 1: Climb up the tree until we hit root or find our own index
-        while slot != self.root_index() && self.nodes[slot].index != index {
+        while slot != self.root_index() && self.nodes[slot].index != index as u32 {
             if self.nodes[slot]
                 .key
                 .compare_and_update_with_mode(&mut candidate.key, full_comp)
@@ -180,7 +196,7 @@ impl<T: OVC64Trait> LoserTreeOVC<T> {
         // Phase 2: Copy-down for updates
         let old_node = self.save_old_node(slot);
 
-        if candidate.index == index {
+        if candidate.index == index as u32 {
             let final_slot = self.bubble_up_with_copy_down(&mut candidate, slot, level, full_comp);
             slot = final_slot;
         }
@@ -206,7 +222,7 @@ impl<T: OVC64Trait> LoserTreeOVC<T> {
     /// Handle the case where candidate reaches root during update
     fn handle_root_update(&mut self, mut candidate: Node<T>, slot: usize, index: usize) -> Node<T> {
         if !candidate.key.is_late_fence() {
-            if candidate.index == index {
+            if candidate.index == index as u32 {
                 // Full comparison needed - candidate came from update
                 if candidate
                     .key
@@ -288,7 +304,7 @@ impl<T: OVC64Trait> LoserTreeOVC<T> {
 
             // Check if this slot's value originated from our subtree
             let opp_idx = self.nodes[*slot].index;
-            if opp_idx != usize::MAX {
+            if opp_idx != u32::MAX {
                 let opp_leaf = self.leaf_index(opp_idx);
                 if (opp_leaf >> dest_level) == dest {
                     break; // Found a relevant opponent
@@ -335,8 +351,13 @@ impl<T: OVC64Trait> LoserTreeOVC<T> {
 
     // --- Navigation Helpers ---
 
-    pub fn leaf_index(&self, run_id: usize) -> usize {
-        self.capacity + run_id
+    /// Returns the capacity of the tree (number of leaf slots, rounded up to power of 2)
+    pub fn capacity(&self) -> usize {
+        self.capacity
+    }
+
+    pub fn leaf_index(&self, run_id: u32) -> usize {
+        self.capacity + run_id as usize
     }
 
     pub fn root_index(&self) -> usize {
@@ -387,7 +408,7 @@ impl<T: OVC64Trait> LoserTreeOVC<T> {
             for idx in start_idx..end_idx {
                 if idx < self.nodes.len() {
                     let node = &self.nodes[idx];
-                    let value_str = if node.index == usize::MAX {
+                    let value_str = if node.index == u32::MAX {
                         format!("{} (sentinel)", node.key)
                     } else {
                         format!("{}", node.key)
@@ -434,7 +455,7 @@ impl<T: OVC64Trait> LoserTreeOVC<T> {
 
         // Internal nodes
         for (idx, node) in self.nodes.iter().enumerate().skip(1) {
-            let display = if node.index == usize::MAX {
+            let display = if node.index == u32::MAX {
                 format!("[{}:-]", idx)
             } else {
                 format!("[{}:{}(s{})]", idx, node.key, node.index)
@@ -478,7 +499,7 @@ impl<T: OVC64Trait> LoserTreeOVC<T> {
                 ));
             } else if idx < nodes.len() {
                 let node = &nodes[idx];
-                let value_str = if node.index == usize::MAX {
+                let value_str = if node.index == u32::MAX {
                     format!("{} (sentinel)", node.key)
                 } else {
                     format!("{}", node.key)

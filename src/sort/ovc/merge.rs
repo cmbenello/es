@@ -1,6 +1,5 @@
 use crate::ovc::offset_value_coding::{OVC64Trait, OVCKeyValue, OVCU64, SentinelValue};
 use crate::ovc::tree_of_losers_ovc::LoserTreeOVC;
-
 // K-way merge iterator
 pub struct MergeWithOVC<I: Iterator<Item = (OVCU64, Vec<u8>, Vec<u8>)>> {
     // Tree of losers with OVC
@@ -44,10 +43,11 @@ impl<I: Iterator<Item = (OVCU64, Vec<u8>, Vec<u8>)>> Iterator for MergeWithOVC<I
                 // and return the item directly
                 *next_item.ovc_mut() = self.tree.replace_top_ovc(*next_item.ovc());
                 return Some(next_item.take());
+            } else {
+                let winner = self.tree.push(next_item);
+                return Some(winner.take());
             }
-            let winner = self.tree.push(next_item);
-            return Some(winner.take());
-        }
+        };
         self.tree
             .mark_current_exhausted()
             .map(|winner| winner.take())
