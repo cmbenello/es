@@ -28,10 +28,6 @@ struct SortArgs {
     #[arg(long, default_value = "100")]
     sketch_sampling_interval: usize,
 
-    /// Run indexing interval (store every Nth key in the run index)
-    #[arg(long, default_value = "1000")]
-    run_indexing_interval: usize,
-
     /// Directory for temporary files
     #[arg(short, long, default_value = ".")]
     dir: PathBuf,
@@ -112,6 +108,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .merge_fanin
         .expect("--merge-fanin required unless --estimate-size");
 
+    let dataset_mb = input_provider.estimate_data_size_mb()?;
+    let total_memory_mb = run_size_mb * run_gen_threads as f64;
+    let run_indexing_interval = compute_run_indexing_interval(dataset_mb, total_memory_mb);
+
     // Create benchmark configuration
     let config = BenchmarkConfig {
         config_name: args.name,
@@ -123,7 +123,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         sketch_type: args.sketch_type,
         sketch_size: args.sketch_size,
         sketch_sampling_interval: args.sketch_sampling_interval,
-        run_indexing_interval: args.run_indexing_interval,
+        run_indexing_interval,
         run_gen_threads,
         use_ovc: args.ovc,
         run_size_mb,
@@ -155,4 +155,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     print_benchmark_summary(&result);
 
     Ok(())
+}
+
+fn compute_run_indexing_interval(dataset_mb: f64, memory_mb: f64) -> usize {
+    if !dataset_mb.is_finite() || !memory_mb.is_finite() || memory_mb <= 0.0 {
+        return 1000;
+    }
+    let interval = (dataset_mb / (memory_mb * 0.05)).ceil();
+    interval.max(1000.0) as usize
 }
