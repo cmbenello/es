@@ -28,39 +28,54 @@ impl<T> Node<T> {
 
 impl<T: Ord + SentinelValue> LoserTree<T> {
     pub fn new(values: Vec<T>) -> Self {
+        let mut lt = LoserTree {
+            nodes: Vec::new(),
+            capacity: 0,
+        };
+        lt.reset(values);
+        lt
+    }
+
+    /// Reset the tree with a new set of values, reusing the existing allocation.
+    pub fn reset(&mut self, values: Vec<T>) {
         let size = values.len();
+        self.reset_from_iter(size, values);
+    }
+
+    /// Reset the tree with a known number of values from an iterator.
+    pub fn reset_from_iter<I>(&mut self, size: usize, values: I)
+    where
+        I: IntoIterator<Item = T>,
+    {
         if size == 0 {
-            return Self {
-                nodes: vec![],
-                capacity: 0,
-            };
+            self.nodes.clear();
+            self.capacity = 0;
+            return;
         }
 
         let capacity = size.next_power_of_two();
-        let mut nodes = Vec::with_capacity(capacity);
+        self.capacity = capacity;
+        self.nodes.clear();
+        self.nodes.resize_with(capacity, || Node {
+            key: T::early_fence(),
+            index: usize::MAX,
+        });
 
-        // Initialize internal nodes (1..capacity) with Early Fence sentinels.
-        // Index 0 is also initialized but will be overwritten at the end.
-        for _ in 0..capacity {
-            nodes.push(Node {
-                key: T::early_fence(),
-                index: usize::MAX,
-            });
+        let mut used = 0usize;
+        for val in values.into_iter() {
+            debug_assert!(used < size, "reset_from_iter: more values than size");
+            if used >= size {
+                break;
+            }
+            self.pass(used, val);
+            used += 1;
         }
+        debug_assert!(used == size, "reset_from_iter: fewer values than size");
 
-        let mut lt = LoserTree { nodes, capacity };
-
-        // 1. Process Real Values
-        for (i, val) in values.into_iter().enumerate() {
-            lt.pass(i, val);
+        // Process padding (late fences) for unused slots
+        for i in used..capacity {
+            self.pass(i, T::late_fence());
         }
-
-        // 2. Process Padding (Late Fence)
-        for i in size..capacity {
-            lt.pass(i, T::late_fence());
-        }
-
-        lt
     }
 
     pub fn capacity(&self) -> usize {

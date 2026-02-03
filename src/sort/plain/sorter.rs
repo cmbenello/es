@@ -76,23 +76,23 @@ impl RunFormat for PlainRunFormat {
     >(
         scanner: crate::sort::core::engine::Scanner,
         sink: &mut S,
-        run_size: usize,
+        run_gen_mem: usize,
     ) -> crate::replacement_selection::ReplacementSelectionStats {
-        crate::replacement_selection::run_replacement_selection_tol(scanner, sink, run_size)
+        crate::replacement_selection::run_replacement_selection_mm(scanner, sink, run_gen_mem)
     }
 }
 
 impl SorterCore<PlainSortHooks> {
     pub fn new(
         run_gen_threads: usize,
-        run_size: usize,
+        run_gen_mem: usize,
         merge_threads: usize,
         merge_fanin: usize,
         base_dir: impl AsRef<std::path::Path>,
     ) -> Self {
         SorterCore::with_defaults(
             run_gen_threads,
-            run_size,
+            run_gen_mem,
             merge_threads,
             merge_fanin,
             base_dir,
@@ -190,7 +190,7 @@ mod tests {
     fn test_multi_level_merge_small_fanout() {
         let num_records = 100000;
         let num_threads_run_gen = 2;
-        let run_size = 512;
+        let run_gen_mem = 512 * 1024;
         let sketch_type = SketchType::Kll;
         let sketch_size = 200;
         let sketch_sampling_interval = 1000;
@@ -214,7 +214,7 @@ mod tests {
         let (runs, sketch, _run_gen_stats) = ExternalSorter::run_generation(
             Box::new(InMemInput { data }),
             num_threads_run_gen,
-            run_size,
+            run_gen_mem,
             sketch_type,
             sketch_size,
             sketch_sampling_interval,

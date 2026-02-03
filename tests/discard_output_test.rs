@@ -14,7 +14,7 @@ fn test_discard_final_output() {
     }
 
     // Test with discard_final_output = true
-    let mut sorter = ExternalSorter::new(2, 512, 2, 10, temp_dir.path());
+    let mut sorter = ExternalSorter::new(2, 512 * 1024, 2, 10, temp_dir.path());
     sorter.set_discard_final_output(true);
 
     let input = InMemInput { data: data.clone() };
@@ -52,7 +52,7 @@ fn test_normal_output_still_works() {
     }
 
     // Test with discard_final_output = false (default)
-    let mut sorter = ExternalSorter::new(2, 512, 2, 10, temp_dir.path());
+    let mut sorter = ExternalSorter::new(2, 512 * 1024, 2, 10, temp_dir.path());
 
     let input = InMemInput { data: data.clone() };
     let output = sorter.sort(Box::new(input)).unwrap();

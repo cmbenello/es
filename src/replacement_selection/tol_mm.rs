@@ -10,30 +10,23 @@ use super::memory::{
     tls_has_headroom,
 };
 use super::{RecordSize, ReplacementScanner, ReplacementSelectionStats, RunEmitter, next_record};
-use crate::ovc::offset_value_coding_32::{OVC32Trait, OVCU32};
 use crate::ovc::offset_value_coding_64::SentinelValue;
-use crate::ovc::tree_of_losers_ovc::{LoserTreeOVC, OVCTreeKey};
+use crate::ovc::tree_of_losers::LoserTree;
 use crate::sort::run_sink::RunSink;
 
-pub struct OVCKeyValueMM {
-    ovc: OVCU32,
+pub struct KeyValueMM {
     data: ManagedSlice,
     _not_send: PhantomData<Rc<()>>,
 }
 
-impl OVCKeyValueMM {
+impl KeyValueMM {
     fn try_new(key: &[u8], value: &[u8]) -> Option<Self> {
         let data = ManagedSlice::alloc(key, value)?;
 
         Some(Self {
-            ovc: OVCU32::initial_value(),
             data,
             _not_send: PhantomData,
         })
-    }
-
-    pub fn get_ovc(&self) -> OVCU32 {
-        self.ovc
     }
 
     pub fn get_key(&self) -> &[u8] {
@@ -60,103 +53,104 @@ impl OVCKeyValueMM {
     }
 }
 
-impl Drop for OVCKeyValueMM {
+impl Drop for KeyValueMM {
     fn drop(&mut self) {
         self.data.release();
     }
 }
 
-impl OVC32Trait for OVCKeyValueMM {
-    fn ovc(&self) -> &OVCU32 {
-        &self.ovc
-    }
-
-    fn ovc_mut(&mut self) -> &mut OVCU32 {
-        &mut self.ovc
-    }
-
-    fn key(&self) -> &[u8] {
-        self.get_key()
-    }
-}
-
-impl OVCTreeKey for OVCKeyValueMM {
-    type OVC = OVCU32;
-
-    fn ovc(&self) -> &Self::OVC {
-        OVC32Trait::ovc(self)
-    }
-
-    fn ovc_mut(&mut self) -> &mut Self::OVC {
-        OVC32Trait::ovc_mut(self)
-    }
-
-    fn derive_ovc_from(&mut self, prev: &Self) -> bool {
-        OVC32Trait::derive_ovc_from(self, prev)
-    }
-
-    fn compare_and_update(&mut self, other: &mut Self) -> Ordering {
-        OVC32Trait::compare_and_update(self, other)
-    }
-
-    fn compare_and_update_with_mode(&mut self, other: &mut Self, full_comp: bool) -> Ordering {
-        OVC32Trait::compare_and_update_with_mode(self, other, full_comp)
-    }
-
-    fn max_ovc(&mut self, other: &Self) {
-        OVC32Trait::max_ovc(self, other);
-    }
-
-    fn set_initial_ovc(&mut self) {
-        self.ovc = OVCU32::initial_value();
+impl PartialEq for KeyValueMM {
+    fn eq(&self, other: &Self) -> bool {
+        if self.is_early_fence() {
+            return other.is_early_fence();
+        }
+        if self.is_late_fence() {
+            return other.is_late_fence();
+        }
+        if other.is_early_fence() || other.is_late_fence() {
+            return false;
+        }
+        self.get_key() == other.get_key()
     }
 }
 
-impl SentinelValue for OVCKeyValueMM {
+impl Eq for KeyValueMM {}
+
+impl Ord for KeyValueMM {
+    fn cmp(&self, other: &Self) -> Ordering {
+        if self.is_early_fence() {
+            return if other.is_early_fence() {
+                Ordering::Equal
+            } else {
+                Ordering::Less
+            };
+        }
+        if self.is_late_fence() {
+            return if other.is_late_fence() {
+                Ordering::Equal
+            } else {
+                Ordering::Greater
+            };
+        }
+        if other.is_early_fence() {
+            return Ordering::Greater;
+        }
+        if other.is_late_fence() {
+            return Ordering::Less;
+        }
+        self.get_key().cmp(other.get_key())
+    }
+}
+
+impl PartialOrd for KeyValueMM {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl SentinelValue for KeyValueMM {
     fn early_fence() -> Self {
         Self {
-            ovc: OVCU32::early_fence(),
-            data: ManagedSlice::empty(),
+            data: ManagedSlice::early_fence(),
             _not_send: PhantomData,
         }
     }
 
     fn late_fence() -> Self {
         Self {
-            ovc: OVCU32::late_fence(),
-            data: ManagedSlice::empty(),
+            data: ManagedSlice::late_fence(),
             _not_send: PhantomData,
         }
     }
 
     fn is_early_fence(&self) -> bool {
-        self.ovc.is_early_fence()
+        self.data.is_early_fence()
     }
 
     fn is_late_fence(&self) -> bool {
-        self.ovc.is_late_fence()
+        self.data.is_late_fence()
     }
 }
 
-impl RecordSize for OVCKeyValueMM {
+impl RecordSize for KeyValueMM {
     fn size(&self) -> usize {
         std::mem::size_of::<Self>() + self.data.allocation_size()
     }
 }
 
 /// Replacement selection that stores record bytes in the memory manager.
-pub struct ReplacementSelectionOVCMM<T: OVCTreeKey> {
-    tree: LoserTreeOVC<T>,
+pub struct ReplacementSelectionMM<T: Ord + SentinelValue> {
+    tree: LoserTree<T>,
     next_run_buffer: Vec<T>,
     late_fence_slots: LateFenceSlots,
     initialized: bool,
     pending_run_switch: bool,
 }
 
-impl<T: OVCTreeKey> ReplacementSelectionOVCMM<T> {
+impl<T: Ord + SentinelValue> ReplacementSelectionMM<T> {
     pub fn new() -> Self {
         Self {
-            tree: LoserTreeOVC::new(vec![]),
+            tree: LoserTree::new(vec![]),
             next_run_buffer: Vec::new(),
             late_fence_slots: LateFenceSlots::new(),
             initialized: false,
@@ -195,7 +189,7 @@ impl<T: OVCTreeKey> ReplacementSelectionOVCMM<T> {
     pub fn absorb_record_with(&mut self, record: T, emitter: &mut impl RunEmitter<T>) {
         assert!(self.initialized, "absorb_record called before build()");
 
-        let mut record = record;
+        let record = record;
 
         self.ensure_active_tree(emitter);
 
@@ -204,7 +198,7 @@ impl<T: OVCTreeKey> ReplacementSelectionOVCMM<T> {
             return;
         }
 
-        let belongs_to_next_run = self.should_defer_to_next_run(&mut record);
+        let belongs_to_next_run = self.should_defer_to_next_run(&record);
 
         if belongs_to_next_run {
             self.add_to_next_run(record);
@@ -219,16 +213,15 @@ impl<T: OVCTreeKey> ReplacementSelectionOVCMM<T> {
         }
     }
 
-    fn should_defer_to_next_run(&mut self, record: &mut T) -> bool {
+    fn should_defer_to_next_run(&mut self, record: &T) -> bool {
         if let Some((winner, _)) = self.tree.peek() {
-            !record.derive_ovc_from(winner)
+            record < winner
         } else {
             false
         }
     }
 
-    fn add_to_next_run(&mut self, mut record: T) {
-        record.set_initial_ovc();
+    fn add_to_next_run(&mut self, record: T) {
         self.next_run_buffer.push(record);
     }
 
@@ -302,9 +295,9 @@ impl<T: OVCTreeKey> ReplacementSelectionOVCMM<T> {
     }
 }
 
-/// Replacement selection driven by the OVC-aware tree-of-losers,
+/// Replacement selection driven by the tree-of-losers,
 /// storing keys/values in a memory manager rather than heap Vecs.
-pub fn run_replacement_selection_ovc_mm<S>(
+pub fn run_replacement_selection_mm<S>(
     mut scanner: ReplacementScanner,
     sink: &mut S,
     memory_limit: usize,
@@ -319,7 +312,7 @@ where
         reset_thread_local_manager_with_limit(manager_limit);
     }
 
-    let mut rs = ReplacementSelectionOVCMM::new();
+    let mut rs = ReplacementSelectionMM::new();
     let mut pending_record: Option<(Vec<u8>, Vec<u8>)> = None;
 
     loop {
@@ -329,7 +322,7 @@ where
 
         let key_len = key.len();
         let value_len = value.len();
-        let record = match OVCKeyValueMM::try_new(&key, &value) {
+        let record = match KeyValueMM::try_new(&key, &value) {
             Some(record) => record,
             None => {
                 if rs.buffer_len() > 0 {
@@ -357,13 +350,11 @@ where
     let mut emitter = SinkEmitter {
         sink,
         emitted: &mut records_emitted,
-        #[cfg(debug_assertions)]
-        validator: OvcRunValidator::new(),
     };
 
     while let Some((key, value)) = next_record(&mut pending_record, scanner.as_mut()) {
         let record = loop {
-            if let Some(record) = OVCKeyValueMM::try_new(&key, &value) {
+            if let Some(record) = KeyValueMM::try_new(&key, &value) {
                 break record;
             }
             // Keep emitting until we can allocate
@@ -389,100 +380,22 @@ where
 struct SinkEmitter<'a, S: RunSink> {
     sink: &'a mut S,
     emitted: &'a mut usize,
-    #[cfg(debug_assertions)]
-    validator: OvcRunValidator,
 }
 
-impl<'a, S: RunSink> RunEmitter<OVCKeyValueMM> for SinkEmitter<'a, S> {
-    fn emit(&mut self, record: OVCKeyValueMM) {
+impl<'a, S: RunSink> RunEmitter<KeyValueMM> for SinkEmitter<'a, S> {
+    fn emit(&mut self, record: KeyValueMM) {
         if record.is_sentinel() {
             return;
         }
-        let ovc = record.get_ovc();
         if let Some((key, value)) = record.key_value_slices() {
-            #[cfg(debug_assertions)]
-            self.validator.validate(ovc, key);
-            self.sink.push_record_with_ovc(ovc, key, value);
+            self.sink.push_record(key, value);
             *self.emitted += 1;
         }
-        drop(record)
     }
 
     fn on_run_switch(&mut self) {
-        #[cfg(debug_assertions)]
-        self.validator.on_run_switch();
         self.sink.finish_run();
         self.sink.start_run();
-    }
-}
-
-#[cfg(debug_assertions)]
-struct OvcRunValidator {
-    prev_key: Option<Vec<u8>>,
-}
-
-#[cfg(debug_assertions)]
-impl OvcRunValidator {
-    fn new() -> Self {
-        Self { prev_key: None }
-    }
-
-    fn on_run_switch(&mut self) {
-        self.prev_key = None;
-    }
-
-    fn validate(&mut self, ovc: crate::ovc::offset_value_coding_32::OVCU32, key: &[u8]) {
-        use crate::ovc::offset_value_coding_32::compute_ovc_delta;
-        use crate::ovc::offset_value_coding_64::OVCFlag;
-
-        match self.prev_key.as_deref() {
-            None => {
-                assert!(
-                    ovc.is_initial_value(),
-                    "first record in run should be InitialValue, got flag {}",
-                    ovc.flag().as_u8()
-                );
-            }
-            Some(prev) => {
-                let consistent = match ovc.flag() {
-                    OVCFlag::EarlyFence | OVCFlag::LateFence => false,
-                    OVCFlag::DuplicateValue => prev == key,
-                    OVCFlag::InitialValue => false,
-                    OVCFlag::NormalValue => {
-                        let stored_offset = ovc.offset();
-                        if stored_offset > prev.len() || stored_offset > key.len() {
-                            false
-                        } else if prev[..stored_offset] != key[..stored_offset] {
-                            false
-                        } else {
-                            let stored_value = ovc.value();
-                            let actual_suffix = &key[stored_offset..];
-                            let check_len = stored_value.len().min(actual_suffix.len());
-                            if stored_value[..check_len] != actual_suffix[..check_len] {
-                                false
-                            } else if stored_value.len() > check_len
-                                && stored_value[check_len..].iter().any(|&b| b != 0)
-                            {
-                                false
-                            } else {
-                                true
-                            }
-                        }
-                    }
-                };
-
-                assert!(consistent, "inconsistent OVC for key {:?}", key);
-
-                let expected = compute_ovc_delta(Some(prev), key);
-                assert_eq!(
-                    ovc, expected,
-                    "non-optimal OVC for key {:?}: expected {}, got {}",
-                    key, expected, ovc
-                );
-            }
-        }
-
-        self.prev_key = Some(key.to_vec());
     }
 }
 
@@ -566,8 +479,8 @@ mod tests {
         }
     }
 
-    impl RunEmitter<OVCKeyValueMM> for CountingEmitter {
-        fn emit(&mut self, record: OVCKeyValueMM) {
+    impl RunEmitter<KeyValueMM> for CountingEmitter {
+        fn emit(&mut self, record: KeyValueMM) {
             if record.is_sentinel() {
                 return;
             }
@@ -589,7 +502,7 @@ mod tests {
         let scanner: ReplacementScanner = Box::new(data.into_iter());
         let mut sink = CollectingSink::new();
 
-        run_replacement_selection_ovc_mm(scanner, &mut sink, 100_000);
+        run_replacement_selection_mm(scanner, &mut sink, 100_000);
 
         assert!(!sink.runs.is_empty(), "expected at least one run");
         for run in &sink.runs {
@@ -612,7 +525,7 @@ mod tests {
         let scanner: ReplacementScanner = Box::new(data.into_iter());
         let mut sink = CollectingSink::new();
 
-        run_replacement_selection_ovc_mm(scanner, &mut sink, 100_000); // 200 * 3000 = 600,000 bytes needed
+        run_replacement_selection_mm(scanner, &mut sink, 100_000); // 200 * 3000 = 600,000 bytes needed
 
         assert!(
             sink.runs.len() > 1,
@@ -620,14 +533,14 @@ mod tests {
         );
     }
 
-    // ==================== OVCKeyValueMM Tests ====================
+    // ==================== KeyValueMM Tests ====================
 
     #[test]
-    fn test_ovc_kv_mm_creation() {
+    fn test_kv_mm_creation() {
         reset_thread_local_manager();
         let key = b"test_key";
         let value = b"test_value";
-        let kv = OVCKeyValueMM::try_new(key, value).expect("should create");
+        let kv = KeyValueMM::try_new(key, value).expect("should create");
 
         assert_eq!(kv.get_key(), key);
         let (k, v) = kv.key_value_slices().expect("should have slices");
@@ -636,11 +549,11 @@ mod tests {
     }
 
     #[test]
-    fn test_ovc_kv_mm_empty_key() {
+    fn test_kv_mm_empty_key() {
         reset_thread_local_manager();
         let key = b"";
         let value = b"value";
-        let kv = OVCKeyValueMM::try_new(key, value).expect("should create");
+        let kv = KeyValueMM::try_new(key, value).expect("should create");
 
         assert_eq!(kv.get_key(), key);
         let (k, v) = kv.key_value_slices().expect("should have slices");
@@ -649,11 +562,11 @@ mod tests {
     }
 
     #[test]
-    fn test_ovc_kv_mm_empty_value() {
+    fn test_kv_mm_empty_value() {
         reset_thread_local_manager();
         let key = b"key";
         let value = b"";
-        let kv = OVCKeyValueMM::try_new(key, value).expect("should create");
+        let kv = KeyValueMM::try_new(key, value).expect("should create");
 
         let (k, v) = kv.key_value_slices().expect("should have slices");
         assert_eq!(k, key);
@@ -661,11 +574,11 @@ mod tests {
     }
 
     #[test]
-    fn test_ovc_kv_mm_both_empty() {
+    fn test_kv_mm_both_empty() {
         reset_thread_local_manager();
         let key = b"";
         let value = b"";
-        let kv = OVCKeyValueMM::try_new(key, value).expect("should create");
+        let kv = KeyValueMM::try_new(key, value).expect("should create");
 
         let (k, v) = kv.key_value_slices().expect("should have slices");
         assert_eq!(k, key);
@@ -673,11 +586,11 @@ mod tests {
     }
 
     #[test]
-    fn test_ovc_kv_mm_large_key_value() {
+    fn test_kv_mm_large_key_value() {
         reset_thread_local_manager();
         let key = vec![b'k'; 10000];
         let value = vec![b'v'; 10000];
-        let kv = OVCKeyValueMM::try_new(&key, &value).expect("should create");
+        let kv = KeyValueMM::try_new(&key, &value).expect("should create");
 
         let (k, v) = kv.key_value_slices().expect("should have slices");
         assert_eq!(k, &key[..]);
@@ -685,42 +598,41 @@ mod tests {
     }
 
     #[test]
-    fn test_ovc_kv_mm_sentinel_early_fence() {
-        let fence = OVCKeyValueMM::early_fence();
+    fn test_kv_mm_sentinel_early_fence() {
+        let fence = KeyValueMM::early_fence();
         assert!(fence.is_early_fence());
         assert!(!fence.is_late_fence());
         assert_eq!(fence.get_key(), b"");
     }
 
     #[test]
-    fn test_ovc_kv_mm_sentinel_late_fence() {
-        let fence = OVCKeyValueMM::late_fence();
+    fn test_kv_mm_sentinel_late_fence() {
+        let fence = KeyValueMM::late_fence();
         assert!(fence.is_late_fence());
         assert!(!fence.is_early_fence());
         assert_eq!(fence.get_key(), b"");
     }
 
     #[test]
-    fn test_ovc_kv_mm_size() {
+    fn test_kv_mm_size() {
         reset_thread_local_manager();
         let key = b"test";
         let value = b"value";
-        let kv = OVCKeyValueMM::try_new(key, value).expect("should create");
+        let kv = KeyValueMM::try_new(key, value).expect("should create");
 
         let size = kv.size();
-        assert!(size > std::mem::size_of::<OVCKeyValueMM>());
+        assert!(size > std::mem::size_of::<KeyValueMM>());
     }
 
     #[test]
-    fn test_ovc_kv_mm_multiple_allocations() {
+    fn test_kv_mm_multiple_allocations() {
         reset_thread_local_manager();
         let mut kvs = Vec::new();
 
         for _i in 0..100 {
             let key = format!("key_{}", _i);
             let value = format!("value_{}", _i);
-            let kv =
-                OVCKeyValueMM::try_new(key.as_bytes(), value.as_bytes()).expect("should create");
+            let kv = KeyValueMM::try_new(key.as_bytes(), value.as_bytes()).expect("should create");
             kvs.push((kv, key, value));
         }
 
@@ -732,7 +644,7 @@ mod tests {
     }
 
     #[test]
-    fn test_ovc_kv_mm_memory_limit_reached() {
+    fn test_kv_mm_memory_limit_reached() {
         reset_thread_local_manager_with_limit(100_000);
         let mut kvs = Vec::new();
         let mut failed = false;
@@ -741,7 +653,7 @@ mod tests {
         for _i in 0..500 {
             let key = vec![b'k'; 1000];
             let value = vec![b'v'; 1000];
-            if let Some(kv) = OVCKeyValueMM::try_new(&key, &value) {
+            if let Some(kv) = KeyValueMM::try_new(&key, &value) {
                 kvs.push(kv);
             } else {
                 // Should eventually fail
@@ -756,30 +668,30 @@ mod tests {
         // If we didn't fail, the limit was high enough for all allocations, which is also valid
     }
 
-    // ==================== ReplacementSelectionOVCMM Tests ====================
+    // ==================== ReplacementSelectionMM Tests ====================
 
     #[test]
-    fn test_rs_ovc_mm_new() {
-        let rs: ReplacementSelectionOVCMM<OVCKeyValueMM> = ReplacementSelectionOVCMM::new();
+    fn test_rs_mm_new() {
+        let rs: ReplacementSelectionMM<KeyValueMM> = ReplacementSelectionMM::new();
         assert!(!rs.initialized);
         assert_eq!(rs.buffer_len(), 0);
     }
 
     #[test]
-    fn test_rs_ovc_mm_insert_initial() {
+    fn test_rs_mm_insert_initial() {
         reset_thread_local_manager();
-        let mut rs = ReplacementSelectionOVCMM::new();
-        let kv = OVCKeyValueMM::try_new(b"key", b"value").expect("should create");
+        let mut rs = ReplacementSelectionMM::new();
+        let kv = KeyValueMM::try_new(b"key", b"value").expect("should create");
 
         rs.insert_initial(kv);
         assert_eq!(rs.buffer_len(), 1);
     }
 
     #[test]
-    fn test_rs_ovc_mm_build() {
+    fn test_rs_mm_build() {
         reset_thread_local_manager();
-        let mut rs = ReplacementSelectionOVCMM::new();
-        let kv = OVCKeyValueMM::try_new(b"key", b"value").expect("should create");
+        let mut rs = ReplacementSelectionMM::new();
+        let kv = KeyValueMM::try_new(b"key", b"value").expect("should create");
 
         rs.insert_initial(kv);
         rs.build();
@@ -787,20 +699,20 @@ mod tests {
     }
 
     #[test]
-    fn test_rs_ovc_mm_empty_build() {
-        let mut rs: ReplacementSelectionOVCMM<OVCKeyValueMM> = ReplacementSelectionOVCMM::new();
+    fn test_rs_mm_empty_build() {
+        let mut rs: ReplacementSelectionMM<KeyValueMM> = ReplacementSelectionMM::new();
         rs.build();
         assert!(rs.initialized);
         assert_eq!(rs.buffer_len(), 0);
     }
 
     #[test]
-    fn test_rs_ovc_mm_absorb_record() {
+    fn test_rs_mm_absorb_record() {
         reset_thread_local_manager();
-        let mut rs = ReplacementSelectionOVCMM::new();
+        let mut rs = ReplacementSelectionMM::new();
 
         for i in 0..10u32 {
-            let kv = OVCKeyValueMM::try_new(&key_bytes(i), &[i as u8]).expect("should create");
+            let kv = KeyValueMM::try_new(&key_bytes(i), &[i as u8]).expect("should create");
             rs.insert_initial(kv);
         }
 
@@ -812,12 +724,10 @@ mod tests {
         let mut emitter = SinkEmitter {
             sink: &mut sink,
             emitted: &mut emitted,
-            #[cfg(debug_assertions)]
-            validator: OvcRunValidator::new(),
         };
 
         // Add a record that belongs to current run (higher than initial)
-        let new_kv = OVCKeyValueMM::try_new(&key_bytes(20), &[20]).expect("should create");
+        let new_kv = KeyValueMM::try_new(&key_bytes(20), &[20]).expect("should create");
         rs.absorb_record_with(new_kv, &mut emitter);
 
         // The new record might cause emission or be added to tree
@@ -828,10 +738,10 @@ mod tests {
     #[test]
     fn test_mm_padding_slots_tracked_and_consumed() {
         reset_thread_local_manager();
-        let mut rs = ReplacementSelectionOVCMM::new();
+        let mut rs = ReplacementSelectionMM::new();
 
         for &key in &[10u32, 20, 30] {
-            let kv = OVCKeyValueMM::try_new(&key_bytes(key), &[key as u8]).expect("should create");
+            let kv = KeyValueMM::try_new(&key_bytes(key), &[key as u8]).expect("should create");
             rs.insert_initial(kv);
         }
 
@@ -842,7 +752,7 @@ mod tests {
         );
 
         let mut emitter = CountingEmitter::new();
-        let new_kv = OVCKeyValueMM::try_new(&key_bytes(15), &[15]).expect("should create");
+        let new_kv = KeyValueMM::try_new(&key_bytes(15), &[15]).expect("should create");
         rs.absorb_record_with(new_kv, &mut emitter);
 
         assert_eq!(
@@ -856,12 +766,12 @@ mod tests {
     }
 
     #[test]
-    fn test_rs_ovc_mm_drain() {
+    fn test_rs_mm_drain() {
         reset_thread_local_manager();
-        let mut rs = ReplacementSelectionOVCMM::new();
+        let mut rs = ReplacementSelectionMM::new();
 
         for i in 0..5u32 {
-            let kv = OVCKeyValueMM::try_new(&key_bytes(i), &[i as u8]).expect("should create");
+            let kv = KeyValueMM::try_new(&key_bytes(i), &[i as u8]).expect("should create");
             rs.insert_initial(kv);
         }
 
@@ -873,8 +783,6 @@ mod tests {
         let mut emitter = SinkEmitter {
             sink: &mut sink,
             emitted: &mut emitted,
-            #[cfg(debug_assertions)]
-            validator: OvcRunValidator::new(),
         };
 
         rs.drain_with(&mut emitter);
@@ -889,7 +797,7 @@ mod tests {
         let scanner: ReplacementScanner = Box::new(std::iter::empty());
         let mut sink = CollectingSink::new();
 
-        let stats = run_replacement_selection_ovc_mm(scanner, &mut sink, 1_000_000);
+        let stats = run_replacement_selection_mm(scanner, &mut sink, 1_000_000);
 
         assert_eq!(stats.records_emitted, 0);
         assert!(sink.runs.is_empty());
@@ -901,7 +809,7 @@ mod tests {
         let scanner: ReplacementScanner = Box::new(data.into_iter());
         let mut sink = CollectingSink::new();
 
-        let stats = run_replacement_selection_ovc_mm(scanner, &mut sink, 1_000_000);
+        let stats = run_replacement_selection_mm(scanner, &mut sink, 1_000_000);
 
         assert_eq!(stats.records_emitted, 1);
         assert_eq!(sink.runs.len(), 1);
@@ -917,7 +825,7 @@ mod tests {
         let scanner: ReplacementScanner = Box::new(data.into_iter());
         let mut sink = CollectingSink::new();
 
-        let stats = run_replacement_selection_ovc_mm(scanner, &mut sink, 1_000_000);
+        let stats = run_replacement_selection_mm(scanner, &mut sink, 1_000_000);
 
         assert_eq!(stats.records_emitted, 100);
         // Ascending order should produce a single run
@@ -938,7 +846,7 @@ mod tests {
         let scanner: ReplacementScanner = Box::new(data.into_iter());
         let mut sink = CollectingSink::new();
 
-        run_replacement_selection_ovc_mm(scanner, &mut sink, 1_000_000);
+        run_replacement_selection_mm(scanner, &mut sink, 1_000_000);
 
         // Descending order should produce multiple runs (worst case)
         assert!(!sink.runs.is_empty());
@@ -961,7 +869,7 @@ mod tests {
         let scanner: ReplacementScanner = Box::new(data.into_iter());
         let mut sink = CollectingSink::new();
 
-        let stats = run_replacement_selection_ovc_mm(scanner, &mut sink, 1_000_000);
+        let stats = run_replacement_selection_mm(scanner, &mut sink, 1_000_000);
 
         assert_eq!(stats.records_emitted, 50);
 
@@ -983,7 +891,7 @@ mod tests {
         let mut sink = CollectingSink::new();
 
         // Run with a memory limit
-        run_replacement_selection_ovc_mm(scanner, &mut sink, 100_000);
+        run_replacement_selection_mm(scanner, &mut sink, 100_000);
 
         // Should process all records
         let total: usize = sink.runs.iter().map(|r| r.len()).sum();
@@ -1008,7 +916,7 @@ mod tests {
         let scanner: ReplacementScanner = Box::new(data.into_iter());
         let mut sink = CollectingSink::new();
 
-        let stats = run_replacement_selection_ovc_mm(scanner, &mut sink, 100_000);
+        let stats = run_replacement_selection_mm(scanner, &mut sink, 100_000);
 
         assert_eq!(stats.records_emitted, 10);
 
@@ -1032,7 +940,7 @@ mod tests {
         let scanner: ReplacementScanner = Box::new(data.into_iter());
         let mut sink = CollectingSink::new();
 
-        let stats = run_replacement_selection_ovc_mm(scanner, &mut sink, 100_000);
+        let stats = run_replacement_selection_mm(scanner, &mut sink, 100_000);
 
         assert_eq!(stats.records_emitted, 50);
 
@@ -1053,7 +961,7 @@ mod tests {
         let scanner: ReplacementScanner = Box::new(data.into_iter());
         let mut sink = CollectingSink::new();
 
-        run_replacement_selection_ovc_mm(scanner, &mut sink, 500_000);
+        run_replacement_selection_mm(scanner, &mut sink, 500_000);
 
         // Count total records across all runs
         let total: usize = sink.runs.iter().map(|r| r.len()).sum();
@@ -1071,7 +979,7 @@ mod tests {
         let scanner: ReplacementScanner = Box::new(data.into_iter());
         let mut sink = CollectingSink::new();
 
-        run_replacement_selection_ovc_mm(scanner, &mut sink, 1_000_000);
+        run_replacement_selection_mm(scanner, &mut sink, 1_000_000);
 
         // Verify each run is sorted
         for run in &sink.runs {
@@ -1091,7 +999,7 @@ mod tests {
         let mut sink = CollectingSink::new();
 
         // Set a memory limit and verify all records are processed
-        run_replacement_selection_ovc_mm(scanner, &mut sink, 300_000);
+        run_replacement_selection_mm(scanner, &mut sink, 300_000);
 
         let total: usize = sink.runs.iter().map(|r| r.len()).sum();
         assert_eq!(total, 100);
@@ -1114,7 +1022,7 @@ mod tests {
         let mut sink = CollectingSink::new();
 
         // Zero limit should still work with default manager behavior
-        run_replacement_selection_ovc_mm(scanner, &mut sink, 0);
+        run_replacement_selection_mm(scanner, &mut sink, 0);
 
         let total: usize = sink.runs.iter().map(|r| r.len()).sum();
         assert_eq!(total, 10);
@@ -1131,7 +1039,7 @@ mod tests {
         let scanner: ReplacementScanner = Box::new(data.into_iter());
         let mut sink = CollectingSink::new();
 
-        run_replacement_selection_ovc_mm(scanner, &mut sink, 150_000);
+        run_replacement_selection_mm(scanner, &mut sink, 150_000);
 
         if sink.runs.len() > 1 {
             // Verify that the last element of one run < first element of next run
@@ -1163,7 +1071,7 @@ mod tests {
         let scanner: ReplacementScanner = Box::new(data.into_iter());
         let mut sink = CollectingSink::new();
 
-        let stats = run_replacement_selection_ovc_mm(scanner, &mut sink, 1_000_000);
+        let stats = run_replacement_selection_mm(scanner, &mut sink, 1_000_000);
 
         assert_eq!(stats.records_emitted, 100);
 
@@ -1186,7 +1094,7 @@ mod tests {
         let scanner: ReplacementScanner = Box::new(data.into_iter());
         let mut sink = CollectingSink::new();
 
-        let stats = run_replacement_selection_ovc_mm(scanner, &mut sink, 1_000_000);
+        let stats = run_replacement_selection_mm(scanner, &mut sink, 1_000_000);
 
         assert_eq!(stats.records_emitted, 50);
     }
@@ -1202,7 +1110,7 @@ mod tests {
         let scanner: ReplacementScanner = Box::new(data.into_iter());
         let mut sink = CollectingSink::new();
 
-        let stats = run_replacement_selection_ovc_mm(scanner, &mut sink, 1_000_000);
+        let stats = run_replacement_selection_mm(scanner, &mut sink, 1_000_000);
 
         assert_eq!(stats.records_emitted, 50);
     }
@@ -1217,7 +1125,7 @@ mod tests {
         let scanner: ReplacementScanner = Box::new(data.into_iter());
         let mut sink = CollectingSink::new();
 
-        let stats = run_replacement_selection_ovc_mm(scanner, &mut sink, 1_000_000);
+        let stats = run_replacement_selection_mm(scanner, &mut sink, 1_000_000);
 
         assert_eq!(stats.records_emitted, 50);
     }
@@ -1231,14 +1139,14 @@ mod tests {
         let scanner: ReplacementScanner = Box::new(data.into_iter());
         let mut sink = CollectingSink::new();
 
-        run_replacement_selection_ovc_mm(scanner, &mut sink, 100_000);
+        run_replacement_selection_mm(scanner, &mut sink, 100_000);
 
         // Run again to verify manager was reset
         let data2 = vec![(key_bytes(2), vec![2])];
         let scanner2: ReplacementScanner = Box::new(data2.into_iter());
         let mut sink2 = CollectingSink::new();
 
-        run_replacement_selection_ovc_mm(scanner2, &mut sink2, 100_000);
+        run_replacement_selection_mm(scanner2, &mut sink2, 100_000);
 
         assert!(!sink2.runs.is_empty());
     }
@@ -1254,7 +1162,7 @@ mod tests {
         let mut sink = CollectingSink::new();
 
         // The function should set manager limit to 90% of this
-        run_replacement_selection_ovc_mm(scanner, &mut sink, 100_000);
+        run_replacement_selection_mm(scanner, &mut sink, 100_000);
 
         let total: usize = sink.runs.iter().map(|r| r.len()).sum();
         assert_eq!(total, 20);
@@ -1276,12 +1184,12 @@ mod tests {
             "AllocHandle should be 4 bytes"
         );
 
-        // Verify OVCKeyValueMM benefits from the optimization
-        let size = std::mem::size_of::<OVCKeyValueMM>();
-        // OVCKeyValueMM = OVCU32 (4) + ManagedSlice (4) + PhantomData (0) = 8 bytes + padding
+        // Verify KeyValueMM benefits from the optimization
+        let size = std::mem::size_of::<KeyValueMM>();
+        // KeyValueMM = ManagedSlice (4) + PhantomData (0) = 4 bytes + padding
         assert!(
             size <= 16,
-            "OVCKeyValueMM should be at most 16 bytes, got {}",
+            "KeyValueMM should be at most 16 bytes, got {}",
             size
         );
     }
@@ -1295,8 +1203,8 @@ mod tests {
 
         println!("\n=== Memory Usage Analysis for 100-byte Records ===");
         println!(
-            "OVCKeyValueMM struct size: {} bytes",
-            std::mem::size_of::<OVCKeyValueMM>()
+            "KeyValueMM struct size: {} bytes",
+            std::mem::size_of::<KeyValueMM>()
         );
         println!(
             "ManagedSlice size: {} bytes",
@@ -1316,7 +1224,7 @@ mod tests {
         let value = vec![b'v'; 50];
 
         // Test single record allocation
-        let kv = OVCKeyValueMM::try_new(&key, &value).expect("should allocate");
+        let kv = KeyValueMM::try_new(&key, &value).expect("should allocate");
         let alloc_size = kv.data.allocation_size();
         println!("\nSingle 100-byte record:");
         println!("  Payload (key+value): {} bytes", key.len() + value.len());
@@ -1348,7 +1256,7 @@ mod tests {
         let scanner: ReplacementScanner = Box::new(data.into_iter());
         let mut sink = CollectingSink::new();
 
-        let stats = run_replacement_selection_ovc_mm(scanner, &mut sink, memory_limit);
+        let stats = run_replacement_selection_mm(scanner, &mut sink, memory_limit);
 
         println!("\n=== Test with {} x 100-byte records ===", num_records);
         println!("Memory limit: {} KB", memory_limit / 1024);
@@ -1365,9 +1273,9 @@ mod tests {
         };
 
         let data_in_manager = records_in_memory * alloc_size;
-        let struct_overhead = records_in_memory * std::mem::size_of::<OVCKeyValueMM>();
+        let struct_overhead = records_in_memory * std::mem::size_of::<KeyValueMM>();
         let tree_capacity = records_in_memory.next_power_of_two();
-        let tree_overhead = tree_capacity * std::mem::size_of::<OVCKeyValueMM>();
+        let tree_overhead = tree_capacity * std::mem::size_of::<KeyValueMM>();
 
         println!(
             "\nEstimated memory breakdown for {} records in memory:",
@@ -1379,7 +1287,7 @@ mod tests {
             data_in_manager
         );
         println!(
-            "  OVCKeyValueMM structs: {} KB ({} bytes)",
+            "  KeyValueMM structs: {} KB ({} bytes)",
             struct_overhead / 1024,
             struct_overhead
         );

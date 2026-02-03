@@ -176,7 +176,7 @@ pub trait SortHooks: Clone + Send + Sync + 'static {
         &self,
         scanner: Scanner,
         sink: &mut Self::Sink,
-        run_size: usize,
+        run_gen_mem: usize,
     ) -> crate::replacement_selection::ReplacementSelectionStats;
 }
 
@@ -302,7 +302,7 @@ impl<H: SortHooks> SorterCore<H> {
     pub fn run_generation(
         sort_input: Box<dyn SortInput>,
         num_threads: usize,
-        run_size: usize,
+        run_gen_mem: usize,
         sketch_type: SketchType,
         sketch_size: usize,
         sketch_sampling_interval: usize,
@@ -317,7 +317,7 @@ impl<H: SortHooks> SorterCore<H> {
             &hooks,
             sort_input,
             num_threads,
-            run_size,
+            run_gen_mem,
             sketch_type,
             sketch_size,
             sketch_sampling_interval,
@@ -384,7 +384,7 @@ fn run_generation_with_hooks<H: SortHooks>(
     hooks: &H,
     sort_input: Box<dyn SortInput>,
     num_threads: usize,
-    run_size: usize,
+    run_gen_mem: usize,
     sketch_type: SketchType,
     sketch_size: usize,
     sketch_sampling_interval: usize,
@@ -411,7 +411,7 @@ fn run_generation_with_hooks<H: SortHooks>(
                 sketch_sampling_interval,
             );
             let thread_start = Instant::now();
-            let _ = worker_hooks.run_replacement_selection(scanner, &mut sink, run_size);
+            let _ = worker_hooks.run_replacement_selection(scanner, &mut sink, run_gen_mem);
             let (local_runs, sketch) = sink.finalize();
             let total_time_ms = thread_start.elapsed().as_millis();
             println!(

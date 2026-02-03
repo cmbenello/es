@@ -1,4 +1,5 @@
 use core::panic;
+use std::cell::RefCell;
 
 use crate::diskio::constants::DEFAULT_BUFFER_SIZE;
 
@@ -15,7 +16,9 @@ const TAG_ALLOCATED: u32 = 0x01;
 const OFFSET_UNITS: usize = EXTENT_SIZE / ALIGN;
 const OFFSET_BITS: u32 = OFFSET_UNITS.trailing_zeros();
 const OFFSET_MASK: u32 = (1u32 << OFFSET_BITS) - 1;
-const MAX_EXTENTS: usize = 1usize << (32 - OFFSET_BITS);
+const RESERVED_HANDLES: u32 = 3;
+const MAX_HANDLE_VALUE: u32 = u32::MAX - RESERVED_HANDLES;
+const MAX_EXTENTS: usize = ((MAX_HANDLE_VALUE as u64 + 1) >> OFFSET_BITS) as usize;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct AllocHandle(u32);
@@ -23,6 +26,8 @@ pub struct AllocHandle(u32);
 impl AllocHandle {
     /// Sentinel value representing no allocation (uses u32::MAX which is never valid).
     pub const NONE: Self = AllocHandle(u32::MAX);
+    pub const EARLY: Self = AllocHandle(u32::MAX - 1);
+    pub const LATE: Self = AllocHandle(u32::MAX - 2);
 
     /// Pack extent index and offset (in 32-byte units) into a u32 handle.
     fn new(extent: usize, offset: usize) -> Self {
@@ -30,8 +35,9 @@ impl AllocHandle {
         debug_assert!(OFFSET_UNITS.is_power_of_two());
         let units = offset / ALIGN;
         debug_assert!(units < (1usize << OFFSET_BITS));
-        debug_assert!(extent < (1usize << (32 - OFFSET_BITS)));
+        debug_assert!(extent < MAX_EXTENTS);
         let value = ((extent as u32) << OFFSET_BITS) | units as u32;
+        debug_assert!(value <= MAX_HANDLE_VALUE, "handle value reserved");
         AllocHandle(value)
     }
 
@@ -40,18 +46,36 @@ impl AllocHandle {
         self.0 == u32::MAX
     }
 
+    pub fn is_early_fence(self) -> bool {
+        self.0 == u32::MAX - 1
+    }
+
+    pub fn is_late_fence(self) -> bool {
+        self.0 == u32::MAX - 2
+    }
+
+    pub fn is_sentinel(self) -> bool {
+        self.is_early_fence() || self.is_late_fence()
+    }
+
+    pub fn is_empty(self) -> bool {
+        self.is_none() || self.is_sentinel()
+    }
+
     /// Check if this handle is a valid allocation.
     pub fn is_some(self) -> bool {
-        self.0 != u32::MAX
+        !self.is_empty()
     }
 
     /// Return the extent index encoded in the handle.
     pub fn extent_index(self) -> usize {
+        debug_assert!(!self.is_empty());
         (self.0 >> OFFSET_BITS) as usize
     }
 
     /// Return the byte offset encoded in the handle.
     pub fn offset_bytes(self) -> usize {
+        debug_assert!(!self.is_empty());
         ((self.0 & OFFSET_MASK) as usize) * ALIGN
     }
 }
@@ -529,6 +553,120 @@ fn list_index_for_size(size: usize) -> usize {
 fn align_up(value: usize, align: usize) -> usize {
     debug_assert!(align.is_power_of_two());
     (value + align - 1) & !(align - 1)
+}
+
+thread_local! {
+    static TLS_MEMORY_MANAGER: RefCell<MemoryManager> =
+        RefCell::new(MemoryManager::new());
+}
+
+pub(crate) fn reset_thread_local_manager() {
+    TLS_MEMORY_MANAGER.with(|manager| {
+        *manager.borrow_mut() = MemoryManager::new();
+    });
+}
+
+pub(crate) fn reset_thread_local_manager_with_limit(max_bytes: usize) {
+    TLS_MEMORY_MANAGER.with(|manager| {
+        *manager.borrow_mut() = MemoryManager::with_limit(max_bytes);
+    });
+}
+
+pub(crate) fn tls_has_headroom() -> bool {
+    TLS_MEMORY_MANAGER.with(|manager| manager.borrow().has_headroom())
+}
+
+pub(crate) struct ManagedSlice {
+    handle: AllocHandle,
+}
+
+impl ManagedSlice {
+    pub(crate) fn empty() -> Self {
+        Self {
+            handle: AllocHandle::NONE,
+        }
+    }
+
+    pub(crate) fn early_fence() -> Self {
+        Self {
+            handle: AllocHandle::EARLY,
+        }
+    }
+
+    pub(crate) fn late_fence() -> Self {
+        Self {
+            handle: AllocHandle::LATE,
+        }
+    }
+
+    pub(crate) fn alloc(key: &[u8], value: &[u8]) -> Option<Self> {
+        let key_len = u16::try_from(key.len()).ok()?;
+        let value_len = u16::try_from(value.len()).ok()?;
+        let total = key.len().checked_add(value.len())?.checked_add(4)?;
+
+        let key_len_bytes = key_len.to_le_bytes();
+        let value_len_bytes = value_len.to_le_bytes();
+
+        let handle = TLS_MEMORY_MANAGER.with(|manager| {
+            let mut manager = manager.borrow_mut();
+            let handle = manager.alloc(total)?;
+            let payload = manager.payload_mut(handle);
+            payload[..2].copy_from_slice(&key_len_bytes);
+            payload[2..2 + key.len()].copy_from_slice(key);
+            let value_len_offset = 2 + key.len();
+            payload[value_len_offset..value_len_offset + 2].copy_from_slice(&value_len_bytes);
+            payload[value_len_offset + 2..total].copy_from_slice(value);
+            Some(handle)
+        })?;
+
+        Some(Self { handle })
+    }
+
+    pub(crate) fn payload_info(&self) -> Option<(*const u8, usize, usize, usize)> {
+        if self.handle.is_empty() {
+            return None;
+        }
+        TLS_MEMORY_MANAGER.with(|manager| {
+            let manager = manager.borrow();
+            let payload = manager.payload(self.handle);
+            if payload.len() < 4 {
+                return None;
+            }
+            let key_len = u16::from_le_bytes([payload[0], payload[1]]) as usize;
+            let value_len_offset = 2usize.saturating_add(key_len);
+            if payload.len() < value_len_offset + 2 {
+                return None;
+            }
+            let value_len =
+                u16::from_le_bytes([payload[value_len_offset], payload[value_len_offset + 1]])
+                    as usize;
+            let total = value_len_offset + 2 + value_len;
+            debug_assert!(payload.len() >= total, "payload smaller than key+value");
+            Some((payload.as_ptr(), key_len, value_len, total))
+        })
+    }
+
+    pub(crate) fn allocation_size(&self) -> usize {
+        if self.handle.is_empty() {
+            return 0;
+        }
+        TLS_MEMORY_MANAGER.with(|manager| manager.borrow().allocation_size(self.handle))
+    }
+
+    pub(crate) fn release(&mut self) {
+        if self.handle.is_some() {
+            TLS_MEMORY_MANAGER.with(|manager| manager.borrow_mut().free(self.handle));
+            self.handle = AllocHandle::NONE;
+        }
+    }
+
+    pub(crate) fn is_early_fence(&self) -> bool {
+        self.handle.is_early_fence()
+    }
+
+    pub(crate) fn is_late_fence(&self) -> bool {
+        self.handle.is_late_fence()
+    }
 }
 
 #[cfg(test)]

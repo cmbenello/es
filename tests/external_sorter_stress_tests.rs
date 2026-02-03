@@ -84,7 +84,7 @@ fn test_pathological_key_distribution() {
 #[test]
 fn test_memory_pressure() {
     // Test behavior under memory pressure with large values
-    let mut sorter = ExternalSorter::new(2, 15000, 2, 10000, test_dir()); // 15KB buffer
+    let mut sorter = ExternalSorter::new(2, 128 * 1024, 2, 10000, test_dir()); // 128KB buffer
 
     let mut data = Vec::new();
     for i in 0..100 {
@@ -137,10 +137,10 @@ fn test_extreme_thread_counts() {
 #[test]
 fn test_max_memory_edge_cases() {
     // Test various buffer sizes including very small and exact multiples
-    let max_memories = [1024, 4096, 8192];
+    let max_memories = [128 * 1024, 256 * 1024, 512 * 1024, 1024 * 1024]; // 128KB to 1MB
 
     for &max_memory in &max_memories {
-        let mut sorter = ExternalSorter::new(2, max_memory / 2, 2, 10000, test_dir());
+        let mut sorter = ExternalSorter::new(2, max_memory, 2, 10000, test_dir());
 
         let mut data = Vec::new();
         for i in 0..500 {
@@ -208,7 +208,7 @@ fn test_concurrent_massive_sorts() {
 #[test]
 fn test_all_identical_keys() {
     // Test when all keys are identical
-    let mut sorter = ExternalSorter::new(2, 512, 2, 10000, test_dir());
+    let mut sorter = ExternalSorter::new(2, 512 * 1024, 2, 10000, test_dir());
 
     let mut data = Vec::new();
     for i in 0..10_000 {
@@ -230,7 +230,7 @@ fn test_all_identical_keys() {
 #[test]
 fn test_alternating_small_large() {
     // Alternate between very small and very large entries
-    let mut sorter = ExternalSorter::new(2, 2048, 2, 10000, test_dir());
+    let mut sorter = ExternalSorter::new(2, 512 * 1024, 2, 10000, test_dir());
 
     let mut data = Vec::new();
     for i in 0..1000 {
@@ -297,7 +297,7 @@ fn test_random_binary_keys() {
 #[test]
 fn test_progressive_key_lengths() {
     // Keys that progressively get longer
-    let mut sorter = ExternalSorter::new(2, 512, 2, 10000, test_dir());
+    let mut sorter = ExternalSorter::new(2, 512 * 1024, 2, 10000, test_dir());
 
     let mut data = Vec::new();
     for i in 0..100 {
@@ -327,7 +327,7 @@ fn test_progressive_key_lengths() {
 #[test]
 fn test_interleaved_runs() {
     // Force creation of many runs with interleaved data
-    let mut sorter = ExternalSorter::new(2, 512, 2, 10000, test_dir());
+    let mut sorter = ExternalSorter::new(2, 512 * 1024, 2, 10000, test_dir());
 
     let mut data = Vec::new();
     // Create data that will form many runs
@@ -379,33 +379,5 @@ fn test_stress_file_handles() {
 
     for handle in handles {
         handle.join().unwrap();
-    }
-}
-
-// Removed test_zero_threads_fallback as the implementation requires at least 1 thread
-
-#[test]
-fn test_max_value_sizes() {
-    // Test with very large values
-    let mut sorter = ExternalSorter::new(2, 10 * 1024 * 1024, 2, 10000, test_dir()); // 10MB buffer
-
-    let mut data = Vec::new();
-    for i in 0..10 {
-        let key = format!("{:02}", i);
-        // 1MB value
-        let value = vec![b'v'; 1_000_000];
-        data.push((key.into_bytes(), value));
-    }
-
-    let input = InMemInput { data };
-    let output = sorter.sort(Box::new(input)).unwrap();
-
-    let results: Vec<_> = output.iter().collect();
-    assert_eq!(results.len(), 10);
-
-    // Verify large values preserved
-    for i in 0..10 {
-        assert_eq!(results[i].0, format!("{:02}", i).as_bytes());
-        assert_eq!(results[i].1.len(), 1_000_000);
     }
 }

@@ -185,7 +185,7 @@ fn test_gensort_sort_integration() {
 
     // Sort using ExternalSorter
     let input = GenSortInputDirect::new(&test_file).unwrap();
-    let mut sorter = ExternalSorter::new(2, 512, 2, 10000, temp_dir.path());
+    let mut sorter = ExternalSorter::new(2, 512 * 1024, 2, 10000, temp_dir.path());
     let output = sorter.sort(Box::new(input)).unwrap();
 
     // Verify sorted output
