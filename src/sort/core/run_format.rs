@@ -6,7 +6,7 @@ use std::time::{Instant, SystemTime, UNIX_EPOCH};
 use crate::diskio::aligned_writer::AlignedWriter;
 use crate::diskio::file::SharedFd;
 use crate::diskio::io_stats::IoStatsTracker;
-use crate::ovc::offset_value_coding::OVCU64;
+use crate::ovc::offset_value_coding_32::OVCU32;
 use crate::sketch::{QuantileSampler, Sketch, SketchType};
 use crate::sort::core::engine::SortHooks;
 use crate::sort::core::engine::{RunSummary, Scanner};
@@ -37,7 +37,7 @@ pub trait RunFormat: Clone + Send + Sync + 'static {
     fn append_with_ovc(
         state: &mut Self::AppendState,
         run: &mut Self::Run,
-        ovc: OVCU64,
+        ovc: OVCU32,
         key: &[u8],
         value: &[u8],
     ) {
@@ -286,7 +286,7 @@ impl<F: RunFormat> RunSink for RunWriterSink<F> {
         }
     }
 
-    fn push_record_with_ovc(&mut self, ovc: OVCU64, key: &[u8], value: &[u8]) {
+    fn push_record_with_ovc(&mut self, ovc: OVCU32, key: &[u8], value: &[u8]) {
         self.record_sketch_sample(key);
 
         let run = self

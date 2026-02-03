@@ -183,7 +183,7 @@ pub trait SortHooks: Clone + Send + Sync + 'static {
 pub struct SorterCore<H: SortHooks> {
     hooks: H,
     run_gen_threads: usize,
-    run_size: usize,
+    run_gen_mem: usize,
     merge_threads: usize,
     merge_fanin: usize,
     sketch_type: SketchType,
@@ -199,7 +199,7 @@ impl<H: SortHooks> SorterCore<H> {
     pub fn with_hooks(
         hooks: H,
         run_gen_threads: usize,
-        run_size: usize,
+        run_gen_mem: usize,
         merge_threads: usize,
         merge_fanin: usize,
         base_dir: impl AsRef<Path>,
@@ -217,7 +217,7 @@ impl<H: SortHooks> SorterCore<H> {
         Self {
             hooks,
             run_gen_threads,
-            run_size,
+            run_gen_mem,
             merge_threads,
             merge_fanin,
             sketch_type: SketchType::Kll,
@@ -273,7 +273,7 @@ impl<H: SortHooks> SorterCore<H> {
             &self.hooks,
             sort_input,
             self.run_gen_threads,
-            self.run_size,
+            self.run_gen_mem,
             self.sketch_type,
             self.sketch_size,
             self.sketch_sampling_interval,
@@ -353,7 +353,7 @@ impl<H: SortHooks> SorterCore<H> {
 impl<H: SortHooks + Default> SorterCore<H> {
     pub fn with_defaults(
         run_gen_threads: usize,
-        run_size: usize,
+        run_gen_mem: usize,
         merge_threads: usize,
         merge_fanin: usize,
         base_dir: impl AsRef<Path>,
@@ -361,7 +361,7 @@ impl<H: SortHooks + Default> SorterCore<H> {
         Self::with_hooks(
             H::default(),
             run_gen_threads,
-            run_size,
+            run_gen_mem,
             merge_threads,
             merge_fanin,
             base_dir,

@@ -1,25 +1,25 @@
-use crate::ovc::offset_value_coding::{OVC64Trait, OVCKeyValue, OVCU64, SentinelValue};
+use crate::ovc::offset_value_coding_32::{OVC32Trait, OVCKeyValue32, OVCU32};
+use crate::ovc::offset_value_coding_64::SentinelValue;
 use crate::ovc::tree_of_losers_ovc::LoserTreeOVC;
 // K-way merge iterator
-pub struct MergeWithOVC<I: Iterator<Item = (OVCU64, Vec<u8>, Vec<u8>)>> {
+pub struct MergeWithOVC<I: Iterator<Item = (OVCU32, Vec<u8>, Vec<u8>)>> {
     // Tree of losers with OVC
-    tree: LoserTreeOVC<OVCKeyValue>,
+    tree: LoserTreeOVC<OVCKeyValue32>,
     // Iterators for each run
     iterators: Vec<I>,
 }
 
-impl<I: Iterator<Item = (OVCU64, Vec<u8>, Vec<u8>)>> MergeWithOVC<I> {
+impl<I: Iterator<Item = (OVCU32, Vec<u8>, Vec<u8>)>> MergeWithOVC<I> {
     pub fn new(mut iterators: Vec<I>) -> Self {
         if iterators.is_empty() || iterators.len() == 1 {
             panic!("MergeWithOVC requires at least two iterators");
         }
-
         let mut initial = Vec::with_capacity(iterators.len());
         for iter in iterators.iter_mut() {
             if let Some(val) = iter.next().map(|e| e.into()) {
                 initial.push(val);
             } else {
-                initial.push(OVCKeyValue::late_fence());
+                initial.push(OVCKeyValue32::late_fence());
             }
         }
 
@@ -29,14 +29,14 @@ impl<I: Iterator<Item = (OVCU64, Vec<u8>, Vec<u8>)>> MergeWithOVC<I> {
     }
 }
 
-impl<I: Iterator<Item = (OVCU64, Vec<u8>, Vec<u8>)>> Iterator for MergeWithOVC<I> {
-    type Item = (OVCU64, Vec<u8>, Vec<u8>);
+impl<I: Iterator<Item = (OVCU32, Vec<u8>, Vec<u8>)>> Iterator for MergeWithOVC<I> {
+    type Item = (OVCU32, Vec<u8>, Vec<u8>);
 
     fn next(&mut self) -> Option<Self::Item> {
         let (_, source_idx) = self.tree.peek()?;
         if let Some(mut next_item) = self.iterators[source_idx]
             .next()
-            .map(|e: Self::Item| OVCKeyValue::from(e))
+            .map(|e: Self::Item| OVCKeyValue32::from(e))
         {
             if next_item.ovc().is_duplicate_value() {
                 // For duplicate OVC, we swap the OVC value in the top of the tree
@@ -57,16 +57,16 @@ impl<I: Iterator<Item = (OVCU64, Vec<u8>, Vec<u8>)>> Iterator for MergeWithOVC<I
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ovc::offset_value_coding::OVC64Trait;
+    use crate::ovc::offset_value_coding_32::OVC32Trait;
 
     // Helper function to encode a sorted run with proper OVC values
-    fn encode_run_with_ovc(data: Vec<(Vec<u8>, Vec<u8>)>) -> Vec<(OVCU64, Vec<u8>, Vec<u8>)> {
+    fn encode_run_with_ovc(data: Vec<(Vec<u8>, Vec<u8>)>) -> Vec<(OVCU32, Vec<u8>, Vec<u8>)> {
         assert!(data.is_sorted_by_key(|(k, _)| k.clone()));
 
         let mut result = Vec::with_capacity(data.len());
 
         for (i, (key, value)) in data.into_iter().enumerate() {
-            let mut new_entry = OVCKeyValue::new(key, value);
+            let mut new_entry = OVCKeyValue32::new(key, value);
             if i > 0 {
                 new_entry.derive_ovc_from(&result[i - 1]);
             }
@@ -79,7 +79,7 @@ mod tests {
     #[test]
     #[should_panic(expected = "MergeWithOVC requires at least two iterators")]
     fn test_merge_empty_iterators() {
-        let iterators: Vec<std::vec::IntoIter<(OVCU64, Vec<u8>, Vec<u8>)>> = vec![];
+        let iterators: Vec<std::vec::IntoIter<(OVCU32, Vec<u8>, Vec<u8>)>> = vec![];
         let mut merger = MergeWithOVC::new(iterators);
 
         assert!(merger.next().is_none());
@@ -274,14 +274,14 @@ mod tests {
 
     #[test]
     fn test_merge_empty_and_nonempty() {
-        let data1: Vec<(OVCU64, Vec<u8>, Vec<u8>)> = vec![];
+        let data1: Vec<(OVCU32, Vec<u8>, Vec<u8>)> = vec![];
 
         let data2 = encode_run_with_ovc(vec![
             (b"a".to_vec(), b"1".to_vec()),
             (b"b".to_vec(), b"2".to_vec()),
         ]);
 
-        let data3: Vec<(OVCU64, Vec<u8>, Vec<u8>)> = vec![];
+        let data3: Vec<(OVCU32, Vec<u8>, Vec<u8>)> = vec![];
 
         let iterators = vec![data1.into_iter(), data2.into_iter(), data3.into_iter()];
         let merger = MergeWithOVC::new(iterators);

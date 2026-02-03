@@ -1164,6 +1164,7 @@ impl RecordSize for OVCKeyValue {
     }
 }
 
+#[allow(dead_code)]
 pub(crate) fn compute_ovc_delta(prev_key: Option<&[u8]>, key: &[u8]) -> OVCU64 {
     let Some(prev) = prev_key else {
         return OVCU64::initial_value();

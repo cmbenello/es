@@ -1,4 +1,4 @@
-use crate::ovc::offset_value_coding::OVCU64;
+use crate::ovc::offset_value_coding_32::OVCU32;
 use crate::sketch::Sketch;
 use crate::sort::core::engine::RunSummary;
 
@@ -8,7 +8,7 @@ pub trait RunSink: Send {
     fn start_run(&mut self);
     fn push_record(&mut self, key: &[u8], value: &[u8]);
     /// Push a record that carries an OVC delta; default falls back to plain KV.
-    fn push_record_with_ovc(&mut self, ovc: OVCU64, key: &[u8], value: &[u8]) {
+    fn push_record_with_ovc(&mut self, ovc: OVCU32, key: &[u8], value: &[u8]) {
         let _ = ovc;
         self.push_record(key, value);
     }

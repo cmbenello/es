@@ -222,12 +222,13 @@ where
     }
 }
 
+#[cfg(test)]
 mod tests {
     use std::collections::HashMap;
 
     use super::kll::*;
     use super::reservoir_sampler::*;
-    use super::*;
+    use crate::sketch::{MergeableSampler, QuantileSampler};
 
     #[test]
     fn test_range_partition_quality_uniform() {

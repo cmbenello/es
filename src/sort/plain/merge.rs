@@ -1,6 +1,6 @@
 use std::cmp::Ordering;
 
-use crate::ovc::offset_value_coding::{SentinelValue, Sentineled};
+use crate::ovc::offset_value_coding_64::{SentinelValue, Sentineled};
 use crate::ovc::tree_of_losers::LoserTree;
 
 // K-way merge iterator

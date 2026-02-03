@@ -1,4 +1,5 @@
-pub mod offset_value_coding;
+pub mod offset_value_coding_32;
+pub mod offset_value_coding_64;
 pub mod rand;
 // pub mod replacement_selection_heap;
 // pub mod replacement_selection_ovc;

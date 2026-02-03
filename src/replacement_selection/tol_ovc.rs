@@ -1,9 +1,11 @@
+use super::late_fence_slots::LateFenceSlots;
 use super::{
     RecordSize, ReplacementScanner, ReplacementSelectionStats, RunEmitter, ensure_entry_fits,
     next_record,
 };
-use crate::ovc::offset_value_coding::{OVC64Trait, OVCEntry, OVCKeyValue, OVCU64, SentinelValue};
-use crate::ovc::tree_of_losers_ovc::LoserTreeOVC;
+use crate::ovc::offset_value_coding_32::OVCKeyValue32;
+use crate::ovc::offset_value_coding_64::SentinelValue;
+use crate::ovc::tree_of_losers_ovc::{LoserTreeOVC, OVCTreeKey};
 use crate::sort::run_sink::RunSink;
 
 /// Replacement selection algorithm with Offset Value Coding (OVC) optimization.
@@ -20,7 +22,7 @@ use crate::sort::run_sink::RunSink;
 /// - Automatic OVC updates during comparisons via `LoserTreeOVC`
 /// - Memory-aware eviction based on workspace size constraints
 /// - Padding slot optimization for power-of-two tree capacities
-pub struct ReplacementSelectionOVC<T: OVC64Trait + RecordSize> {
+pub struct ReplacementSelectionOVC<T: OVCTreeKey + RecordSize> {
     /// Tournament tree for efficient min-element extraction with OVC updates
     tree: LoserTreeOVC<T>,
 
@@ -28,7 +30,7 @@ pub struct ReplacementSelectionOVC<T: OVC64Trait + RecordSize> {
     next_run_buffer: Vec<T>,
 
     /// Available padding slots in the tree (indices between num_elements and capacity)
-    late_fence_slots: Vec<usize>,
+    late_fence_slots: LateFenceSlots,
 
     /// Maximum allowed memory usage in bytes
     workspace_size: usize,
@@ -43,17 +45,7 @@ pub struct ReplacementSelectionOVC<T: OVC64Trait + RecordSize> {
     initialized: bool,
 }
 
-impl RecordSize for OVCEntry {
-    fn size(&self) -> usize {
-        // Struct overhead:
-        // - OVCU64 field: 8 bytes
-        // - Box<[u8]> header (key): 16 bytes (ptr + len on 64-bit)
-        const STRUCT_OVERHEAD: usize = 8 + 16; // 24 bytes
-        STRUCT_OVERHEAD + self.get_key().len()
-    }
-}
-
-impl<T: OVC64Trait + RecordSize> ReplacementSelectionOVC<T> {
+impl<T: OVCTreeKey + RecordSize> ReplacementSelectionOVC<T> {
     /// Create a new replacement selection instance with the specified workspace size.
     ///
     /// # Arguments
@@ -62,7 +54,7 @@ impl<T: OVC64Trait + RecordSize> ReplacementSelectionOVC<T> {
         Self {
             tree: LoserTreeOVC::new(vec![]),
             next_run_buffer: Vec::new(),
-            late_fence_slots: Vec::new(),
+            late_fence_slots: LateFenceSlots::new(),
             workspace_size,
             used_space: 0,
             tree_overhead: 0,
@@ -110,13 +102,12 @@ impl<T: OVC64Trait + RecordSize> ReplacementSelectionOVC<T> {
 
         self.update_tree_overhead(capacity);
 
-        self.tree = LoserTreeOVC::new(std::mem::take(&mut self.next_run_buffer));
-        self.late_fence_slots.clear();
+        let values = self.next_run_buffer.drain(..);
+        self.tree.reset_from_iter(num_real, values);
+        self.late_fence_slots.reset(capacity);
 
         // Capture padding slots (between num_real and next power of 2)
-        for i in (num_real..capacity).rev() {
-            self.late_fence_slots.push(i);
-        }
+        self.late_fence_slots.set_range(num_real, capacity);
     }
 
     fn update_tree_overhead(&mut self, capacity: usize) {
@@ -172,7 +163,7 @@ impl<T: OVC64Trait + RecordSize> ReplacementSelectionOVC<T> {
 
     /// Add a record to the next run buffer
     fn add_to_next_run(&mut self, mut record: T) {
-        *record.ovc_mut() = OVCU64::initial_value();
+        record.set_initial_ovc();
         self.next_run_buffer.push(record);
     }
 
@@ -274,7 +265,7 @@ where
             break;
         };
 
-        let record = OVCKeyValue::new(key, value);
+        let record = OVCKeyValue32::new(key, value);
         let size = record.size();
         ensure_entry_fits(size, memory_limit);
 
@@ -285,7 +276,9 @@ where
             projected_count.next_power_of_two()
         };
         let projected_overhead =
-            LoserTreeOVC::<OVCKeyValue>::structure_overhead_bytes_for_capacity(projected_capacity);
+            LoserTreeOVC::<OVCKeyValue32>::structure_overhead_bytes_for_capacity(
+                projected_capacity,
+            );
         if memory_used + size + projected_overhead > memory_limit {
             if rs.buffer_len() > 0 {
                 let (_, key, value) = record.take();
@@ -318,10 +311,12 @@ where
     let mut emitter = SinkEmitter {
         sink,
         emitted: &mut records_emitted,
+        #[cfg(debug_assertions)]
+        validator: OvcRunValidator::new(),
     };
 
     while let Some((key, value)) = next_record(&mut pending_record, scanner.as_mut()) {
-        let record = OVCKeyValue::new(key, value);
+        let record = OVCKeyValue32::new(key, value);
         let size = record.size();
         ensure_entry_fits(size, memory_limit);
 
@@ -338,21 +333,97 @@ where
 struct SinkEmitter<'a, S: RunSink> {
     sink: &'a mut S,
     emitted: &'a mut usize,
+    #[cfg(debug_assertions)]
+    validator: OvcRunValidator,
 }
 
-impl<'a, S: RunSink> RunEmitter<OVCKeyValue> for SinkEmitter<'a, S> {
-    fn emit(&mut self, record: OVCKeyValue) {
+impl<'a, S: RunSink> RunEmitter<OVCKeyValue32> for SinkEmitter<'a, S> {
+    fn emit(&mut self, record: OVCKeyValue32) {
         if record.is_sentinel() {
             return;
         }
         let (ovc, key, value) = record.take();
+        #[cfg(debug_assertions)]
+        self.validator.validate(ovc, &key);
         self.sink.push_record_with_ovc(ovc, &key, &value);
         *self.emitted += 1;
     }
 
     fn on_run_switch(&mut self) {
+        #[cfg(debug_assertions)]
+        self.validator.on_run_switch();
         self.sink.finish_run();
         self.sink.start_run();
+    }
+}
+
+#[cfg(debug_assertions)]
+struct OvcRunValidator {
+    prev_key: Option<Vec<u8>>,
+}
+
+#[cfg(debug_assertions)]
+impl OvcRunValidator {
+    fn new() -> Self {
+        Self { prev_key: None }
+    }
+
+    fn on_run_switch(&mut self) {
+        self.prev_key = None;
+    }
+
+    fn validate(&mut self, ovc: crate::ovc::offset_value_coding_32::OVCU32, key: &[u8]) {
+        use crate::ovc::offset_value_coding_32::compute_ovc_delta;
+        use crate::ovc::offset_value_coding_64::OVCFlag;
+
+        match self.prev_key.as_deref() {
+            None => {
+                assert!(
+                    ovc.is_initial_value(),
+                    "first record in run should be InitialValue, got flag {}",
+                    ovc.flag().as_u8()
+                );
+            }
+            Some(prev) => {
+                let consistent = match ovc.flag() {
+                    OVCFlag::EarlyFence | OVCFlag::LateFence => false,
+                    OVCFlag::DuplicateValue => prev == key,
+                    OVCFlag::InitialValue => false,
+                    OVCFlag::NormalValue => {
+                        let stored_offset = ovc.offset();
+                        if stored_offset > prev.len() || stored_offset > key.len() {
+                            false
+                        } else if prev[..stored_offset] != key[..stored_offset] {
+                            false
+                        } else {
+                            let stored_value = ovc.value();
+                            let actual_suffix = &key[stored_offset..];
+                            let check_len = stored_value.len().min(actual_suffix.len());
+                            if stored_value[..check_len] != actual_suffix[..check_len] {
+                                false
+                            } else if stored_value.len() > check_len
+                                && stored_value[check_len..].iter().any(|&b| b != 0)
+                            {
+                                false
+                            } else {
+                                true
+                            }
+                        }
+                    }
+                };
+
+                assert!(consistent, "inconsistent OVC for key {:?}", key);
+
+                let expected = compute_ovc_delta(Some(prev), key);
+                assert_eq!(
+                    ovc, expected,
+                    "non-optimal OVC for key {:?}: expected {}, got {}",
+                    key, expected, ovc
+                );
+            }
+        }
+
+        self.prev_key = Some(key.to_vec());
     }
 }
 
@@ -362,7 +433,8 @@ mod tests {
     use std::cell::RefCell;
 
     use super::*;
-    use crate::ovc::offset_value_coding::is_ovc_consistent;
+    use crate::ovc::offset_value_coding_32::OVCEntry32;
+    use crate::ovc::offset_value_coding_32::is_ovc_consistent;
 
     /// Helper to collect records into runs, automatically switching to a new run when requested
     struct RunCollector<T> {
@@ -393,7 +465,7 @@ mod tests {
         }
     }
 
-    fn make_entry(val: u16, size: usize) -> OVCEntry {
+    fn make_entry(val: u16, size: usize) -> OVCEntry32 {
         let mut key = vec![0; size];
         if size > 0 {
             key[0] = (val >> 8) as u8;
@@ -401,7 +473,7 @@ mod tests {
         if size > 1 {
             key[1] = val as u8;
         }
-        OVCEntry::new(key)
+        OVCEntry32::new(key)
     }
 
     #[test]
@@ -499,7 +571,7 @@ mod tests {
         // Drain to see all runs
         rs.drain_with(&mut collector);
 
-        let runs: Vec<Vec<OVCEntry>> = collector
+        let runs: Vec<Vec<OVCEntry32>> = collector
             .into_runs()
             .into_iter()
             .filter(|r| !r.is_empty())
@@ -533,16 +605,16 @@ mod tests {
         // For 10 items, capacity = 16, overhead = 16*8 + 24 = 152 bytes
         // Total per record with overhead ~= 34 bytes
         // Use workspace that can hold ~10 records with overhead
-        let record_size_with_overhead = 24 + item_size; // 34 bytes
+        let record_size_with_overhead = 28 + item_size; // 32-bit OVC entry overhead
         let tree_overhead_estimate =
-            LoserTreeOVC::<OVCEntry>::structure_overhead_bytes_for_capacity(16);
+            LoserTreeOVC::<OVCEntry32>::structure_overhead_bytes_for_capacity(16);
         let workspace_size =
             workspace_capacity_items * record_size_with_overhead + tree_overhead_estimate;
         let num_elements = 300;
 
         let mut rs = ReplacementSelectionOVC::new(workspace_size);
 
-        let mut data: Vec<OVCEntry> = (0..num_elements)
+        let mut data: Vec<OVCEntry32> = (0..num_elements)
             .map(|_| make_entry(rng.random_range(0..1000), item_size))
             .collect();
 
@@ -560,7 +632,7 @@ mod tests {
 
         rs.drain_with(&mut collector);
 
-        let runs: Vec<Vec<OVCEntry>> = collector
+        let runs: Vec<Vec<OVCEntry32>> = collector
             .into_runs()
             .into_iter()
             .filter(|r| !r.is_empty())
@@ -588,12 +660,12 @@ mod tests {
             }
             for i in 1..run_slice.len() {
                 assert!(
-                    run_slice[i].key() >= run_slice[i - 1].key(),
+                    run_slice[i].get_key() >= run_slice[i - 1].get_key(),
                     "Run {} is unsorted at index {}! {:?} < {:?}",
                     r,
                     i,
-                    run_slice[i].key(),
-                    run_slice[i - 1].key()
+                    run_slice[i].get_key(),
+                    run_slice[i - 1].get_key()
                 );
             }
         }

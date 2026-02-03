@@ -1,10 +1,11 @@
+use super::late_fence_slots::LateFenceSlots;
 use super::{
     ReplacementScanner, ReplacementSelectionStats, RunEmitter, ensure_entry_fits, next_record,
 };
-use crate::ovc::offset_value_coding::Sentineled;
+use crate::ovc::offset_value_coding_64::Sentineled;
 use crate::ovc::tree_of_losers::LoserTree;
 use crate::sort::run_sink::RunSink;
-use crate::{ovc::offset_value_coding::SentinelValue, replacement_selection::RecordSize};
+use crate::{ovc::offset_value_coding_64::SentinelValue, replacement_selection::RecordSize};
 
 pub struct ReplacementSelectionToL<T: Ord + SentinelValue + RecordSize> {
     /// Tournament tree for efficient min-element extraction
@@ -14,7 +15,7 @@ pub struct ReplacementSelectionToL<T: Ord + SentinelValue + RecordSize> {
     next_run_buffer: Vec<T>,
 
     /// Available padding slots in the tree (indices between num_elements and capacity)
-    late_fence_slots: Vec<usize>,
+    late_fence_slots: LateFenceSlots,
 
     /// Maximum allowed memory usage in bytes
     workspace_size: usize,
@@ -35,7 +36,7 @@ impl<T: Ord + SentinelValue + RecordSize> ReplacementSelectionToL<T> {
         Self {
             tree: LoserTree::new(vec![]),
             next_run_buffer: Vec::new(),
-            late_fence_slots: Vec::new(),
+            late_fence_slots: LateFenceSlots::new(),
             workspace_size,
             used_space: 0,
             initialized: false,
@@ -81,12 +82,10 @@ impl<T: Ord + SentinelValue + RecordSize> ReplacementSelectionToL<T> {
         };
 
         self.tree = LoserTree::new(std::mem::take(&mut self.next_run_buffer));
-        self.late_fence_slots.clear();
+        self.late_fence_slots.reset(capacity);
 
         // Capture padding slots (between num_real and next power of 2)
-        for i in (num_real..capacity).rev() {
-            self.late_fence_slots.push(i);
-        }
+        self.late_fence_slots.set_range(num_real, capacity);
     }
 
     /// Absorb a new record and stream evicted records via `emit`.
@@ -350,7 +349,7 @@ mod tests {
     use rand::{Rng, SeedableRng, rngs::StdRng};
 
     use super::{RecordSize, ReplacementSelectionToL, RunEmitter};
-    use crate::ovc::offset_value_coding::SentinelValue;
+    use crate::ovc::offset_value_coding_64::SentinelValue;
 
     /// Helper to collect records into runs, automatically switching to a new run when requested
     struct RunCollector<T> {

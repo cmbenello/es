@@ -1,6 +1,6 @@
 use std::mem;
 
-use crate::ovc::offset_value_coding::SentinelValue;
+use crate::ovc::offset_value_coding_64::SentinelValue;
 
 pub struct LoserTree<T> {
     // The tree nodes.

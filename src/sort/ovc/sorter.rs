@@ -1,6 +1,6 @@
 use crate::diskio::aligned_writer::AlignedWriter;
 use crate::diskio::io_stats::IoStatsTracker;
-use crate::ovc::offset_value_coding::OVCU64;
+use crate::ovc::offset_value_coding_32::OVCU32;
 use crate::sort::core::engine::SorterCore;
 use crate::sort::core::run_format::{
     FormatSortHooks, MergeableRun as GenericMergeableRun, RunFormat,
@@ -24,7 +24,7 @@ pub struct OvcAppendState {
 
 impl RunFormat for OvcRunFormat {
     type Run = RunWithOVC;
-    type Record = (OVCU64, Vec<u8>, Vec<u8>);
+    type Record = (OVCU32, Vec<u8>, Vec<u8>);
     type AppendState = OvcAppendState;
 
     fn new_run(writer: AlignedWriter, indexing_interval: usize) -> Result<Self::Run, String> {
@@ -47,7 +47,7 @@ impl RunFormat for OvcRunFormat {
     fn append_with_ovc(
         state: &mut Self::AppendState,
         run: &mut Self::Run,
-        ovc: OVCU64,
+        ovc: OVCU32,
         key: &[u8],
         value: &[u8],
     ) {
@@ -105,21 +105,21 @@ impl RunFormat for OvcRunFormat {
         sink: &mut S,
         run_size: usize,
     ) -> crate::replacement_selection::ReplacementSelectionStats {
-        crate::replacement_selection::run_replacement_selection_ovc(scanner, sink, run_size)
+        crate::replacement_selection::run_replacement_selection_ovc_mm(scanner, sink, run_size)
     }
 }
 
 impl SorterCore<OvcSortHooks> {
     pub fn new(
         run_gen_threads: usize,
-        run_size: usize,
+        run_gen_mem: usize,
         merge_threads: usize,
         merge_fanin: usize,
         base_dir: impl AsRef<std::path::Path>,
     ) -> Self {
         SorterCore::with_defaults(
             run_gen_threads,
-            run_size,
+            run_gen_mem,
             merge_threads,
             merge_fanin,
             base_dir,
@@ -132,7 +132,7 @@ mod tests {
     use super::*;
     use crate::diskio::aligned_writer::AlignedWriter;
     use crate::diskio::file::SharedFd;
-    use crate::ovc::offset_value_coding::compute_ovc_delta;
+    use crate::ovc::offset_value_coding_32::compute_ovc_delta;
     use crate::rand::small_thread_rng;
     use crate::sort::ovc::run::RunWithOVC;
     use crate::{InMemInput, sketch::SketchType};
@@ -167,7 +167,7 @@ mod tests {
         for i in 0..100 {
             let key = format!("a{:02}", i).into_bytes();
             let value = format!("value_{}", i).into_bytes();
-            run0.append(OVCU64::initial_value(), &key, &value);
+            run0.append(OVCU32::initial_value(), &key, &value);
         }
         run0.finalize_write();
 
@@ -178,7 +178,7 @@ mod tests {
         for i in 0..100 {
             let key = format!("b{:02}", i).into_bytes();
             let value = format!("value_{}", i + 100).into_bytes();
-            run1.append(OVCU64::initial_value(), &key, &value);
+            run1.append(OVCU32::initial_value(), &key, &value);
         }
         run1.finalize_write();
 
@@ -189,7 +189,7 @@ mod tests {
         for i in 0..100 {
             let key = format!("c{:02}", i).into_bytes();
             let value = format!("value_{}", i + 200).into_bytes();
-            run2.append(OVCU64::initial_value(), &key, &value);
+            run2.append(OVCU32::initial_value(), &key, &value);
         }
         run2.finalize_write();
 
@@ -204,9 +204,9 @@ mod tests {
 
     #[test]
     fn test_multi_level_merge_small_fanout() {
-        let num_records = 100000;
+        let num_records = 1000000;
         let num_threads_run_gen = 2;
-        let run_size = 512;
+        let run_size = 512 * 1024; // 512 KB
         let sketch_type = SketchType::Kll;
         let sketch_size = 200;
         let sketch_sampling_interval = 1000;
@@ -270,8 +270,8 @@ mod tests {
         // Generate runs
         let (runs, sketch, _) = ExternalSorterWithOVC::run_generation(
             Box::new(InMemInput { data }),
-            2,        // num_threads
-            256 * 20, // run_size
+            2,          // num_threads
+            256 * 1024, // run_size
             SketchType::Kll,
             100,  // sketch_size
             1000, // sketch_sampling_interval

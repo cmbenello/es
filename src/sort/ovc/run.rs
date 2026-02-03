@@ -3,7 +3,8 @@ use crate::diskio::aligned_writer::AlignedWriter;
 use crate::diskio::constants::align_down;
 use crate::diskio::file::SharedFd;
 use crate::diskio::io_stats::IoStatsTracker;
-use crate::ovc::offset_value_coding::{OVCFlag, OVCU64};
+use crate::ovc::offset_value_coding_32::OVCU32;
+use crate::ovc::offset_value_coding_64::OVCFlag;
 use crate::sort::core::engine::RunSummary;
 use std::io::{Read, Write};
 use std::sync::Arc;
@@ -99,7 +100,7 @@ impl RunWithOVC {
 }
 
 impl RunWithOVC {
-    pub fn append(&mut self, ovc: OVCU64, key: &[u8], value: &[u8]) {
+    pub fn append(&mut self, ovc: OVCU32, key: &[u8], value: &[u8]) {
         let writer = self
             .writer
             .as_mut()
@@ -122,7 +123,7 @@ impl RunWithOVC {
             writer.write_all(&ovc.to_le_bytes()).unwrap();
             writer.write_all(&value_len.to_le_bytes()).unwrap();
             writer.write_all(&value).unwrap();
-            self.total_bytes += 8 + 4 + value.len();
+            self.total_bytes += 4 + 4 + value.len();
             self.total_entries += 1;
             return;
         }
@@ -144,7 +145,7 @@ impl RunWithOVC {
         writer.write_all(&truncated_key).unwrap();
         writer.write_all(&value).unwrap();
 
-        self.total_bytes += 8 + 8 + truncated_key.len() + value.len();
+        self.total_bytes += 4 + 8 + truncated_key.len() + value.len();
         self.total_entries += 1;
     }
 
@@ -152,7 +153,7 @@ impl RunWithOVC {
         &self,
         lower_inc: &[u8],
         upper_exc: &[u8],
-    ) -> Box<dyn Iterator<Item = (OVCU64, Vec<u8>, Vec<u8>)> + Send> {
+    ) -> Box<dyn Iterator<Item = (OVCU32, Vec<u8>, Vec<u8>)> + Send> {
         self.scan_range_with_io_tracker(lower_inc, upper_exc, None)
     }
 
@@ -161,7 +162,7 @@ impl RunWithOVC {
         lower_inc: &[u8],
         upper_exc: &[u8],
         io_tracker: Option<IoStatsTracker>,
-    ) -> Box<dyn Iterator<Item = (OVCU64, Vec<u8>, Vec<u8>)> + Send> {
+    ) -> Box<dyn Iterator<Item = (OVCU32, Vec<u8>, Vec<u8>)> + Send> {
         // Handle empty runs (no entries written)
         if self.total_entries == 0 {
             return Box::new(std::iter::empty());
@@ -202,7 +203,7 @@ impl RunWithOVC {
                 total_bytes: self.total_bytes,
                 skip_bytes,
                 actual_start: self.start_bytes,
-            }) as Box<dyn Iterator<Item = (OVCU64, Vec<u8>, Vec<u8>)> + Send>;
+            }) as Box<dyn Iterator<Item = (OVCU32, Vec<u8>, Vec<u8>)> + Send>;
         }
 
         Box::new(RunIteratorWithOVC {
@@ -214,7 +215,7 @@ impl RunWithOVC {
             total_bytes: self.total_bytes,
             skip_bytes: 0,
             actual_start: self.start_bytes,
-        }) as Box<dyn Iterator<Item = (OVCU64, Vec<u8>, Vec<u8>)> + Send>
+        }) as Box<dyn Iterator<Item = (OVCU32, Vec<u8>, Vec<u8>)> + Send>
     }
 }
 
@@ -230,7 +231,7 @@ struct RunIteratorWithOVC {
 }
 
 impl Iterator for RunIteratorWithOVC {
-    type Item = (OVCU64, Vec<u8>, Vec<u8>);
+    type Item = (OVCU32, Vec<u8>, Vec<u8>);
 
     fn next(&mut self) -> Option<Self::Item> {
         use std::io::ErrorKind;
@@ -252,7 +253,7 @@ impl Iterator for RunIteratorWithOVC {
             }
 
             // Read OVC
-            let mut ovc_bytes = [0u8; 8];
+            let mut ovc_bytes = [0u8; 4];
             match self.reader.read_exact(&mut ovc_bytes) {
                 Ok(_) => {}
                 Err(e) if e.kind() == ErrorKind::UnexpectedEof => {
@@ -263,7 +264,7 @@ impl Iterator for RunIteratorWithOVC {
                     panic!("Failed to read OVC: {}", e);
                 }
             }
-            let ovc = OVCU64::from_le_bytes(ovc_bytes);
+            let ovc = OVCU32::from_le_bytes(ovc_bytes);
 
             // Optimize for duplicate keys: skip reading key_len, just use prev_key
             if ovc.flag() == OVCFlag::DuplicateValue {
@@ -281,7 +282,7 @@ impl Iterator for RunIteratorWithOVC {
                     .expect("Failed to read value");
 
                 // Update bytes read (no key_len field for duplicates)
-                self.bytes_read += 8 + 4 + value_len;
+                self.bytes_read += 4 + 4 + value_len;
 
                 // Use previous key
                 let key = self.prev_key.clone();
@@ -336,7 +337,7 @@ impl Iterator for RunIteratorWithOVC {
                 .expect("Failed to read value");
 
             // Update bytes read
-            self.bytes_read += 8 + 8 + truncated_key_len + value_len;
+            self.bytes_read += 4 + 8 + truncated_key_len + value_len;
 
             // Check if key is in range [lower_inc, upper_exc)
             if !self.lower_bound.is_empty() && key < self.lower_bound {
@@ -405,9 +406,9 @@ mod tests {
         let mut run = RunWithOVC::from_writer(writer).unwrap();
 
         // Append some data
-        run.append(OVCU64::initial_value(), b"key1", b"value1");
-        run.append(OVCU64::initial_value(), b"key2", b"value2");
-        run.append(OVCU64::initial_value(), b"key3", b"value3");
+        run.append(OVCU32::initial_value(), b"key1", b"value1");
+        run.append(OVCU32::initial_value(), b"key2", b"value2");
+        run.append(OVCU32::initial_value(), b"key3", b"value3");
 
         assert_eq!(run.total_entries, 3);
         assert!(run.total_bytes > 0);
@@ -425,9 +426,9 @@ mod tests {
         let mut run = RunWithOVC::from_writer(writer).unwrap();
 
         // Write sorted data
-        run.append(OVCU64::initial_value(), b"a", b"1");
-        run.append(OVCU64::initial_value(), b"b", b"2");
-        run.append(OVCU64::initial_value(), b"c", b"3");
+        run.append(OVCU32::initial_value(), b"a", b"1");
+        run.append(OVCU32::initial_value(), b"b", b"2");
+        run.append(OVCU32::initial_value(), b"c", b"3");
 
         let mut writer = run.finalize_write();
         writer.flush().unwrap();
@@ -436,13 +437,13 @@ mod tests {
         let results: Vec<_> = run.scan_range(&[], &[]).collect();
 
         assert_eq!(results.len(), 3);
-        assert_eq!(results[0].0, OVCU64::initial_value());
+        assert_eq!(results[0].0, OVCU32::initial_value());
         assert_eq!(results[0].1, b"a");
         assert_eq!(results[0].2, b"1");
-        assert_eq!(results[1].0, OVCU64::initial_value());
+        assert_eq!(results[1].0, OVCU32::initial_value());
         assert_eq!(results[1].1, b"b");
         assert_eq!(results[1].2, b"2");
-        assert_eq!(results[2].0, OVCU64::initial_value());
+        assert_eq!(results[2].0, OVCU32::initial_value());
         assert_eq!(results[2].1, b"c");
         assert_eq!(results[2].2, b"3");
     }
@@ -455,11 +456,11 @@ mod tests {
         let mut run = RunWithOVC::from_writer(writer).unwrap();
 
         // Write sorted data
-        run.append(OVCU64::initial_value(), b"a", b"1");
-        run.append(OVCU64::initial_value(), b"b", b"2");
-        run.append(OVCU64::initial_value(), b"c", b"3");
-        run.append(OVCU64::initial_value(), b"d", b"4");
-        run.append(OVCU64::initial_value(), b"e", b"5");
+        run.append(OVCU32::initial_value(), b"a", b"1");
+        run.append(OVCU32::initial_value(), b"b", b"2");
+        run.append(OVCU32::initial_value(), b"c", b"3");
+        run.append(OVCU32::initial_value(), b"d", b"4");
+        run.append(OVCU32::initial_value(), b"e", b"5");
 
         let mut writer = run.finalize_write();
         writer.flush().unwrap();
@@ -468,10 +469,10 @@ mod tests {
         let results: Vec<_> = run.scan_range(b"b", b"d").collect();
 
         assert_eq!(results.len(), 2);
-        assert_eq!(results[0].0, OVCU64::initial_value());
+        assert_eq!(results[0].0, OVCU32::initial_value());
         assert_eq!(results[0].1, b"b");
         assert_eq!(results[0].2, b"2");
-        assert_eq!(results[1].0, OVCU64::initial_value());
+        assert_eq!(results[1].0, OVCU32::initial_value());
         assert_eq!(results[1].1, b"c");
         assert_eq!(results[1].2, b"3");
     }
@@ -501,7 +502,7 @@ mod tests {
         // Add more entries than reservoir size
         for i in 0..20 {
             let key = format!("key_{:02}", i);
-            run.append(OVCU64::initial_value(), &key.into_bytes(), b"value");
+            run.append(OVCU32::initial_value(), &key.into_bytes(), b"value");
         }
 
         let writer = run.finalize_write();
@@ -561,8 +562,8 @@ mod tests {
         // Create large values
         let large_value = vec![b'x'; 1000];
 
-        run.append(OVCU64::initial_value(), b"key1", &large_value);
-        run.append(OVCU64::initial_value(), b"key2", &large_value);
+        run.append(OVCU32::initial_value(), b"key1", &large_value);
+        run.append(OVCU32::initial_value(), b"key2", &large_value);
 
         let mut writer = run.finalize_write();
         writer.flush().unwrap();
@@ -583,8 +584,8 @@ mod tests {
         let start_pos = writer.position() as usize;
         let mut run = RunWithOVC::from_writer(writer).unwrap();
 
-        run.append(OVCU64::initial_value(), b"key", b"value");
-        run.append(OVCU64::initial_value(), b"key2", b"value2");
+        run.append(OVCU32::initial_value(), b"key", b"value");
+        run.append(OVCU32::initial_value(), b"key2", b"value2");
 
         let (start, end) = run.byte_range();
         assert_eq!(start, start_pos);
@@ -599,9 +600,9 @@ mod tests {
         let mut run = RunWithOVC::from_writer(writer).unwrap();
 
         // Write with specific OVC values
-        run.append(OVCU64::normal_value(&[10], 0), b"key1", b"val1");
-        run.append(OVCU64::normal_value(&[20], 0), b"key2", b"val2");
-        run.append(OVCU64::normal_value(&[30], 0), b"key3", b"val3");
+        run.append(OVCU32::normal_value(&[10], 0), b"key1", b"val1");
+        run.append(OVCU32::normal_value(&[20], 0), b"key2", b"val2");
+        run.append(OVCU32::normal_value(&[30], 0), b"key3", b"val3");
 
         let writer = run.finalize_write();
         drop(writer); // Close writer to flush data
@@ -610,8 +611,8 @@ mod tests {
         let results: Vec<_> = run.scan_range(&[], &[]).collect();
 
         assert_eq!(results.len(), 3);
-        assert_eq!(results[0].0, OVCU64::normal_value(&[10], 0));
-        assert_eq!(results[1].0, OVCU64::normal_value(&[20], 0));
-        assert_eq!(results[2].0, OVCU64::normal_value(&[30], 0));
+        assert_eq!(results[0].0, OVCU32::normal_value(&[10], 0));
+        assert_eq!(results[1].0, OVCU32::normal_value(&[20], 0));
+        assert_eq!(results[2].0, OVCU32::normal_value(&[30], 0));
     }
 }
