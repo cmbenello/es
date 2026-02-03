@@ -29,7 +29,8 @@ impl BenchmarkRunner {
     /// Runs warmups (if configured) and the requested number of runs using the provided params
     pub fn run_configuration(&self) -> Result<BenchmarkResult, Box<dyn std::error::Error>> {
         let dataset_mb = self.input_provider.estimate_data_size_mb()?;
-        self.print_benchmark_header(dataset_mb)?;
+        let run_indexing_interval = self.compute_run_indexing_interval(dataset_mb);
+        self.print_benchmark_header(dataset_mb, run_indexing_interval)?;
 
         println!("Running benchmark for config: {}", self.config.config_name);
         println!(
@@ -46,17 +47,23 @@ impl BenchmarkRunner {
         println!("{}", "=".repeat(80));
 
         if self.config.warmup_runs > 0 {
-            self.run_warmup_runs()?;
+            self.run_warmup_runs(run_indexing_interval)?;
         }
 
-        let per_run_stats = self.run_policy_benchmark()?;
+        let per_run_stats = self.run_policy_benchmark(run_indexing_interval)?;
+        let mut result_config = self.config.clone();
+        result_config.run_indexing_interval = run_indexing_interval;
         Ok(BenchmarkResult {
-            config: self.config.clone(),
+            config: result_config,
             stats: per_run_stats,
         })
     }
 
-    fn print_benchmark_header(&self, dataset_mb: f64) -> Result<(), Box<dyn std::error::Error>> {
+    fn print_benchmark_header(
+        &self,
+        dataset_mb: f64,
+        run_indexing_interval: usize,
+    ) -> Result<(), Box<dyn std::error::Error>> {
         let total_entries = self.input_provider.get_entry_count();
 
         println!("\n=== BENCHMARK MODE ===");
@@ -77,10 +84,7 @@ impl BenchmarkRunner {
         println!("Merge memory (MB): {:.1}", self.config.merge_memory_mb);
         println!("Sketch type: {}", self.config.sketch_type);
         println!("Sketch size: {}", self.config.sketch_size);
-        println!(
-            "Run indexing interval: {}",
-            self.config.run_indexing_interval
-        );
+        println!("Run indexing interval: {}", run_indexing_interval);
         println!("Temporary directory: {:?}", self.config.temp_dir);
         println!("Warmup runs: {}", self.config.warmup_runs);
         println!("Runs per configuration: {}", self.config.benchmark_runs);
@@ -94,7 +98,10 @@ impl BenchmarkRunner {
         Ok(())
     }
 
-    fn run_warmup_runs(&self) -> Result<(), Box<dyn std::error::Error>> {
+    fn run_warmup_runs(
+        &self,
+        run_indexing_interval: usize,
+    ) -> Result<(), Box<dyn std::error::Error>> {
         println!("  Performing {} warmup run(s)...", self.config.warmup_runs);
 
         for warmup in 1..=self.config.warmup_runs {
@@ -110,7 +117,7 @@ impl BenchmarkRunner {
 
             let input = self.input_provider.create_sort_input()?;
 
-            let output = self.run_single_sort(input, &temp_dir)?;
+            let output = self.run_single_sort(input, &temp_dir, run_indexing_interval)?;
             let stats = output.stats();
             let run_gen_stats = stats.run_gen_stats;
             let multi_merge_stats = stats.per_merge_stats;
@@ -140,7 +147,10 @@ impl BenchmarkRunner {
         Ok(())
     }
 
-    fn run_policy_benchmark(&self) -> Result<Vec<SortStats>, Box<dyn std::error::Error>> {
+    fn run_policy_benchmark(
+        &self,
+        run_indexing_interval: usize,
+    ) -> Result<Vec<SortStats>, Box<dyn std::error::Error>> {
         let mut per_run_stats: Vec<SortStats> = Vec::new();
 
         for run in 1..=self.config.benchmark_runs {
@@ -156,7 +166,7 @@ impl BenchmarkRunner {
 
             let input = self.input_provider.create_sort_input()?;
 
-            let output = self.run_single_sort(input, &temp_dir)?;
+            let output = self.run_single_sort(input, &temp_dir, run_indexing_interval)?;
 
             println!("{}", output.stats());
 
@@ -209,6 +219,7 @@ impl BenchmarkRunner {
         &self,
         input: Box<dyn SortInput>,
         temp_dir: &Path,
+        run_indexing_interval: usize,
     ) -> Result<Box<dyn SortOutput>, Box<dyn std::error::Error>> {
         let output = if self.config.use_ovc {
             let mut sorter = ExternalSorterWithOVC::new(
@@ -221,7 +232,7 @@ impl BenchmarkRunner {
             sorter.set_sketch_type(self.config.sketch_type);
             sorter.set_sketch_size(self.config.sketch_size);
             sorter.set_sketch_sampling_interval(self.config.sketch_sampling_interval);
-            sorter.set_run_indexing_interval(self.config.run_indexing_interval);
+            sorter.set_run_indexing_interval(run_indexing_interval);
             sorter.set_imbalance_factor(self.config.imbalance_factor);
             sorter.set_discard_final_output(self.config.discard_final_output);
 
@@ -237,7 +248,7 @@ impl BenchmarkRunner {
             sorter.set_sketch_type(self.config.sketch_type);
             sorter.set_sketch_size(self.config.sketch_size);
             sorter.set_sketch_sampling_interval(self.config.sketch_sampling_interval);
-            sorter.set_run_indexing_interval(self.config.run_indexing_interval);
+            sorter.set_run_indexing_interval(run_indexing_interval);
             sorter.set_imbalance_factor(self.config.imbalance_factor);
             sorter.set_discard_final_output(self.config.discard_final_output);
 
@@ -245,6 +256,20 @@ impl BenchmarkRunner {
         };
 
         Ok(output)
+    }
+
+    // Use 5% of memory for indexing, min once in 1000 entries
+    fn compute_run_indexing_interval(&self, dataset_mb: f64) -> usize {
+        if !dataset_mb.is_finite() {
+            return 1000;
+        }
+        let memory_mb = self.config.run_size_mb * self.config.run_gen_threads as f64;
+        if !memory_mb.is_finite() || memory_mb <= 0.0 {
+            return 1000;
+        }
+        let interval = (dataset_mb / (memory_mb * 0.05)).ceil();
+        // e.g. for 200 GB dataset, 2 GB memory, interval = 200 / (2 * 0.05) = 2000
+        interval.max(1000.0) as usize
     }
 
     fn sync_filesystem(&self) -> Result<(), Box<dyn std::error::Error>> {
