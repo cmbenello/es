@@ -15,15 +15,11 @@ pub trait RunEmitter<T> {
 mod heap;
 mod late_fence_slots;
 mod memory;
-mod tol;
 mod tol_mm;
 mod tol_mm_ovc;
-mod tol_ovc;
 pub use heap::run_replacement_selection;
-pub use tol::run_replacement_selection_tol;
 pub use tol_mm::run_replacement_selection_mm;
 pub use tol_mm_ovc::run_replacement_selection_ovc_mm;
-pub use tol_ovc::run_replacement_selection_ovc;
 
 #[inline(always)]
 pub(crate) fn ensure_entry_fits(entry_size: usize, limit: usize) {
