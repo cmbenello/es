@@ -202,22 +202,6 @@ impl<T> Node<T> {
     }
 }
 
-impl<T> LoserTreeOVC<T> {
-    /// Estimated structural overhead of the tree (excluding T's own size).
-    pub fn structure_overhead_bytes_for_capacity(capacity: usize) -> usize {
-        if capacity == 0 {
-            return 0;
-        }
-        let vec_header = mem::size_of::<Vec<Node<T>>>();
-        let node_overhead = mem::size_of::<Node<T>>() - mem::size_of::<T>();
-        vec_header + capacity * node_overhead
-    }
-
-    pub fn structure_overhead_bytes(&self) -> usize {
-        Self::structure_overhead_bytes_for_capacity(self.capacity)
-    }
-}
-
 impl<T: OVCTreeKey> LoserTreeOVC<T> {
     pub fn new(values: Vec<T>) -> Self {
         let mut lt = Self {

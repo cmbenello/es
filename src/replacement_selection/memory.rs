@@ -251,6 +251,20 @@ impl MemoryManager {
         self.allocated_bytes < total.saturating_mul(95) / 100
     }
 
+    /// Raise the maximum byte capacity.  Only allows future extent growth;
+    /// existing extents and live allocations are unaffected.
+    /// Panics in debug builds if `new_max` is smaller than the current limit.
+    pub fn grow_limit(&mut self, new_max: usize) {
+        let new_extents = new_max / EXTENT_SIZE;
+        debug_assert!(
+            new_extents >= self.max_bytes.map_or(0, |m| m / EXTENT_SIZE),
+            "grow_limit called with a smaller limit"
+        );
+        if new_extents > 0 {
+            self.max_bytes = Some(new_extents * EXTENT_SIZE);
+        }
+    }
+
     /// Print a summary of free slots grouped by size.
     #[allow(dead_code)]
     pub fn print_free_slots(&self) {
@@ -574,6 +588,14 @@ pub(crate) fn reset_thread_local_manager_with_limit(max_bytes: usize) {
 
 pub(crate) fn tls_has_headroom() -> bool {
     TLS_MEMORY_MANAGER.with(|manager| manager.borrow().has_headroom())
+}
+
+pub(crate) fn tls_grow_limit(new_max: usize) {
+    TLS_MEMORY_MANAGER.with(|manager| manager.borrow_mut().grow_limit(new_max));
+}
+
+pub(crate) fn tls_allocated_bytes() -> usize {
+    TLS_MEMORY_MANAGER.with(|manager| manager.borrow().allocated_bytes())
 }
 
 pub(crate) struct ManagedSlice {

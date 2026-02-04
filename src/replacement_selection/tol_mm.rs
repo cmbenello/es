@@ -7,9 +7,10 @@ use super::late_fence_slots::LateFenceSlots;
 use super::memory::AllocHandle;
 use super::memory::{
     ManagedSlice, reset_thread_local_manager, reset_thread_local_manager_with_limit,
-    tls_has_headroom,
+    tls_allocated_bytes, tls_grow_limit, tls_has_headroom,
 };
 use super::{RecordSize, ReplacementScanner, ReplacementSelectionStats, RunEmitter, next_record};
+use crate::diskio::constants::DEFAULT_BUFFER_SIZE;
 use crate::ovc::offset_value_coding_64::SentinelValue;
 use crate::ovc::tree_of_losers::LoserTree;
 use crate::sort::run_sink::RunSink;
@@ -305,37 +306,95 @@ pub fn run_replacement_selection_mm<S>(
 where
     S: RunSink,
 {
-    let manager_limit = memory_limit.saturating_mul(9) / 10;
-    if manager_limit == 0 {
+    // Start at 50 % of the budget — safe for all block sizes down to the
+    // minimum (32 B).  Guarantee at least one extent when the budget allows;
+    // otherwise fall back to unlimited.
+    let initial_limit = {
+        let half = memory_limit / 2;
+        if half >= DEFAULT_BUFFER_SIZE {
+            half
+        } else if memory_limit >= DEFAULT_BUFFER_SIZE {
+            DEFAULT_BUFFER_SIZE
+        } else {
+            0
+        }
+    };
+    if initial_limit == 0 {
         reset_thread_local_manager();
     } else {
-        reset_thread_local_manager_with_limit(manager_limit);
+        reset_thread_local_manager_with_limit(initial_limit);
     }
 
     let mut rs = ReplacementSelectionMM::new();
     let mut pending_record: Option<(Vec<u8>, Vec<u8>)> = None;
+    let mut limit_adjusted = false;
 
     loop {
-        let Some((key, value)) = next_record(&mut pending_record, scanner.as_mut()) else {
-            break;
-        };
+        // --- fill until the manager is full or the scanner is empty ---
+        loop {
+            let Some((key, value)) = next_record(&mut pending_record, scanner.as_mut()) else {
+                break;
+            };
 
-        let key_len = key.len();
-        let value_len = value.len();
-        let record = match KeyValueMM::try_new(&key, &value) {
-            Some(record) => record,
-            None => {
-                if rs.buffer_len() > 0 {
-                    pending_record = Some((key, value));
-                    break;
+            let key_len = key.len();
+            let value_len = value.len();
+            let record = match KeyValueMM::try_new(&key, &value) {
+                Some(record) => record,
+                None => {
+                    if rs.buffer_len() > 0 {
+                        pending_record = Some((key, value));
+                        break;
+                    }
+                    panic!(
+                        "Memory manager allocation failed for key {} bytes, value {} bytes",
+                        key_len, value_len
+                    );
                 }
-                panic!(
-                    "Memory manager allocation failed for key {} bytes, value {} bytes",
-                    key_len, value_len
-                );
+            };
+            rs.insert_initial(record);
+        }
+
+        // One-shot: after the first fill saturates the manager, grow the
+        // limit toward the ideal split based on the actual average block size.
+        //
+        // Derivation
+        // ----------
+        // Budget constraint:
+        //   manager_used  +  tree_heap  ≤  memory_limit
+        //
+        //   manager_used  =  n × R          (n records, R = avg block size)
+        //   tree_heap     =  capacity × S   (S = size of Node<KeyValueMM>)
+        //   capacity      =  next_power_of_two(n)  ≤  2n   (worst case)
+        //
+        // Substitute and solve for manager_used (= ideal_limit):
+        //   n × R  +  2n × S  ≤  memory_limit
+        //   n  ≤  memory_limit / (R + 2S)
+        //   ideal_limit = n × R  ≤  memory_limit × R / (R + 2S)
+        //
+        // Variables in code:
+        //   R            = avg_block_size   (= allocated / n)
+        //   S            = size_of::<KeyValueMM>() + size_of::<u32>()   (8 B)
+        //   2S           = node_overhead    (16 B)
+        //
+        // Overflow: memory_limit × R is bounded by usize::MAX; R can be at
+        // most one extent (64 KiB), so overflow requires memory_limit ≥ 256 TiB.
+        // saturating_mul is a safety net that never fires on real hardware.
+        if !limit_adjusted && rs.buffer_len() > 0 && pending_record.is_some() && initial_limit > 0 {
+            limit_adjusted = true;
+            let n = rs.buffer_len();
+            let allocated = tls_allocated_bytes();
+            let avg_block_size = allocated / n; // R
+            let node_overhead = // 2S
+                2 * (std::mem::size_of::<KeyValueMM>() + std::mem::size_of::<u32>());
+            let ideal_limit =
+                memory_limit.saturating_mul(avg_block_size) / (avg_block_size + node_overhead);
+            if ideal_limit > initial_limit {
+                tls_grow_limit(ideal_limit);
+                continue; // re-enter fill; pending_record will be retried
             }
-        };
-        rs.insert_initial(record);
+        }
+
+        break;
     }
 
     if rs.buffer_len() == 0 {
@@ -1152,8 +1211,8 @@ mod tests {
     }
 
     #[test]
-    fn test_mm_manager_with_90_percent_limit() {
-        // Test that manager_limit is correctly calculated as 90% of memory_limit
+    fn test_mm_manager_with_adaptive_limit() {
+        // All 20 records fit within the initial 50 % fill; verify nothing is lost.
         let mut data = Vec::new();
         for i in 0..20u32 {
             data.push((key_bytes(i), vec![i as u8; 1000]));
@@ -1161,11 +1220,58 @@ mod tests {
         let scanner: ReplacementScanner = Box::new(data.into_iter());
         let mut sink = CollectingSink::new();
 
-        // The function should set manager limit to 90% of this
         run_replacement_selection_mm(scanner, &mut sink, 100_000);
 
         let total: usize = sink.runs.iter().map(|r| r.len()).sum();
         assert_eq!(total, 20);
+    }
+
+    #[test]
+    fn test_adaptive_limit_grows_past_initial_50_percent() {
+        // Concrete layout with value = 1000 B, key = 4 B (key_bytes):
+        //   manager block = align_up(2 + 4 + 2 + 1000 + 4 + 4, 32) = 1024 B   (R)
+        //   records per extent (64 KiB)                              = 64
+        //   node_overhead = 2 × (4 + 4) = 16                                   (2S)
+        //
+        // memory_limit = 2 MiB:
+        //   initial_limit = 1 MiB  → 16 extents → 1024 records   (50 %)
+        //   ideal_limit   = 2 MiB × 1024 / 1040
+        //                 = 2 064 888 → rounds to 31 extents → 1984 records
+        //
+        // Descending keys ⇒ every streaming record < tree minimum ⇒
+        // first run length == initial fill count, exactly.
+        // If the one-shot grow fires:  first_run = 1984.
+        // If it does not:              first_run = 1024.
+        let memory_limit = 2 * 1024 * 1024;
+        let num_records: u32 = 2500; // > 1984, forces streaming after fill
+
+        let data: Vec<(Vec<u8>, Vec<u8>)> = (0..num_records)
+            .rev() // descending
+            .map(|i| (key_bytes(i), vec![0u8; 1000]))
+            .collect();
+
+        let scanner: ReplacementScanner = Box::new(data.into_iter());
+        let mut sink = CollectingSink::new();
+        run_replacement_selection_mm(scanner, &mut sink, memory_limit);
+
+        // --- all records present ---
+        let total: usize = sink.runs.iter().map(|r| r.len()).sum();
+        assert_eq!(total, num_records as usize);
+
+        // --- first run must exceed the 50 %-only fill (1024) ---
+        let first_run_len = sink.runs[0].len();
+        assert!(
+            first_run_len > 1024,
+            "first run len {} ≤ 1024: adaptive grow did not fire",
+            first_run_len
+        );
+
+        // --- first run should land at the ideal fill (1984) ---
+        assert_eq!(
+            first_run_len, 1984,
+            "first run len {} ≠ 1984: grew to wrong extent count",
+            first_run_len
+        );
     }
 
     #[test]

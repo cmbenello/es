@@ -78,7 +78,11 @@ impl RunFormat for PlainRunFormat {
         sink: &mut S,
         run_gen_mem: usize,
     ) -> crate::replacement_selection::ReplacementSelectionStats {
-        crate::replacement_selection::run_replacement_selection_mm(scanner, sink, run_gen_mem)
+        crate::replacement_selection::run_replacement_selection_mm(
+            scanner,
+            sink,
+            run_gen_mem.saturating_mul(95) / 100,
+        )
     }
 }
 

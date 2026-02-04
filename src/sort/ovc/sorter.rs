@@ -105,7 +105,11 @@ impl RunFormat for OvcRunFormat {
         sink: &mut S,
         run_size: usize,
     ) -> crate::replacement_selection::ReplacementSelectionStats {
-        crate::replacement_selection::run_replacement_selection_ovc_mm(scanner, sink, run_size)
+        crate::replacement_selection::run_replacement_selection_ovc_mm(
+            scanner,
+            sink,
+            run_size.saturating_mul(95) / 100,
+        )
     }
 }
 
