@@ -12,7 +12,6 @@ use std::sync::Arc;
 pub struct IndexEntry {
     pub key: Vec<u8>,
     pub file_offset: usize,
-    pub entry_number: usize,
 }
 
 // File-based run implementation with direct I/O
@@ -109,7 +108,6 @@ impl Run {
             let index_entry = IndexEntry {
                 key: key.to_vec(),
                 file_offset: self.total_bytes,
-                entry_number: self.total_entries,
             };
             self.sparse_index.push(index_entry);
         }
@@ -1178,16 +1176,6 @@ mod tests {
             assert!(
                 run.sparse_index[i - 1].file_offset < run.sparse_index[i].file_offset,
                 "Index should be sorted by file offset"
-            );
-        }
-
-        // Verify sampling interval consistency
-        for (i, index_entry) in run.sparse_index.iter().enumerate() {
-            let expected_entry_number = i * 500;
-            assert_eq!(
-                index_entry.entry_number, expected_entry_number,
-                "Entry {} should have entry_number {}",
-                i, expected_entry_number
             );
         }
 
