@@ -511,7 +511,7 @@ mod tests {
             }
         }
 
-        fn finalize(self) -> (Vec<Self::MergeableRun>, Sketch<Vec<u8>>) {
+        fn finalize(self) -> Vec<Self::MergeableRun> {
             let runs = self
                 .runs
                 .into_iter()
@@ -520,7 +520,7 @@ mod tests {
                     bytes: run.iter().map(|(k, v)| k.len() + v.len()).sum(),
                 })
                 .collect();
-            (runs, Sketch::new(SketchType::Kll, 0))
+            runs
         }
     }
 

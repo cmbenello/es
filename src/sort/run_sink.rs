@@ -14,7 +14,7 @@ pub trait RunSink: Send {
     }
     fn finish_run(&mut self);
 
-    fn finalize(self) -> (Vec<Self::MergeableRun>, Sketch<Vec<u8>>);
+    fn finalize(self) -> Vec<Self::MergeableRun>;
 }
 
 /// A RunSink that discards all records (for benchmarking final merge without I/O)
@@ -58,11 +58,11 @@ impl RunSink for DiscardRunSink {
         // No-op
     }
 
-    fn finalize(self) -> (Vec<Self::MergeableRun>, Sketch<Vec<u8>>) {
+    fn finalize(self) -> Vec<Self::MergeableRun> {
         let run = EmptyRun {
             entries: self.record_count,
         };
         // Return empty sketch as we don't track key distribution in discard mode
-        (vec![run], Sketch::new(crate::sketch::SketchType::Kll, 0))
+        vec![run]
     }
 }

@@ -7,7 +7,6 @@ use crate::diskio::aligned_writer::AlignedWriter;
 use crate::diskio::file::SharedFd;
 use crate::diskio::io_stats::IoStatsTracker;
 use crate::ovc::offset_value_coding_32::OVCU32;
-use crate::sketch::{QuantileSampler, Sketch, SketchType};
 use crate::sort::core::engine::SortHooks;
 use crate::sort::core::engine::{RunSummary, Scanner};
 use crate::sort::run_sink::RunSink;
@@ -204,8 +203,6 @@ impl<F: RunFormat> Iterator for RangePartitionedIterator<F> {
 pub struct RunWriterSink<F: RunFormat> {
     run_writer: Option<AlignedWriter>,
     run_indexing_interval: usize,
-    sketch: Sketch<Vec<u8>>,
-    sketch_sampling_interval: usize,
     records_seen: u64,
     current_run: Option<F::Run>,
     append_state: Option<F::AppendState>,
@@ -213,18 +210,10 @@ pub struct RunWriterSink<F: RunFormat> {
 }
 
 impl<F: RunFormat> RunWriterSink<F> {
-    pub fn new(
-        writer: AlignedWriter,
-        run_indexing_interval: usize,
-        sketch_type: SketchType,
-        sketch_size: usize,
-        sketch_sampling_interval: usize,
-    ) -> Self {
+    pub fn new(writer: AlignedWriter, run_indexing_interval: usize) -> Self {
         Self {
             run_writer: Some(writer),
             run_indexing_interval,
-            sketch: Sketch::new(sketch_type, sketch_size),
-            sketch_sampling_interval,
             records_seen: 0,
             current_run: None,
             append_state: None,
@@ -241,17 +230,10 @@ impl<F: RunFormat> RunWriterSink<F> {
         self.append_state = None;
     }
 
-    fn into_parts(mut self) -> (Vec<MergeableRun<F>>, Sketch<Vec<u8>>) {
+    fn into_parts(mut self) -> Vec<MergeableRun<F>> {
         self.finalize_active_run();
         self.run_writer.take();
-        (self.runs, self.sketch)
-    }
-
-    fn record_sketch_sample(&mut self, key: &[u8]) {
-        if self.records_seen % self.sketch_sampling_interval as u64 == 0 {
-            self.sketch.update(key.to_vec());
-        }
-        self.records_seen += 1;
+        self.runs
     }
 }
 
@@ -272,8 +254,6 @@ impl<F: RunFormat> RunSink for RunWriterSink<F> {
     }
 
     fn push_record(&mut self, key: &[u8], value: &[u8]) {
-        self.record_sketch_sample(key);
-
         let run = self
             .current_run
             .as_mut()
@@ -287,8 +267,6 @@ impl<F: RunFormat> RunSink for RunWriterSink<F> {
     }
 
     fn push_record_with_ovc(&mut self, ovc: OVCU32, key: &[u8], value: &[u8]) {
-        self.record_sketch_sample(key);
-
         let run = self
             .current_run
             .as_mut()
@@ -305,7 +283,7 @@ impl<F: RunFormat> RunSink for RunWriterSink<F> {
         self.finalize_active_run();
     }
 
-    fn finalize(self) -> (Vec<Self::MergeableRun>, Sketch<Vec<u8>>) {
+    fn finalize(self) -> Vec<Self::MergeableRun> {
         self.into_parts()
     }
 }
@@ -336,21 +314,8 @@ impl<F: RunFormat> SortHooks for FormatSortHooks<F> {
     type MergeableRun = MergeableRun<F>;
     type Sink = RunWriterSink<F>;
 
-    fn create_sink(
-        &self,
-        writer: AlignedWriter,
-        run_indexing_interval: usize,
-        sketch_type: SketchType,
-        sketch_size: usize,
-        sketch_sampling_interval: usize,
-    ) -> Self::Sink {
-        RunWriterSink::new(
-            writer,
-            run_indexing_interval,
-            sketch_type,
-            sketch_size,
-            sketch_sampling_interval,
-        )
+    fn create_sink(&self, writer: AlignedWriter, run_indexing_interval: usize) -> Self::Sink {
+        RunWriterSink::new(writer, run_indexing_interval)
     }
 
     fn dummy_run(&self) -> Self::MergeableRun {

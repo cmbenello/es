@@ -231,13 +231,10 @@ mod tests {
             .collect();
         data.shuffle(&mut small_thread_rng());
 
-        let (runs, sketch, _run_gen_stats) = ExternalSorterWithOVC::run_generation(
+        let (runs, _run_gen_stats) = ExternalSorterWithOVC::run_generation(
             Box::new(InMemInput { data }),
             num_threads_run_gen,
             run_size,
-            sketch_type,
-            sketch_size,
-            sketch_sampling_interval,
             run_indexing_interval,
             temp_dir.path(),
         )
@@ -247,7 +244,6 @@ mod tests {
             runs,
             fanin,
             num_threads,
-            &sketch,
             imbalance_factor,
             temp_dir.path(),
         )
@@ -272,14 +268,11 @@ mod tests {
         data.shuffle(&mut small_thread_rng());
 
         // Generate runs
-        let (runs, sketch, _) = ExternalSorterWithOVC::run_generation(
+        let (runs, _) = ExternalSorterWithOVC::run_generation(
             Box::new(InMemInput { data }),
             2,          // num_threads
             256 * 1024, // run_size
-            SketchType::Kll,
-            100,  // sketch_size
-            1000, // sketch_sampling_interval
-            1000, // run_indexing_interval
+            1000,       // run_indexing_interval
             temp_dir.path(),
         )
         .unwrap();
@@ -297,9 +290,8 @@ mod tests {
         // Perform the merge
         let (merged_run, per_merge_stats) = ExternalSorterWithOVC::multi_merge(
             runs,
-            2, // fanin
-            2, // num_threads
-            &sketch,
+            2,   // fanin
+            2,   // num_threads
             1.0, // imbalance_factor
             temp_dir.path(),
         )

@@ -215,13 +215,10 @@ mod tests {
             .collect();
         data.shuffle(&mut small_thread_rng());
 
-        let (runs, sketch, _run_gen_stats) = ExternalSorter::run_generation(
+        let (runs, _run_gen_stats) = ExternalSorter::run_generation(
             Box::new(InMemInput { data }),
             num_threads_run_gen,
             run_gen_mem,
-            sketch_type,
-            sketch_size,
-            sketch_sampling_interval,
             run_indexing_interval,
             temp_dir.path(),
         )
@@ -231,7 +228,6 @@ mod tests {
             runs,
             fanin,
             num_threads,
-            &sketch,
             imbalance_factor,
             temp_dir.path(),
         )

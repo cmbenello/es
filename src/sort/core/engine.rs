@@ -18,7 +18,6 @@ pub type Scanner = Box<dyn Iterator<Item = (Vec<u8>, Vec<u8>)> + Send>;
 
 pub struct RunGenerationThreadResult<R> {
     pub runs: Vec<R>,
-    pub sketch: Sketch<Vec<u8>>,
     pub load_ms: u128,
     pub sort_ms: u128,
     pub store_ms: u128,
@@ -32,11 +31,9 @@ pub trait RunSummary {
 pub fn execute_run_generation<R, F>(
     sort_input: Box<dyn SortInput>,
     num_threads: usize,
-    sketch_type: SketchType,
-    sketch_size: usize,
     dir: impl AsRef<Path>,
     worker: F,
-) -> Result<(Vec<R>, Sketch<Vec<u8>>, RunGenerationStats), String>
+) -> Result<(Vec<R>, RunGenerationStats), String>
 where
     R: RunSummary + Send + 'static,
     F: Fn(usize, Scanner, Arc<IoStatsTracker>, PathBuf) -> RunGenerationThreadResult<R>
@@ -59,7 +56,6 @@ where
     if scanners.is_empty() {
         return Ok((
             vec![],
-            Sketch::new(sketch_type, sketch_size),
             RunGenerationStats {
                 num_runs: 0,
                 runs_info: vec![],
@@ -83,7 +79,6 @@ where
     }
 
     let mut output_runs = Vec::new();
-    let mut sketch = Sketch::new(sketch_type, sketch_size);
     let mut total_load_ms: u128 = 0;
     let mut total_sort_ms: u128 = 0;
     let mut total_store_ms: u128 = 0;
@@ -94,7 +89,6 @@ where
             .join()
             .map_err(|_| "Run generation worker panicked".to_string())?;
         output_runs.extend(result.runs);
-        sketch.merge(&result.sketch);
         total_load_ms += result.load_ms;
         total_sort_ms += result.sort_ms;
         total_store_ms += result.store_ms;
@@ -128,7 +122,6 @@ where
 
     Ok((
         output_runs,
-        sketch,
         RunGenerationStats {
             num_runs: initial_runs_count,
             runs_info: initial_runs_info,
@@ -145,14 +138,7 @@ pub trait SortHooks: Clone + Send + Sync + 'static {
     type MergeableRun: RunSummary + Send + Sync + 'static;
     type Sink: RunSink<MergeableRun = Self::MergeableRun> + Send;
 
-    fn create_sink(
-        &self,
-        writer: AlignedWriter,
-        run_indexing_interval: usize,
-        sketch_type: SketchType,
-        sketch_size: usize,
-        sketch_sampling_interval: usize,
-    ) -> Self::Sink;
+    fn create_sink(&self, writer: AlignedWriter, run_indexing_interval: usize) -> Self::Sink;
 
     fn dummy_run(&self) -> Self::MergeableRun;
 
@@ -268,15 +254,12 @@ impl<H: SortHooks> SorterCore<H> {
     fn run_generation_internal(
         &self,
         sort_input: Box<dyn SortInput>,
-    ) -> Result<(Vec<H::MergeableRun>, Sketch<Vec<u8>>, RunGenerationStats), String> {
+    ) -> Result<(Vec<H::MergeableRun>, RunGenerationStats), String> {
         run_generation_with_hooks(
             &self.hooks,
             sort_input,
             self.run_gen_threads,
             self.run_gen_mem,
-            self.sketch_type,
-            self.sketch_size,
-            self.sketch_sampling_interval,
             self.run_indexing_interval,
             self.temp_dir_info.as_ref().as_ref(),
         )
@@ -285,14 +268,12 @@ impl<H: SortHooks> SorterCore<H> {
     fn multi_merge_internal(
         &self,
         runs: Vec<H::MergeableRun>,
-        sketch: &Sketch<Vec<u8>>,
     ) -> Result<(H::MergeableRun, Vec<MergeStats>), String> {
         multi_merge_with_hooks(
             &self.hooks,
             runs,
             self.merge_fanin,
             self.merge_threads,
-            sketch,
             self.imbalance_factor,
             self.temp_dir_info.as_ref().as_ref(),
             self.discard_final_output,
@@ -303,12 +284,9 @@ impl<H: SortHooks> SorterCore<H> {
         sort_input: Box<dyn SortInput>,
         num_threads: usize,
         run_gen_mem: usize,
-        sketch_type: SketchType,
-        sketch_size: usize,
-        sketch_sampling_interval: usize,
         run_indexing_interval: usize,
         dir: impl AsRef<Path>,
-    ) -> Result<(Vec<H::MergeableRun>, Sketch<Vec<u8>>, RunGenerationStats), String>
+    ) -> Result<(Vec<H::MergeableRun>, RunGenerationStats), String>
     where
         H: Default,
     {
@@ -318,9 +296,6 @@ impl<H: SortHooks> SorterCore<H> {
             sort_input,
             num_threads,
             run_gen_mem,
-            sketch_type,
-            sketch_size,
-            sketch_sampling_interval,
             run_indexing_interval,
             dir,
         )
@@ -330,7 +305,6 @@ impl<H: SortHooks> SorterCore<H> {
         runs: Vec<H::MergeableRun>,
         fanin: usize,
         num_threads: usize,
-        sketch: &Sketch<Vec<u8>>,
         imbalance_factor: f64,
         dir: impl AsRef<Path>,
     ) -> Result<(H::MergeableRun, Vec<MergeStats>), String>
@@ -342,7 +316,6 @@ impl<H: SortHooks> SorterCore<H> {
             runs,
             fanin,
             num_threads,
-            sketch,
             imbalance_factor,
             dir.as_ref(),
             false, // Default: don't discard output
@@ -371,8 +344,8 @@ impl<H: SortHooks + Default> SorterCore<H> {
 
 impl<H: SortHooks> crate::Sorter for SorterCore<H> {
     fn sort(&mut self, sort_input: Box<dyn SortInput>) -> Result<Box<dyn SortOutput>, String> {
-        let (runs, sketch, run_gen_stats) = self.run_generation_internal(sort_input)?;
-        let (merged_run, merge_stats) = self.multi_merge_internal(runs, &sketch)?;
+        let (runs, run_gen_stats) = self.run_generation_internal(sort_input)?;
+        let (merged_run, merge_stats) = self.multi_merge_internal(runs)?;
         let output = self
             .hooks
             .into_output(merged_run, SortStats::new(run_gen_stats, merge_stats));
@@ -385,12 +358,9 @@ fn run_generation_with_hooks<H: SortHooks>(
     sort_input: Box<dyn SortInput>,
     num_threads: usize,
     run_gen_mem: usize,
-    sketch_type: SketchType,
-    sketch_size: usize,
-    sketch_sampling_interval: usize,
     run_indexing_interval: usize,
     dir: impl AsRef<Path>,
-) -> Result<(Vec<H::MergeableRun>, Sketch<Vec<u8>>, RunGenerationStats), String> {
+) -> Result<(Vec<H::MergeableRun>, RunGenerationStats), String> {
     let dir = dir.as_ref();
     let hooks = hooks.clone();
     let worker_hooks = hooks.clone();
@@ -403,16 +373,10 @@ fn run_generation_with_hooks<H: SortHooks>(
             );
             let run_writer = AlignedWriter::from_fd_with_tracker(fd, Some((*io_tracker).clone()))
                 .expect("Failed to create run writer");
-            let mut sink = worker_hooks.create_sink(
-                run_writer,
-                run_indexing_interval,
-                sketch_type,
-                sketch_size,
-                sketch_sampling_interval,
-            );
+            let mut sink = worker_hooks.create_sink(run_writer, run_indexing_interval);
             let thread_start = Instant::now();
             let _ = worker_hooks.run_replacement_selection(scanner, &mut sink, run_gen_mem);
-            let (local_runs, sketch) = sink.finalize();
+            let local_runs = sink.finalize();
             let total_time_ms = thread_start.elapsed().as_millis();
             println!(
                 "Run gen thread {} {} ms, {} runs generated",
@@ -422,21 +386,13 @@ fn run_generation_with_hooks<H: SortHooks>(
             );
             RunGenerationThreadResult {
                 runs: local_runs,
-                sketch,
                 load_ms: 0,
                 sort_ms: total_time_ms,
                 store_ms: 0,
             }
         };
 
-    execute_run_generation(
-        sort_input,
-        num_threads,
-        sketch_type,
-        sketch_size,
-        dir,
-        worker,
-    )
+    execute_run_generation(sort_input, num_threads, dir, worker)
 }
 
 fn multi_merge_with_hooks<H: SortHooks>(
@@ -444,7 +400,6 @@ fn multi_merge_with_hooks<H: SortHooks>(
     mut runs: Vec<H::MergeableRun>,
     fanin: usize,
     num_threads: usize,
-    sketch: &Sketch<Vec<u8>>,
     imbalance_factor: f64,
     dir: &Path,
     discard_final_output: bool,
@@ -481,7 +436,6 @@ fn multi_merge_with_hooks<H: SortHooks>(
             hooks,
             runs,
             num_threads,
-            sketch,
             imbalance_factor,
             dir,
             discard_final_output,
@@ -520,7 +474,6 @@ fn multi_merge_with_hooks<H: SortHooks>(
             hooks,
             batch,
             num_threads,
-            sketch,
             imbalance_factor,
             dir,
             should_discard,
@@ -545,7 +498,6 @@ fn merge_once_with_hooks<H: SortHooks>(
     hooks: &H,
     output_runs: Vec<H::MergeableRun>,
     num_threads: usize,
-    sketch: &Sketch<Vec<u8>>,
     imbalance_factor: f64,
     dir: &Path,
     discard_output: bool,
@@ -576,12 +528,7 @@ fn merge_once_with_hooks<H: SortHooks>(
 
     let merge_start = Instant::now();
     let merge_io_tracker = Arc::new(IoStatsTracker::new());
-    let cdf = Arc::new(sketch.cdf());
-    let merge_threads = if cdf.size() < num_threads {
-        1
-    } else {
-        num_threads
-    };
+    let merge_threads = num_threads;
 
     println!(
         "Merging {} runs using {} threads",
@@ -604,22 +551,12 @@ fn merge_once_with_hooks<H: SortHooks>(
         let runs = Arc::clone(&runs_arc);
         let dir = dir.to_path_buf();
         let io_tracker = Arc::clone(&merge_io_tracker);
-        let cdf = Arc::clone(&cdf);
         let hooks = hooks.clone();
 
         let handle = thread::spawn(move || {
             let tid = thread_id as f64;
-            let lower_bound = if thread_id == 0 {
-                vec![]
-            } else {
-                cdf.query(r / k + (tid - 1.0) * each)
-            };
-
-            let upper_bound = if thread_id < merge_threads - 1 {
-                cdf.query(r / k + tid * each)
-            } else {
-                vec![]
-            };
+            let lower_bound = todo!();
+            let upper_bound = todo!();
 
             hooks.merge_range(
                 runs,
