@@ -199,7 +199,11 @@ mod tests {
 
         let mergeable_run = MergeableRunWithOVC::RangePartitioned(vec![run0, run1, run2]);
 
-        let iter = mergeable_run.scan_range_with_io_tracker(b"a90", b"c10", None);
+        let iter = mergeable_run.scan_range_with_io_tracker(
+            Some((b"a90", 0, 0)),
+            Some((b"c10", 0, 0)),
+            None,
+        );
         let results: Vec<_> = iter.collect();
         assert_eq!(results.len(), 120);
         assert_eq!(results[0].1, b"a90");

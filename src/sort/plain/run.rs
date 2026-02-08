@@ -4,7 +4,7 @@ use crate::diskio::constants::align_down;
 use crate::diskio::file::SharedFd;
 use crate::diskio::io_stats::IoStatsTracker;
 use crate::sort::core::engine::RunSummary;
-use crate::sort::core::run_format::KeyRunIdOffsetBound;
+use crate::sort::core::run_format::{KeyRunIdOffsetBound, cmp_key_run_offset};
 use std::io::{Read, Write};
 use std::sync::Arc;
 
@@ -70,22 +70,32 @@ impl Run {
         self.sparse_index.first().map(|entry| entry.key.as_slice())
     }
 
-    fn find_start_position(&self, lower_bound: &[u8]) -> Option<(usize, Vec<u8>)> {
+    fn find_start_position(
+        &self,
+        lower_bound: Option<(&[u8], u32, usize)>,
+    ) -> Option<(usize, Vec<u8>)> {
         if self.sparse_index.is_empty() {
             return None;
         }
         let mut best_entry = &self.sparse_index[0];
-        if lower_bound.is_empty() {
+        let lower_bound = lower_bound.map(KeyRunIdOffsetBound::from_components);
+        if lower_bound.is_none() {
             return Some((best_entry.file_offset, best_entry.key.clone()));
         }
 
         // Binary search to find the last entry with key < lower_bound
         let mut left = 0;
         let mut right = self.sparse_index.len();
+        let lower_bound = lower_bound.unwrap();
 
         while left < right {
             let mid = left + (right - left) / 2;
-            if &self.sparse_index[mid].key[..] < lower_bound {
+            let mid_entry = &self.sparse_index[mid];
+            if cmp_key_run_offset(
+                (&mid_entry.key, 0, mid_entry.file_offset),
+                (&lower_bound.key, lower_bound.run_id, lower_bound.offset),
+            ) == std::cmp::Ordering::Less
+            {
                 best_entry = &self.sparse_index[mid];
                 left = mid + 1;
             } else {
@@ -175,10 +185,10 @@ impl Run {
                 reader,
                 lower_inc: lower_inc.map(KeyRunIdOffsetBound::from_components),
                 upper_exc: upper_exc.map(KeyRunIdOffsetBound::from_components),
-                bytes_read: aligned_offset,
-                total_bytes: self.total_bytes,
-                skip_bytes,
-                actual_start: self.start_bytes,
+                file_pos: aligned_offset,
+                run_len_bytes: self.total_bytes,
+                align_skip_bytes: skip_bytes,
+                run_start: self.start_bytes,
             }) as Box<dyn Iterator<Item = (Vec<u8>, Vec<u8>)> + Send>;
         }
 
@@ -186,10 +196,10 @@ impl Run {
             reader,
             lower_inc: lower_inc.map(KeyRunIdOffsetBound::from_components),
             upper_exc: upper_exc.map(KeyRunIdOffsetBound::from_components),
-            bytes_read: self.start_bytes, // Start from the beginning of this run
-            total_bytes: self.total_bytes,
-            skip_bytes: 0,
-            actual_start: self.start_bytes,
+            file_pos: self.start_bytes, // Start from the beginning of this run
+            run_len_bytes: self.total_bytes,
+            align_skip_bytes: 0,
+            run_start: self.start_bytes,
         }) as Box<dyn Iterator<Item = (Vec<u8>, Vec<u8>)> + Send>
     }
 }
@@ -198,10 +208,14 @@ struct RunIterator {
     reader: AlignedReader,
     lower_inc: Option<KeyRunIdOffsetBound>,
     upper_exc: Option<KeyRunIdOffsetBound>,
-    bytes_read: usize,
-    total_bytes: usize,
-    skip_bytes: usize,   // Bytes to skip after seeking to aligned position
-    actual_start: usize, // Where this run actually starts in the file
+    /// Absolute file offset where the reader currently is.
+    file_pos: usize,
+    /// Total bytes in this run (length from `run_start`).
+    run_len_bytes: usize,
+    /// Bytes to skip after seeking to aligned position (absolute).
+    align_skip_bytes: usize,
+    /// Absolute file offset where this run begins.
+    run_start: usize,
 }
 
 impl RunSummary for Run {
@@ -221,20 +235,22 @@ impl Iterator for RunIterator {
         use std::io::ErrorKind;
 
         // First, skip bytes if we sought to an aligned position
-        if self.skip_bytes > 0 {
-            let mut skip_buf = vec![0u8; self.skip_bytes];
+        if self.align_skip_bytes > 0 {
+            let mut skip_buf = vec![0u8; self.align_skip_bytes];
             self.reader
                 .read_exact(&mut skip_buf)
                 .expect("Failed to skip bytes after seek");
-            self.bytes_read += self.skip_bytes;
-            self.skip_bytes = 0;
+            self.file_pos += self.align_skip_bytes;
+            self.align_skip_bytes = 0;
         }
 
         loop {
             // Check if we've read all the actual data for this run
-            if self.total_bytes > 0 && self.bytes_read - self.actual_start >= self.total_bytes {
+            if self.run_len_bytes > 0 && self.file_pos - self.run_start >= self.run_len_bytes {
                 return None;
             }
+
+            let cur_offset = self.file_pos - self.run_start;
 
             // Read key length
             let mut key_len_bytes = [0u8; 4];
@@ -269,20 +285,24 @@ impl Iterator for RunIterator {
 
             // Update bytes read
             let entry_size = 8 + key.len() + value.len();
-            self.bytes_read += entry_size;
+            self.file_pos += entry_size;
 
             // Check if this entry belongs to our run
-            if self.bytes_read - entry_size < self.actual_start {
+            if self.file_pos - entry_size < self.run_start {
                 continue; // This entry is before our run
             }
 
             // Check if key is in range [lower_inc, upper_exc)
-            if !self.lower_inc.is_empty() && key < self.lower_inc {
-                continue;
+            if let Some(lb) = &self.lower_inc {
+                if lb.lt(&key, 0, cur_offset) {
+                    continue;
+                }
             }
-            if !self.upper_exc.is_empty() && key >= self.upper_exc {
-                // Since data is sorted in runs, we can stop here
-                return None;
+            if let Some(ub) = &self.upper_exc {
+                if ub.ge(&key, 0, cur_offset) {
+                    // Since data is sorted in runs, we can stop here
+                    return None;
+                }
             }
 
             return Some((key, value));
@@ -313,6 +333,10 @@ mod tests {
         AlignedWriter::from_fd(fd).unwrap()
     }
 
+    fn bound(key: &[u8]) -> Option<(&[u8], u32, usize)> {
+        Some((key, 0, 0))
+    }
+
     #[test]
     fn test_basic_append_and_scan() {
         let writer = get_test_writer("basic");
@@ -324,7 +348,7 @@ mod tests {
         run.append(b"key3", b"value3");
         run.finalize_write();
 
-        let mut iter = run.scan_range(&[], &[]);
+        let mut iter = run.scan_range(None, None);
         assert_eq!(iter.next(), Some((b"key1".to_vec(), b"value1".to_vec())));
         assert_eq!(iter.next(), Some((b"key2".to_vec(), b"value2".to_vec())));
         assert_eq!(iter.next(), Some((b"key3".to_vec(), b"value3".to_vec())));
@@ -342,7 +366,7 @@ mod tests {
         assert_eq!(run.total_entries(), 0);
 
         // Scanning should return no items
-        let mut iter = run.scan_range(&[], &[]);
+        let mut iter = run.scan_range(None, None);
         assert_eq!(iter.next(), None);
     }
 
@@ -360,21 +384,21 @@ mod tests {
         run.finalize_write();
 
         // Test inclusive lower bound
-        let iter = run.scan_range(b"b", &[]);
+        let iter = run.scan_range(bound(b"b"), None);
         let results: Vec<_> = iter.collect();
         assert_eq!(results.len(), 4);
         assert_eq!(results[0].0, b"b");
         assert_eq!(results[3].0, b"e");
 
         // Test exclusive upper bound
-        let iter = run.scan_range(&[], b"d");
+        let iter = run.scan_range(None, bound(b"d"));
         let results: Vec<_> = iter.collect();
         assert_eq!(results.len(), 3);
         assert_eq!(results[0].0, b"a");
         assert_eq!(results[2].0, b"c");
 
         // Test both bounds
-        let iter = run.scan_range(b"b", b"d");
+        let iter = run.scan_range(bound(b"b"), bound(b"d"));
         let results: Vec<_> = iter.collect();
         assert_eq!(results.len(), 2);
         assert_eq!(results[0].0, b"b");
@@ -394,7 +418,7 @@ mod tests {
         run.append(b"small", b"val");
         run.finalize_write();
 
-        let mut iter = run.scan_range(&[], &[]);
+        let mut iter = run.scan_range(None, None);
         let (key, value) = iter.next().unwrap();
         assert_eq!(key, large_key);
         assert_eq!(value, large_value);
@@ -423,7 +447,7 @@ mod tests {
         run.finalize_write();
 
         // Verify all entries are present
-        let iter = run.scan_range(&[], &[]);
+        let iter = run.scan_range(None, None);
         let mut count = 0;
         for (key, value) in iter {
             assert_eq!(key, entries[count].0);
@@ -444,11 +468,11 @@ mod tests {
         run.finalize_write();
 
         // First scan
-        let mut iter1 = run.scan_range(&[], &[]);
+        let mut iter1 = run.scan_range(None, None);
         assert_eq!(iter1.next().unwrap().0, b"a");
 
         // Second concurrent scan
-        let mut iter2 = run.scan_range(&[], &[]);
+        let mut iter2 = run.scan_range(None, None);
         assert_eq!(iter2.next().unwrap().0, b"a");
         assert_eq!(iter2.next().unwrap().0, b"b");
 
@@ -500,7 +524,7 @@ mod tests {
         run.append(&key2, &value2);
         run.finalize_write();
 
-        let mut iter = run.scan_range(&[], &[]);
+        let mut iter = run.scan_range(None, None);
         let (key, value) = iter.next().unwrap();
         assert_eq!(key, binary_key);
         assert_eq!(value, binary_value);
@@ -546,7 +570,7 @@ mod tests {
         run.finalize_write();
 
         // Verify all entries
-        let mut iter = run.scan_range(&[], &[]);
+        let mut iter = run.scan_range(None, None);
         for (expected_key, expected_value) in &entries {
             let (key, value) = iter.next().unwrap();
             assert_eq!(&key, expected_key);
@@ -564,7 +588,7 @@ mod tests {
         run.finalize_write();
 
         // Can still scan after multiple finalizes
-        let mut iter = run.scan_range(&[], &[]);
+        let mut iter = run.scan_range(None, None);
         assert_eq!(iter.next(), Some((b"key".to_vec(), b"value".to_vec())));
         assert_eq!(iter.next(), None);
     }
@@ -587,7 +611,7 @@ mod tests {
         }
         run.finalize_write();
 
-        let mut iter = run.scan_range(&[], &[]);
+        let mut iter = run.scan_range(None, None);
         for (key, value) in &test_cases {
             let (k, v) = iter.next().unwrap();
             assert_eq!(k, key.as_bytes());
@@ -610,7 +634,7 @@ mod tests {
         run.finalize_write();
 
         // Start a scan and read only partially
-        let mut iter = run.scan_range(&[], &[]);
+        let mut iter = run.scan_range(None, None);
         assert_eq!(iter.next().unwrap().0, b"00");
         assert_eq!(iter.next().unwrap().0, b"01");
         assert_eq!(iter.next().unwrap().0, b"02");
@@ -618,7 +642,7 @@ mod tests {
         drop(iter);
 
         // Start a new scan - should work fine
-        let iter = run.scan_range(&[], &[]);
+        let iter = run.scan_range(None, None);
         let all: Vec<_> = iter.collect();
         assert_eq!(all.len(), 10);
     }
@@ -646,7 +670,7 @@ mod tests {
 
         run.finalize_write();
 
-        let mut iter = run.scan_range(&[], &[]);
+        let mut iter = run.scan_range(None, None);
 
         let (k, v) = iter.next().unwrap();
         assert_eq!(k, Vec::<u8>::new());
@@ -683,7 +707,7 @@ mod tests {
         run.finalize_write();
 
         // Verify all entries
-        let iter = run.scan_range(&[], &[]);
+        let iter = run.scan_range(None, None);
         let all: Vec<_> = iter.collect();
         assert_eq!(all.len(), count);
 
@@ -740,7 +764,7 @@ mod tests {
         run.append(b"small", b"entry");
         run.finalize_write();
 
-        let mut iter = run.scan_range(&[], &[]);
+        let mut iter = run.scan_range(None, None);
         let (k, v) = iter.next().unwrap();
         assert_eq!(k.len(), 1_000_000);
         assert_eq!(v.len(), 5_000_000);
@@ -771,7 +795,7 @@ mod tests {
         }
         run.finalize_write();
 
-        let iter = run.scan_range(&[], &[]);
+        let iter = run.scan_range(None, None);
         let all: Vec<_> = iter.collect();
         assert_eq!(all.len(), 100);
 
@@ -797,7 +821,7 @@ mod tests {
         run.finalize_write();
 
         // Verify we can still read the data
-        let mut iter = run.scan_range(&[], &[]);
+        let mut iter = run.scan_range(None, None);
         let mut count = 0;
         while iter.next().is_some() {
             count += 1;
@@ -816,7 +840,7 @@ mod tests {
         run.finalize_write();
 
         // Scan with equal lower and upper bounds - should return nothing
-        let iter = run.scan_range(b"b", b"b");
+        let iter = run.scan_range(bound(b"b"), bound(b"b"));
         let results: Vec<_> = iter.collect();
         assert_eq!(results.len(), 0);
     }
@@ -833,7 +857,7 @@ mod tests {
         run.append(b"other", b"value");
         run.finalize_write();
 
-        let iter = run.scan_range(&[], &[]);
+        let iter = run.scan_range(None, None);
         let all: Vec<_> = iter.collect();
         assert_eq!(all.len(), 4);
 
@@ -932,7 +956,7 @@ mod tests {
         let (initial_read_ops, initial_read_bytes) = read_tracker.get_read_stats();
 
         // Scan all records with IO tracking
-        let iter = run.scan_range_with_io_tracker(&[], &[], Some(read_tracker.clone()));
+        let iter = run.scan_range_with_io_tracker(None, None, Some(read_tracker.clone()));
         let scanned_records: Vec<_> = iter.collect();
 
         // Get final stats after scanning
@@ -966,8 +990,8 @@ mod tests {
         // Test partial scan to show different IO patterns
         let partial_tracker = IoStatsTracker::new();
         let iter = run.scan_range_with_io_tracker(
-            b"key_00000100",
-            b"key_00000150",
+            bound(b"key_00000100"),
+            bound(b"key_00000150"),
             Some(partial_tracker.clone()),
         );
         let partial_results: Vec<_> = iter.collect();
@@ -1035,7 +1059,8 @@ mod tests {
 
             for test_key in &test_keys {
                 let io_tracker = IoStatsTracker::new();
-                let iter = run.scan_range_with_io_tracker(test_key, &[], Some(io_tracker.clone()));
+                let iter =
+                    run.scan_range_with_io_tracker(bound(test_key), None, Some(io_tracker.clone()));
                 let results: Vec<_> = iter.take(100).collect(); // Only take first 100 to avoid reading everything
 
                 let (read_ops, read_bytes) = io_tracker.get_read_stats();
@@ -1098,15 +1123,30 @@ mod tests {
 
         // Test different merge patterns
         let test_cases = [
-            ("Full scan both runs", &b""[..], &b""[..]),
-            ("Middle range", b"key_00002000", b"key_00003000"),
-            ("Early range", b"key_00000100", b"key_00000200"),
-            ("Late range", b"key_00004800", b"key_00004900"),
+            ("Full scan both runs", None, None),
+            (
+                "Middle range",
+                Some(b"key_00002000".as_ref()),
+                Some(b"key_00003000".as_ref()),
+            ),
+            (
+                "Early range",
+                Some(b"key_00000100".as_ref()),
+                Some(b"key_00000200".as_ref()),
+            ),
+            (
+                "Late range",
+                Some(b"key_00004800".as_ref()),
+                Some(b"key_00004900".as_ref()),
+            ),
         ];
 
         for (test_name, lower, upper) in &test_cases {
             let tracker1 = IoStatsTracker::new();
             let tracker2 = IoStatsTracker::new();
+
+            let lower = lower.map(|k| (k, 0, 0));
+            let upper = upper.map(|k| (k, 0, 0));
 
             let iter1 = run1.scan_range_with_io_tracker(lower, upper, Some(tracker1.clone()));
             let iter2 = run2.scan_range_with_io_tracker(lower, upper, Some(tracker2.clone()));
@@ -1195,7 +1235,7 @@ mod tests {
 
         // Test that scan_range uses the sparse index efficiently
         let lower = b"25000";
-        let iter = run.scan_range(lower, &[]);
+        let iter = run.scan_range(bound(lower), None);
         let results: Vec<_> = iter.collect();
 
         // Should get approximately half the entries
@@ -1219,7 +1259,7 @@ mod tests {
         // Test that scan_range with a high lower bound is efficient
         // It should use the sparse index to skip ahead
         let lower = b"4000";
-        let iter = run.scan_range(lower, &[]);
+        let iter = run.scan_range(bound(lower), None);
         let results: Vec<_> = iter.collect();
 
         // Should get entries from 4000 onwards
@@ -1274,7 +1314,7 @@ mod tests {
         run.finalize_write();
 
         // Test 1: Full scan - should get all duplicates
-        let iter = run.scan_range(&[], &[]);
+        let iter = run.scan_range(None, None);
         let all: Vec<_> = iter.collect();
         assert_eq!(all.len(), 600); // Total entries
 
@@ -1286,7 +1326,7 @@ mod tests {
         assert_eq!(actual_counts, expected_counts);
 
         // Test 2: Scan range [b, d) - should get all 'b' and 'c' entries
-        let iter = run.scan_range(b"b", b"d");
+        let iter = run.scan_range(bound(b"b"), bound(b"d"));
         let range_results: Vec<_> = iter.collect();
         assert_eq!(range_results.len(), 350); // 200 'b' + 150 'c'
 
@@ -1302,12 +1342,12 @@ mod tests {
         assert_eq!(c_count, 150);
 
         // Test 3: Scan range [c, c) - should get nothing (exclusive upper bound)
-        let iter = run.scan_range(b"c", b"c");
+        let iter = run.scan_range(bound(b"c"), bound(b"c"));
         let empty: Vec<_> = iter.collect();
         assert_eq!(empty.len(), 0);
 
         // Test 4: Scan range [c, d) - should get all 'c' entries
-        let iter = run.scan_range(b"c", b"d");
+        let iter = run.scan_range(bound(b"c"), bound(b"d"));
         let c_only: Vec<_> = iter.collect();
         assert_eq!(c_only.len(), 150);
         for (key, _) in &c_only {
@@ -1315,12 +1355,12 @@ mod tests {
         }
 
         // Test 5: Scan with lower bound only [d, ...) - should get 'd' and 'e'
-        let iter = run.scan_range(b"d", &[]);
+        let iter = run.scan_range(bound(b"d"), None);
         let d_onwards: Vec<_> = iter.collect();
         assert_eq!(d_onwards.len(), 150); // 100 'd' + 50 'e'
 
         // Test 6: Scan with upper bound only [..., c) - should get 'a' and 'b'
-        let iter = run.scan_range(&[], b"c");
+        let iter = run.scan_range(None, bound(b"c"));
         let before_c: Vec<_> = iter.collect();
         assert_eq!(before_c.len(), 300); // 100 'a' + 200 'b'
     }
@@ -1360,7 +1400,7 @@ mod tests {
         // Test scan ranges work correctly with sparse index
 
         // Range [bbb, ccc) should return exactly 1000 'bbb' entries
-        let iter = run.scan_range(b"bbb", b"ccc");
+        let iter = run.scan_range(bound(b"bbb"), bound(b"ccc"));
         let bbb_results: Vec<_> = iter.collect();
         assert_eq!(bbb_results.len(), 10000);
         for (key, _) in &bbb_results {
@@ -1368,17 +1408,17 @@ mod tests {
         }
 
         // Range [b, c) should also return 1000 'bbb' entries
-        let iter = run.scan_range(b"b", b"c");
+        let iter = run.scan_range(bound(b"b"), bound(b"c"));
         let b_range: Vec<_> = iter.collect();
         assert_eq!(b_range.len(), 10000);
 
         // Range [aab, bba) should return 0 entries (no keys in this range)
-        let iter = run.scan_range(b"aab", b"bba");
+        let iter = run.scan_range(bound(b"aab"), bound(b"bba"));
         let empty: Vec<_> = iter.collect();
         assert_eq!(empty.len(), 0);
 
         // Full scan should return all 3000 entries
-        let iter = run.scan_range(&[], &[]);
+        let iter = run.scan_range(None, None);
         let all: Vec<_> = iter.collect();
         assert_eq!(all.len(), 30000);
     }
@@ -1442,9 +1482,9 @@ mod tests {
         drop(run3.finalize_write());
 
         // Now read from each run using their actual byte ranges
-        let run1_data: Vec<_> = run1.scan_range(&[], &[]).collect();
-        let run2_data: Vec<_> = run2.scan_range(&[], &[]).collect();
-        let run3_data: Vec<_> = run3.scan_range(&[], &[]).collect();
+        let run1_data: Vec<_> = run1.scan_range(None, None).collect();
+        let run2_data: Vec<_> = run2.scan_range(None, None).collect();
+        let run3_data: Vec<_> = run3.scan_range(None, None).collect();
 
         println!("Run1 data length: {}", run1_data.len());
         println!("Run2 data length: {}", run2_data.len());

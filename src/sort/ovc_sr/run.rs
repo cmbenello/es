@@ -6,11 +6,10 @@ use crate::diskio::io_stats::IoStatsTracker;
 use crate::ovc::offset_value_coding_32::OVCU32;
 use crate::ovc::offset_value_coding_64::OVCFlag;
 use crate::sort::core::engine::RunSummary;
-use crate::sort::core::run_format::{KeyRunIdOffsetBound, cmp_key_run_offset};
-use crate::sort::ovc::run::RUN_ID_COUNTER;
+use crate::sort::core::run_format::{KeyRunIdOffsetBound, RUN_ID_COUNTER, cmp_key_run_offset};
 use std::io::{Read, Write};
 use std::sync::Arc;
-use std::sync::atomic::{Ordering};
+use std::sync::atomic::Ordering;
 
 // Sparse index entry
 #[derive(Debug, Clone)]
@@ -19,7 +18,6 @@ pub struct IndexEntry {
     /// Offset in bytes from the start of this run (not the start of the file).
     pub file_offset: usize,
 }
-
 
 // File-based run implementation with direct I/O
 pub struct RunWithOVCSR {
@@ -81,7 +79,10 @@ impl RunWithOVCSR {
         self.sparse_index.first().map(|entry| entry.key.as_slice())
     }
 
-    fn find_start_position(&self, lower_inc: Option<&KeyRunIdOffsetBound>) -> Option<(usize, Vec<u8>)> {
+    fn find_start_position(
+        &self,
+        lower_inc: Option<&KeyRunIdOffsetBound>,
+    ) -> Option<(usize, Vec<u8>)> {
         if self.sparse_index.is_empty() {
             return None;
         }
@@ -90,7 +91,7 @@ impl RunWithOVCSR {
             return Some((best_entry.file_offset, best_entry.key.clone()));
         }
 
-        // Binary search to find the last entry with key < lower_bound_with_suffix
+        // Binary search to find the last entry with key < lower bound (KeyRunIdOffsetBound order)
         let mut left = 0;
         let mut right = self.sparse_index.len();
         let lower_inc = lower_inc.unwrap();
@@ -230,11 +231,11 @@ impl RunWithOVCSR {
                 lower_inc,
                 upper_exc,
                 // Absolute file offset of the aligned seek position.
-                bytes_read: aligned_offset,
-                total_bytes: self.total_bytes,
-                skip_bytes,
+                file_pos: aligned_offset,
+                run_len_bytes: self.total_bytes,
+                align_skip_bytes: skip_bytes,
                 // Absolute file offset where this run begins.
-                actual_start: self.start_bytes,
+                run_start: self.start_bytes,
             }) as Box<dyn Iterator<Item = (OVCU32, Vec<u8>, Vec<u8>)> + Send>;
         }
 
@@ -245,11 +246,11 @@ impl RunWithOVCSR {
             lower_inc,
             upper_exc,
             // Absolute file offset where this run begins.
-            bytes_read: self.start_bytes,
-            total_bytes: self.total_bytes,
-            skip_bytes: 0,
+            file_pos: self.start_bytes,
+            run_len_bytes: self.total_bytes,
+            align_skip_bytes: 0,
             // Absolute file offset where this run begins.
-            actual_start: self.start_bytes,
+            run_start: self.start_bytes,
         }) as Box<dyn Iterator<Item = (OVCU32, Vec<u8>, Vec<u8>)> + Send>
     }
 }
@@ -261,13 +262,13 @@ struct RunIteratorWithOVC {
     lower_inc: Option<KeyRunIdOffsetBound>,
     upper_exc: Option<KeyRunIdOffsetBound>,
     /// Absolute file offset where the reader currently is.
-    bytes_read: usize,
-    /// Total bytes in this run (length from `actual_start`).
-    total_bytes: usize,
+    file_pos: usize,
+    /// Total bytes in this run (length from `run_start`).
+    run_len_bytes: usize,
     /// Bytes to skip after seeking to aligned position (absolute).
-    skip_bytes: usize,
+    align_skip_bytes: usize,
     /// Absolute file offset where this run begins.
-    actual_start: usize,
+    run_start: usize,
 }
 
 impl Iterator for RunIteratorWithOVC {
@@ -277,18 +278,18 @@ impl Iterator for RunIteratorWithOVC {
         use std::io::ErrorKind;
 
         // First, skip bytes if we sought to an aligned position
-        if self.skip_bytes > 0 {
-            let mut skip_buf = vec![0u8; self.skip_bytes];
+        if self.align_skip_bytes > 0 {
+            let mut skip_buf = vec![0u8; self.align_skip_bytes];
             self.reader
                 .read_exact(&mut skip_buf)
                 .expect("Failed to skip bytes after seek");
-            self.bytes_read += self.skip_bytes;
-            self.skip_bytes = 0;
+            self.file_pos += self.align_skip_bytes;
+            self.align_skip_bytes = 0;
         }
 
         loop {
             // Check if we've read all the actual data for this run
-            if self.total_bytes > 0 && self.bytes_read - self.actual_start >= self.total_bytes {
+            if self.run_len_bytes > 0 && self.file_pos - self.run_start >= self.run_len_bytes {
                 return None;
             }
 
@@ -306,7 +307,7 @@ impl Iterator for RunIteratorWithOVC {
             }
             let ovc = OVCU32::from_le_bytes(ovc_bytes);
 
-            let cur_offset = self.bytes_read - self.actual_start;
+            let cur_offset = self.file_pos - self.run_start;
             // Optimize for duplicate keys: skip reading key_len, just use prev_key
             if ovc.flag() == OVCFlag::DuplicateValue {
                 // Read value length
@@ -323,7 +324,7 @@ impl Iterator for RunIteratorWithOVC {
                     .expect("Failed to read value");
 
                 // Update bytes read (no key_len field for duplicates)
-                self.bytes_read += 4 + 4 + value_len;
+                self.file_pos += 4 + 4 + value_len;
 
                 let key_ref = &self.prev_key;
                 // Check if key is in range [lower_inc, upper_exc)
@@ -381,7 +382,7 @@ impl Iterator for RunIteratorWithOVC {
                 .expect("Failed to read value");
 
             // Update bytes read
-            self.bytes_read += 4 + 8 + truncated_key_len + value_len;
+            self.file_pos += 4 + 8 + truncated_key_len + value_len;
 
             // Check if key is in range [lower_inc, upper_exc)
             if let Some(lb) = &self.lower_inc {
@@ -516,7 +517,7 @@ mod tests {
         // Scan with bounds [b, d)
         let lower: (&[u8], _, _) = (b"b", run.run_id, 0);
         let upper: (&[u8], _, _) = (b"d", run.run_id, 0);
-        let results: Vec<_> =  run.scan_range(Some(lower), Some(upper)).collect();
+        let results: Vec<_> = run.scan_range(Some(lower), Some(upper)).collect();
 
         assert_eq!(results.len(), 2);
         assert_eq!(results[0].0, OVCU32::initial_value());

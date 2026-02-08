@@ -156,10 +156,13 @@ mod tests {
         let mergeable_run = MergeableRun::RangePartitioned(vec![run0, run1, run2]);
 
         let io_tracker1 = IoStatsTracker::new();
-        let lower : (&[u8], _, _)  = (b"a10", 0, 0);
-        let upper : (&[u8], _, _)  = (b"a20", 0, 0);
-        let iter1 =
-            mergeable_run.scan_range_with_io_tracker(Some(lower), Some(upper), Some(io_tracker1.clone()));
+        let lower: (&[u8], _, _) = (b"a10", 0, 0);
+        let upper: (&[u8], _, _) = (b"a20", 0, 0);
+        let iter1 = mergeable_run.scan_range_with_io_tracker(
+            Some(lower),
+            Some(upper),
+            Some(io_tracker1.clone()),
+        );
         let results1: Vec<_> = iter1.collect();
         assert_eq!(results1.len(), 10);
         assert_eq!(results1[0].0, b"a10");
@@ -169,10 +172,13 @@ mod tests {
         assert!(read_bytes1 > 0);
 
         let io_tracker2 = IoStatsTracker::new();
-        let lower2 : (&[u8], _, _)  = (b"a90", 0, 0);
-        let upper2 : (&[u8], _, _)  = (b"c10", 0, 0);
-        let iter2 =
-            mergeable_run.scan_range_with_io_tracker(Some(lower2), Some(upper2), Some(io_tracker2.clone()));
+        let lower2: (&[u8], _, _) = (b"a90", 0, 0);
+        let upper2: (&[u8], _, _) = (b"c10", 0, 0);
+        let iter2 = mergeable_run.scan_range_with_io_tracker(
+            Some(lower2),
+            Some(upper2),
+            Some(io_tracker2.clone()),
+        );
         let results2: Vec<_> = iter2.collect();
         assert_eq!(results2.len(), 120);
         assert_eq!(results2[0].0, b"a90");
@@ -182,8 +188,8 @@ mod tests {
         assert!(read_ops2 > 0);
         assert!(read_bytes2 > 0);
 
-        let lower3 : (&[u8], _, _)  = (b"d00", 0, 0);
-        let upper3 : (&[u8], _, _)  = (b"d99", 0, 0);
+        let lower3: (&[u8], _, _) = (b"d00", 0, 0);
+        let upper3: (&[u8], _, _) = (b"d99", 0, 0);
         let iter3 = mergeable_run.scan_range_with_io_tracker(Some(lower3), Some(upper3), None);
         assert!(iter3.collect::<Vec<_>>().is_empty());
 

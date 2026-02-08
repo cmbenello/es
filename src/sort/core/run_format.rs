@@ -13,7 +13,6 @@ use crate::sort::core::engine::{RunSummary, Scanner};
 use crate::sort::run_sink::RunSink;
 use crate::{SortOutput, SortStats};
 
-
 // Global run id generator
 pub(crate) static RUN_ID_COUNTER: AtomicU32 = AtomicU32::new(0);
 
@@ -51,8 +50,8 @@ pub trait RunFormat: Clone + Send + Sync + 'static {
 
     fn scan_range(
         run: &Self::Run,
-        lower_bound: Option<(&[u8], u32, usize)>, // (key, run_id, offset). Set run_id and offset to 0 if not applicable.
-        upper_bound: Option<(&[u8], u32, usize)>, // (key, run_id, offset). Set run_id and offset to 0 if not applicable.
+        lower_bound: Option<(&[u8], u32, usize)>, // KeyRunIdOffsetBound: (key, run_id, offset). Set run_id and offset to 0 if not applicable.
+        upper_bound: Option<(&[u8], u32, usize)>, // KeyRunIdOffsetBound: (key, run_id, offset). Set run_id and offset to 0 if not applicable.
         io_tracker: Option<IoStatsTracker>,
     ) -> Box<dyn Iterator<Item = Self::Record> + Send>;
 
@@ -103,7 +102,9 @@ impl<F: RunFormat> MergeableRun<F> {
                     let mut ng = non_empty_runs.len() as isize;
                     while (ng - ok).abs() > 1 {
                         let mid = (ok + ng) / 2;
-                        if F::start_key(non_empty_runs[mid as usize]).unwrap() < lower_bound.unwrap() {
+                        if F::start_key(non_empty_runs[mid as usize]).unwrap()
+                            < lower_bound.unwrap()
+                        {
                             ok = mid;
                         } else {
                             ng = mid;
@@ -119,7 +120,9 @@ impl<F: RunFormat> MergeableRun<F> {
                     let mut ng = -1;
                     while (ng - ok).abs() > 1 {
                         let mid = (ok + ng) / 2;
-                        if upper_bound.unwrap() <= F::start_key(non_empty_runs[mid as usize]).unwrap() {
+                        if upper_bound.unwrap()
+                            <= F::start_key(non_empty_runs[mid as usize]).unwrap()
+                        {
                             ok = mid;
                         } else {
                             ng = mid;
