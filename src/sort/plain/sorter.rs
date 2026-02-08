@@ -54,7 +54,7 @@ impl RunFormat for PlainRunFormat {
     }
 
     fn start_key<'a>(run: &'a Self::Run) -> Option<(&'a [u8], u32, usize)> {
-        run.start_key().map(|key| (key, 0, 0))
+        run.start_key().map(|key| (key, run.run_id(), 0))
     }
 
     fn record_key<'a>(record: &'a Self::Record) -> &'a [u8] {

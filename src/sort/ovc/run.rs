@@ -71,6 +71,10 @@ impl RunWithOVC {
         self.total_bytes
     }
 
+    pub fn run_id(&self) -> u32 {
+        self.run_id
+    }
+
     pub fn start_key(&self) -> Option<&[u8]> {
         self.sparse_index.first().map(|entry| entry.key.as_slice())
     }
@@ -226,6 +230,7 @@ impl RunWithOVC {
                 run_len_bytes: self.total_bytes,
                 align_skip_bytes: skip_bytes,
                 run_start: self.start_bytes,
+                done: false,
             }) as Box<dyn Iterator<Item = (OVCU32, Vec<u8>, Vec<u8>)> + Send>;
         }
 
@@ -239,6 +244,7 @@ impl RunWithOVC {
             run_len_bytes: self.total_bytes,
             align_skip_bytes: 0,
             run_start: self.start_bytes,
+            done: false,
         }) as Box<dyn Iterator<Item = (OVCU32, Vec<u8>, Vec<u8>)> + Send>
     }
 }
@@ -257,6 +263,8 @@ struct RunIteratorWithOVC {
     align_skip_bytes: usize,
     /// Absolute file offset where this run begins.
     run_start: usize,
+    /// Once we return None, remain exhausted.
+    done: bool,
 }
 
 impl Iterator for RunIteratorWithOVC {
@@ -264,6 +272,10 @@ impl Iterator for RunIteratorWithOVC {
 
     fn next(&mut self) -> Option<Self::Item> {
         use std::io::ErrorKind;
+
+        if self.done {
+            return None;
+        }
 
         // First, skip bytes if we sought to an aligned position
         if self.align_skip_bytes > 0 {
@@ -278,6 +290,7 @@ impl Iterator for RunIteratorWithOVC {
         loop {
             // Check if we've read all the actual data for this run
             if self.run_len_bytes > 0 && self.file_pos - self.run_start >= self.run_len_bytes {
+                self.done = true;
                 return None;
             }
 
@@ -287,6 +300,7 @@ impl Iterator for RunIteratorWithOVC {
                 Ok(_) => {}
                 Err(e) if e.kind() == ErrorKind::UnexpectedEof => {
                     // Legitimate EOF - we've reached the end of data
+                    self.done = true;
                     return None;
                 }
                 Err(e) => {
@@ -305,6 +319,27 @@ impl Iterator for RunIteratorWithOVC {
                     .expect("Failed to read value length");
                 let value_len = u32::from_le_bytes(value_len_bytes) as usize;
 
+                let key_ref = &self.prev_key;
+
+                // Check if key is in range [lower_inc, upper_exc)
+                if let Some(lb) = &self.lower_inc {
+                    if lb.lt(key_ref, self.run_id, cur_offset) {
+                        let new_pos = self.reader.position().saturating_add(value_len as u64);
+                        self.reader
+                            .seek(new_pos)
+                            .expect("Failed to skip value bytes");
+                        // Update bytes read (no key_len field for duplicates)
+                        self.file_pos += 4 + 4 + value_len;
+                        continue;
+                    }
+                }
+                if let Some(ub) = &self.upper_exc {
+                    if ub.ge(key_ref, self.run_id, cur_offset) {
+                        self.done = true;
+                        return None;
+                    }
+                }
+
                 // Read value
                 let mut value = vec![0u8; value_len];
                 self.reader
@@ -314,21 +349,7 @@ impl Iterator for RunIteratorWithOVC {
                 // Update bytes read (no key_len field for duplicates)
                 self.file_pos += 4 + 4 + value_len;
 
-                // Use previous key
-                let key = self.prev_key.clone();
-
-                // Check if key is in range [lower_inc, upper_exc)
-                if let Some(lb) = &self.lower_inc {
-                    if lb.lt(&key, self.run_id, cur_offset) {
-                        continue;
-                    }
-                }
-                if let Some(ub) = &self.upper_exc {
-                    if ub.ge(&key, self.run_id, cur_offset) {
-                        return None;
-                    }
-                }
-
+                let key = key_ref.clone();
                 return Some((ovc, key, value));
             }
 
@@ -364,6 +385,26 @@ impl Iterator for RunIteratorWithOVC {
             self.prev_key.resize(key.len(), 0);
             self.prev_key.copy_from_slice(&key);
 
+            // Check if key is in range [lower_inc, upper_exc)
+            if let Some(lb) = &self.lower_inc {
+                if lb.lt(&key, self.run_id, cur_offset) {
+                    let new_pos = self.reader.position().saturating_add(value_len as u64);
+                    self.reader
+                        .seek(new_pos)
+                        .expect("Failed to skip value bytes");
+                    // Update bytes read
+                    self.file_pos += 4 + 8 + truncated_key_len + value_len;
+                    continue;
+                }
+            }
+            if let Some(ub) = &self.upper_exc {
+                if ub.ge(&key, self.run_id, cur_offset) {
+                    // Since data is sorted in runs, we can stop here
+                    self.done = true;
+                    return None;
+                }
+            }
+
             // Read value
             let mut value = vec![0u8; value_len];
             self.reader
@@ -372,19 +413,6 @@ impl Iterator for RunIteratorWithOVC {
 
             // Update bytes read
             self.file_pos += 4 + 8 + truncated_key_len + value_len;
-
-            // Check if key is in range [lower_inc, upper_exc)
-            if let Some(lb) = &self.lower_inc {
-                if lb.lt(&key, self.run_id, cur_offset) {
-                    continue;
-                }
-            }
-            if let Some(ub) = &self.upper_exc {
-                if ub.ge(&key, self.run_id, cur_offset) {
-                    // Since data is sorted in runs, we can stop here
-                    return None;
-                }
-            }
 
             return Some((ovc, key, value));
         }

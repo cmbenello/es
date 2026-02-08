@@ -1,6 +1,6 @@
-# OVC_SR Range Iterator (RunWithOVCSR)
+# OVC Range Iterator (RunWithOVC)
 
-This document explains how range iteration works in `RunWithOVCSR` (OVC sparse-run format), including the `KeyRunIdOffsetBound` ordering and how the sparse index is used to find the start point.
+This document explains how range iteration works in `RunWithOVC` (OVC sparse-run format), including the `KeyRunIdOffsetBound` ordering and how the sparse index is used to find the start point.
 
 **Overview**
 - Each run has a `run_id` assigned at creation time.
@@ -85,7 +85,7 @@ iterator starts scanning at O48 and skips forward until >= (c,72)
 **Range Scan Algorithm (High-Level)**
 1. Read `lower_bound` and `upper_bound` `(key, run_id, offset)` tuples, if provided.
 2. Seek to the sparse index entry chosen by `find_start_position`.
-4. For each record in file order:
+3. For each record in file order:
    - Decode the key (or reuse `prev_key` for duplicates).
    - Compare `(key, run_id, current_file_offset)` to bounds.
    - Emit if `>= lower_bound` and `< upper_bound`.
@@ -109,15 +109,9 @@ iterator starts scanning at O48 and skips forward until >= (c,72)
 - Bounds are always `KeyRunIdOffsetBound` tuples (unless empty).
 - Indexed records are OVC sync points so decoding at a sparse index entry is safe.
 - The file offset is monotonic within each run.
-- Suffix overflow is acceptable for your dataset sizes.
 - Splitting between runs is acceptable and can be desirable for IO locality and thread focus.
 
 **Why This Works**
 - The `KeyRunIdOffsetBound` order creates a total order among duplicates.
 - Sparse index reduces seek overhead while keeping correctness.
-- Entry numbers ensure deterministic ordering within a run.
 - Run IDs allow partitions to separate or group runs predictably.
-
-**Practical Consequences**
-- A partition may start or end between runs, which is intentional and helps keep per-thread IO localized.
-- If a lower bound lands in the middle of a run, the iterator will skip until the bound is met using `KeyRunIdOffsetBound` comparisons.

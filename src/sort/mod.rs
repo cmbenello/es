@@ -1,6 +1,5 @@
 pub mod core;
 pub mod ovc;
-pub mod ovc_sr;
 pub mod plain;
 pub mod run_sink;
 
