@@ -6,8 +6,10 @@ use crate::diskio::io_stats::IoStatsTracker;
 use crate::ovc::offset_value_coding_32::OVCU32;
 use crate::ovc::offset_value_coding_64::OVCFlag;
 use crate::sort::core::engine::RunSummary;
+use crate::sort::core::run_format::{KeyRunIdOffsetBound, RUN_ID_COUNTER, cmp_key_run_offset};
 use std::io::{Read, Write};
 use std::sync::Arc;
+use std::sync::atomic::Ordering;
 
 // Sparse index entry
 #[derive(Debug, Clone)]
@@ -18,6 +20,7 @@ pub struct IndexEntry {
 
 // File-based run implementation with direct I/O
 pub struct RunWithOVC {
+    run_id: u32,
     fd: Arc<SharedFd>,
     writer: Option<AlignedWriter>,
     total_entries: usize,
@@ -41,6 +44,7 @@ impl RunWithOVC {
         let fd = writer.get_fd();
 
         Ok(Self {
+            run_id: RUN_ID_COUNTER.fetch_add(1, Ordering::AcqRel),
             fd,
             writer: Some(writer),
             total_entries: 0,
@@ -71,22 +75,28 @@ impl RunWithOVC {
         self.sparse_index.first().map(|entry| entry.key.as_slice())
     }
 
-    fn find_start_position(&self, lower_bound: &[u8]) -> Option<(usize, Vec<u8>)> {
+    fn find_start_position(&self, lower_inc: Option<&KeyRunIdOffsetBound>) -> Option<(usize, Vec<u8>)> {
         if self.sparse_index.is_empty() {
             return None;
         }
         let mut best_entry = &self.sparse_index[0];
-        if lower_bound.is_empty() {
+        if lower_inc.is_none() {
             return Some((best_entry.file_offset, best_entry.key.clone()));
         }
 
-        // Binary search to find the last entry with key < lower_bound
+        // Binary search to find the last entry with key < lower_inc
         let mut left = 0;
         let mut right = self.sparse_index.len();
+        let lower_inc = lower_inc.unwrap();
 
-        while left < right {
+         while left < right {
             let mid = left + (right - left) / 2;
-            if &self.sparse_index[mid].key[..] < lower_bound {
+            let mid_entry = &self.sparse_index[mid];
+            if cmp_key_run_offset(
+                (&mid_entry.key, self.run_id, mid_entry.file_offset),
+                (&lower_inc.key, lower_inc.run_id, lower_inc.offset),
+            ) == std::cmp::Ordering::Less
+            {
                 best_entry = &self.sparse_index[mid];
                 left = mid + 1;
             } else {
@@ -149,16 +159,28 @@ impl RunWithOVC {
 
     pub fn scan_range(
         &self,
-        lower_inc: &[u8],
-        upper_exc: &[u8],
+        lower_inc: Option<(&[u8], u32, usize)>,
+        upper_exc: Option<(&[u8], u32, usize)>,
     ) -> Box<dyn Iterator<Item = (OVCU32, Vec<u8>, Vec<u8>)> + Send> {
         self.scan_range_with_io_tracker(lower_inc, upper_exc, None)
     }
 
     pub fn scan_range_with_io_tracker(
         &self,
-        lower_inc: &[u8],
-        upper_exc: &[u8],
+        lower_inc: Option<(&[u8], u32, usize)>,
+        upper_exc: Option<(&[u8], u32, usize)>,
+        io_tracker: Option<IoStatsTracker>,
+    ) -> Box<dyn Iterator<Item = (OVCU32, Vec<u8>, Vec<u8>)> + Send> {
+        let lower_inc = lower_inc.map(KeyRunIdOffsetBound::from_components);
+        let upper_exc = upper_exc.map(KeyRunIdOffsetBound::from_components);
+        self.scan_range_with_parsed_bounds(lower_inc, upper_exc, io_tracker)
+    }
+
+
+    fn scan_range_with_parsed_bounds(
+        &self,
+        lower_inc: Option<KeyRunIdOffsetBound>,
+        upper_exc: Option<KeyRunIdOffsetBound>,
         io_tracker: Option<IoStatsTracker>,
     ) -> Box<dyn Iterator<Item = (OVCU32, Vec<u8>, Vec<u8>)> + Send> {
         // Handle empty runs (no entries written)
@@ -177,7 +199,7 @@ impl RunWithOVC {
         // find_start_position will return None iff total_entries == 0
         // That case is handled above.
         // If there is at least one entry, the first entry in sparse index is always at offset 0.
-        let (offset, start_key) = self.find_start_position(lower_inc).unwrap();
+        let (offset, start_key) = self.find_start_position(lower_inc.as_ref()).unwrap();
         let start_offset = self.start_bytes + offset;
 
         // Seek to the start position if needed
@@ -195,8 +217,8 @@ impl RunWithOVC {
             return Box::new(RunIteratorWithOVC {
                 reader,
                 prev_key: start_key,
-                lower_bound: lower_inc.to_vec(),
-                upper_bound: upper_exc.to_vec(),
+                lower_inc,
+                upper_exc,
                 bytes_read: aligned_offset,
                 total_bytes: self.total_bytes,
                 skip_bytes,
@@ -207,8 +229,8 @@ impl RunWithOVC {
         Box::new(RunIteratorWithOVC {
             reader,
             prev_key: start_key,
-            lower_bound: lower_inc.to_vec(),
-            upper_bound: upper_exc.to_vec(),
+            lower_inc,
+            upper_exc,
             bytes_read: self.start_bytes, // Start from the beginning of this run
             total_bytes: self.total_bytes,
             skip_bytes: 0,
@@ -220,8 +242,8 @@ impl RunWithOVC {
 struct RunIteratorWithOVC {
     reader: AlignedReader,
     prev_key: Vec<u8>,
-    lower_bound: Vec<u8>,
-    upper_bound: Vec<u8>,
+    lower_inc: Option<KeyRunIdOffsetBound>,
+    upper_exc: Option<KeyRunIdOffsetBound>,
     bytes_read: usize,
     total_bytes: usize,
     skip_bytes: usize,   // Bytes to skip after seeking to aligned position
@@ -286,10 +308,10 @@ impl Iterator for RunIteratorWithOVC {
                 let key = self.prev_key.clone();
 
                 // Check if key is in range [lower_inc, upper_exc)
-                if !self.lower_bound.is_empty() && key < self.lower_bound {
+                if !self.lower_inc.is_empty() && key < self.lower_inc {
                     continue;
                 }
-                if !self.upper_bound.is_empty() && key >= self.upper_bound {
+                if !self.upper_exc.is_empty() && key >= self.upper_exc {
                     return None;
                 }
 
@@ -338,10 +360,10 @@ impl Iterator for RunIteratorWithOVC {
             self.bytes_read += 4 + 8 + truncated_key_len + value_len;
 
             // Check if key is in range [lower_inc, upper_exc)
-            if !self.lower_bound.is_empty() && key < self.lower_bound {
+            if !self.lower_inc.is_empty() && key < self.lower_inc {
                 continue;
             }
-            if !self.upper_bound.is_empty() && key >= self.upper_bound {
+            if !self.upper_exc.is_empty() && key >= self.upper_exc {
                 // Since data is sorted in runs, we can stop here
                 return None;
             }
@@ -432,7 +454,7 @@ mod tests {
         writer.flush().unwrap();
 
         // Read all data back
-        let results: Vec<_> = run.scan_range(&[], &[]).collect();
+        let results: Vec<_> = run.scan_range(None, None).collect();
 
         assert_eq!(results.len(), 3);
         assert_eq!(results[0].0, OVCU32::initial_value());
@@ -464,7 +486,9 @@ mod tests {
         writer.flush().unwrap();
 
         // Scan with bounds [b, d)
-        let results: Vec<_> = run.scan_range(b"b", b"d").collect();
+        let lower = Some((b"b".as_ref(), 0, 0));
+        let upper = Some((b"d".as_ref(), 0, 0));
+        let results: Vec<_> = run.scan_range(lower, upper).collect();
 
         assert_eq!(results.len(), 2);
         assert_eq!(results[0].0, OVCU32::initial_value());
@@ -485,7 +509,7 @@ mod tests {
         writer.flush().unwrap();
 
         // Scanning empty run should return empty iterator
-        let results: Vec<_> = run.scan_range(&[], &[]).collect();
+        let results: Vec<_> = run.scan_range(None, None).collect();
         assert_eq!(results.len(), 0);
     }
 
@@ -564,7 +588,7 @@ mod tests {
         writer.flush().unwrap();
 
         // Read back and verify
-        let results: Vec<_> = run.scan_range(&[], &[]).collect();
+        let results: Vec<_> = run.scan_range(None, None).collect();
 
         assert_eq!(results.len(), 2);
         assert_eq!(results[0].2.len(), 1000);
@@ -603,7 +627,7 @@ mod tests {
         drop(writer); // Close writer to flush data
 
         // Read back and verify OVC values
-        let results: Vec<_> = run.scan_range(&[], &[]).collect();
+        let results: Vec<_> = run.scan_range(None, None).collect();
 
         assert_eq!(results.len(), 3);
         assert_eq!(results[0].0, OVCU32::normal_value(&[10], 0));

@@ -40,11 +40,11 @@ impl RunFormat for PlainRunFormat {
 
     fn scan_range(
         run: &Self::Run,
-        lower_bound: &[u8],
-        upper_bound: &[u8],
+        lower_inc: Option<(&[u8], u32, usize)>,
+        upper_exc: Option<(&[u8], u32, usize)>,
         io_tracker: Option<IoStatsTracker>,
     ) -> Box<dyn Iterator<Item = Self::Record> + Send> {
-        run.scan_range_with_io_tracker(lower_bound, upper_bound, io_tracker)
+        run.scan_range_with_io_tracker(lower_inc, upper_exc, io_tracker)
     }
 
     fn merge_iterators(
@@ -53,8 +53,8 @@ impl RunFormat for PlainRunFormat {
         Box::new(MergeIterator::new(iterators))
     }
 
-    fn start_key<'a>(run: &'a Self::Run) -> Option<&'a [u8]> {
-        run.start_key()
+    fn start_key<'a>(run: &'a Self::Run) -> Option<(&'a [u8], u32, usize)> {
+        run.start_key().map(|key| (key, 0, 0))
     }
 
     fn record_key<'a>(record: &'a Self::Record) -> &'a [u8] {
@@ -156,8 +156,10 @@ mod tests {
         let mergeable_run = MergeableRun::RangePartitioned(vec![run0, run1, run2]);
 
         let io_tracker1 = IoStatsTracker::new();
+        let lower : (&[u8], _, _)  = (b"a10", 0, 0);
+        let upper : (&[u8], _, _)  = (b"a20", 0, 0);
         let iter1 =
-            mergeable_run.scan_range_with_io_tracker(b"a10", b"a20", Some(io_tracker1.clone()));
+            mergeable_run.scan_range_with_io_tracker(Some(lower), Some(upper), Some(io_tracker1.clone()));
         let results1: Vec<_> = iter1.collect();
         assert_eq!(results1.len(), 10);
         assert_eq!(results1[0].0, b"a10");
@@ -167,8 +169,10 @@ mod tests {
         assert!(read_bytes1 > 0);
 
         let io_tracker2 = IoStatsTracker::new();
+        let lower2 : (&[u8], _, _)  = (b"a90", 0, 0);
+        let upper2 : (&[u8], _, _)  = (b"c10", 0, 0);
         let iter2 =
-            mergeable_run.scan_range_with_io_tracker(b"a90", b"c10", Some(io_tracker2.clone()));
+            mergeable_run.scan_range_with_io_tracker(Some(lower2), Some(upper2), Some(io_tracker2.clone()));
         let results2: Vec<_> = iter2.collect();
         assert_eq!(results2.len(), 120);
         assert_eq!(results2[0].0, b"a90");
@@ -178,11 +182,13 @@ mod tests {
         assert!(read_ops2 > 0);
         assert!(read_bytes2 > 0);
 
-        let iter3 = mergeable_run.scan_range_with_io_tracker(b"d00", b"d99", None);
+        let lower3 : (&[u8], _, _)  = (b"d00", 0, 0);
+        let upper3 : (&[u8], _, _)  = (b"d99", 0, 0);
+        let iter3 = mergeable_run.scan_range_with_io_tracker(Some(lower3), Some(upper3), None);
         assert!(iter3.collect::<Vec<_>>().is_empty());
 
         let io_tracker4 = IoStatsTracker::new();
-        let iter4 = mergeable_run.scan_range_with_io_tracker(&[], &[], Some(io_tracker4.clone()));
+        let iter4 = mergeable_run.scan_range_with_io_tracker(None, None, Some(io_tracker4.clone()));
         let results4: Vec<_> = iter4.collect();
         assert_eq!(results4.len(), 300);
         let (read_ops4, read_bytes4) = io_tracker4.get_read_stats();

@@ -63,11 +63,11 @@ impl RunFormat for OvcRunFormat {
 
     fn scan_range(
         run: &Self::Run,
-        lower_bound: &[u8],
-        upper_bound: &[u8],
+        lower_inc: Option<(&[u8], u32, usize)>, // (key, run_id, offset)
+        upper_exc: Option<(&[u8], u32, usize)>, // (key, run_id, offset)
         io_tracker: Option<IoStatsTracker>,
     ) -> Box<dyn Iterator<Item = Self::Record> + Send> {
-        run.scan_range_with_io_tracker(lower_bound, upper_bound, io_tracker)
+        run.scan_range_with_io_tracker(lower_inc, upper_exc, io_tracker)
     }
 
     fn merge_iterators(
@@ -80,8 +80,8 @@ impl RunFormat for OvcRunFormat {
         }
     }
 
-    fn start_key<'a>(run: &'a Self::Run) -> Option<&'a [u8]> {
-        run.start_key()
+    fn start_key<'a>(run: &'a Self::Run) -> Option<(&'a [u8], u32, usize)> {
+        run.start_key().map(|key| (key, 0, 0))
     }
 
     fn record_key<'a>(record: &'a Self::Record) -> &'a [u8] {
@@ -211,9 +211,6 @@ mod tests {
         let num_records = 1000000;
         let num_threads_run_gen = 2;
         let run_size = 512 * 1024; // 512 KB
-        let sketch_type = SketchType::Kll;
-        let sketch_size = 200;
-        let sketch_sampling_interval = 1000;
         let run_indexing_interval = 1000;
         let fanin = 100;
         let num_threads = 4;

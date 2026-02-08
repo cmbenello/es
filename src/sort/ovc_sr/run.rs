@@ -6,12 +6,11 @@ use crate::diskio::io_stats::IoStatsTracker;
 use crate::ovc::offset_value_coding_32::OVCU32;
 use crate::ovc::offset_value_coding_64::OVCFlag;
 use crate::sort::core::engine::RunSummary;
+use crate::sort::core::run_format::{KeyRunIdOffsetBound, cmp_key_run_offset};
+use crate::sort::ovc::run::RUN_ID_COUNTER;
 use std::io::{Read, Write};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU32, Ordering};
-
-// Global run id generator
-static RUN_ID_COUNTER: AtomicU32 = AtomicU32::new(0);
+use std::sync::atomic::{Ordering};
 
 // Sparse index entry
 #[derive(Debug, Clone)]
@@ -21,61 +20,6 @@ pub struct IndexEntry {
     pub file_offset: usize,
 }
 
-#[derive(Clone, Copy, Debug)]
-pub struct CompositeBound<'a> {
-    pub key: &'a [u8],
-    pub run_id: u32,
-    /// Offset within the run file (bytes from run start).
-    pub offset: usize,
-}
-
-fn cmp_key_run_offset(
-    key_a: &[u8],
-    run_id_a: u32,
-    offset_a: usize,
-    key_b: &[u8],
-    run_id_b: u32,
-    offset_b: usize,
-) -> std::cmp::Ordering {
-    match key_a.cmp(key_b) {
-        std::cmp::Ordering::Equal => match run_id_a.cmp(&run_id_b) {
-            std::cmp::Ordering::Equal => offset_a.cmp(&offset_b),
-            ord => ord,
-        },
-        ord => ord,
-    }
-}
-
-#[derive(Debug, Clone)]
-struct ParsedBound {
-    key: Vec<u8>,
-    run_id: u32,
-    offset: usize,
-}
-
-impl ParsedBound {
-    fn from_components(bound: CompositeBound<'_>) -> Self {
-        Self {
-            key: bound.key.to_vec(),
-            run_id: bound.run_id,
-            offset: bound.offset,
-        }
-    }
-
-    #[inline]
-    fn lt_key_suffix(&self, key: &[u8], run_id: u32, offset: usize) -> bool {
-        cmp_key_run_offset(key, run_id, offset, &self.key, self.run_id, self.offset)
-            == std::cmp::Ordering::Less
-    }
-
-    #[inline]
-    fn ge_key_suffix(&self, key: &[u8], run_id: u32, offset: usize) -> bool {
-        matches!(
-            cmp_key_run_offset(key, run_id, offset, &self.key, self.run_id, self.offset),
-            std::cmp::Ordering::Greater | std::cmp::Ordering::Equal
-        )
-    }
-}
 
 // File-based run implementation with direct I/O
 pub struct RunWithOVCSR {
@@ -137,30 +81,26 @@ impl RunWithOVCSR {
         self.sparse_index.first().map(|entry| entry.key.as_slice())
     }
 
-    fn find_start_position(&self, lower_bound: Option<&ParsedBound>) -> Option<(usize, Vec<u8>)> {
+    fn find_start_position(&self, lower_inc: Option<&KeyRunIdOffsetBound>) -> Option<(usize, Vec<u8>)> {
         if self.sparse_index.is_empty() {
             return None;
         }
         let mut best_entry = &self.sparse_index[0];
-        if lower_bound.is_none() {
+        if lower_inc.is_none() {
             return Some((best_entry.file_offset, best_entry.key.clone()));
         }
 
         // Binary search to find the last entry with key < lower_bound_with_suffix
         let mut left = 0;
         let mut right = self.sparse_index.len();
-        let lower_bound = lower_bound.unwrap();
+        let lower_inc = lower_inc.unwrap();
 
         while left < right {
             let mid = left + (right - left) / 2;
             let mid_entry = &self.sparse_index[mid];
             if cmp_key_run_offset(
-                &mid_entry.key,
-                self.run_id,
-                mid_entry.file_offset,
-                &lower_bound.key,
-                lower_bound.run_id,
-                lower_bound.offset,
+                (&mid_entry.key, self.run_id, mid_entry.file_offset),
+                (&lower_inc.key, lower_inc.run_id, lower_inc.offset),
             ) == std::cmp::Ordering::Less
             {
                 best_entry = &self.sparse_index[mid];
@@ -226,28 +166,28 @@ impl RunWithOVCSR {
 
     pub fn scan_range(
         &self,
-        lower: Option<CompositeBound<'_>>,
-        upper: Option<CompositeBound<'_>>,
+        lower: Option<(&[u8], u32, usize)>,
+        upper: Option<(&[u8], u32, usize)>,
     ) -> Box<dyn Iterator<Item = (OVCU32, Vec<u8>, Vec<u8>)> + Send> {
         self.scan_range_with_io_tracker(lower, upper, None)
     }
 
     pub fn scan_range_with_io_tracker(
         &self,
-        lower: Option<CompositeBound<'_>>,
-        upper: Option<CompositeBound<'_>>,
+        lower: Option<(&[u8], u32, usize)>,
+        upper: Option<(&[u8], u32, usize)>,
         io_tracker: Option<IoStatsTracker>,
     ) -> Box<dyn Iterator<Item = (OVCU32, Vec<u8>, Vec<u8>)> + Send> {
-        let lower_bound = lower.map(ParsedBound::from_components);
-        let upper_bound = upper.map(ParsedBound::from_components);
+        let lower_bound = lower.map(KeyRunIdOffsetBound::from_components);
+        let upper_bound = upper.map(KeyRunIdOffsetBound::from_components);
 
         self.scan_range_with_parsed_bounds(lower_bound, upper_bound, io_tracker)
     }
 
     fn scan_range_with_parsed_bounds(
         &self,
-        lower_bound: Option<ParsedBound>,
-        upper_bound: Option<ParsedBound>,
+        lower_inc: Option<KeyRunIdOffsetBound>,
+        upper_exc: Option<KeyRunIdOffsetBound>,
         io_tracker: Option<IoStatsTracker>,
     ) -> Box<dyn Iterator<Item = (OVCU32, Vec<u8>, Vec<u8>)> + Send> {
         // Handle empty runs (no entries written)
@@ -266,7 +206,7 @@ impl RunWithOVCSR {
         // find_start_position will return None iff total_entries == 0
         // That case is handled above.
         // If there is at least one entry, the first entry in sparse index is always at offset 0.
-        let (offset, start_key) = self.find_start_position(lower_bound.as_ref()).unwrap();
+        let (offset, start_key) = self.find_start_position(lower_inc.as_ref()).unwrap();
         // `offset` is run-relative; `start_offset` is absolute file offset.
         let start_offset = self.start_bytes + offset;
 
@@ -287,8 +227,8 @@ impl RunWithOVCSR {
                 reader,
                 run_id: self.run_id,
                 prev_key: start_key,
-                lower_bound,
-                upper_bound,
+                lower_inc,
+                upper_exc,
                 // Absolute file offset of the aligned seek position.
                 bytes_read: aligned_offset,
                 total_bytes: self.total_bytes,
@@ -302,8 +242,8 @@ impl RunWithOVCSR {
             reader,
             run_id: self.run_id,
             prev_key: start_key,
-            lower_bound,
-            upper_bound,
+            lower_inc,
+            upper_exc,
             // Absolute file offset where this run begins.
             bytes_read: self.start_bytes,
             total_bytes: self.total_bytes,
@@ -318,8 +258,8 @@ struct RunIteratorWithOVC {
     reader: AlignedReader,
     run_id: u32,
     prev_key: Vec<u8>,
-    lower_bound: Option<ParsedBound>,
-    upper_bound: Option<ParsedBound>,
+    lower_inc: Option<KeyRunIdOffsetBound>,
+    upper_exc: Option<KeyRunIdOffsetBound>,
     /// Absolute file offset where the reader currently is.
     bytes_read: usize,
     /// Total bytes in this run (length from `actual_start`).
@@ -387,13 +327,13 @@ impl Iterator for RunIteratorWithOVC {
 
                 let key_ref = &self.prev_key;
                 // Check if key is in range [lower_inc, upper_exc)
-                if let Some(lb) = &self.lower_bound {
-                    if lb.lt_key_suffix(key_ref, self.run_id, cur_offset) {
+                if let Some(lb) = &self.lower_inc {
+                    if lb.lt(key_ref, self.run_id, cur_offset) {
                         continue;
                     }
                 }
-                if let Some(ub) = &self.upper_bound {
-                    if ub.ge_key_suffix(key_ref, self.run_id, cur_offset) {
+                if let Some(ub) = &self.upper_exc {
+                    if ub.ge(key_ref, self.run_id, cur_offset) {
                         return None;
                     }
                 }
@@ -444,13 +384,13 @@ impl Iterator for RunIteratorWithOVC {
             self.bytes_read += 4 + 8 + truncated_key_len + value_len;
 
             // Check if key is in range [lower_inc, upper_exc)
-            if let Some(lb) = &self.lower_bound {
-                if lb.lt_key_suffix(&key, self.run_id, cur_offset) {
+            if let Some(lb) = &self.lower_inc {
+                if lb.lt(&key, self.run_id, cur_offset) {
                     continue;
                 }
             }
-            if let Some(ub) = &self.upper_bound {
-                if ub.ge_key_suffix(&key, self.run_id, cur_offset) {
+            if let Some(ub) = &self.upper_exc {
+                if ub.ge(&key, self.run_id, cur_offset) {
                     // Since data is sorted in runs, we can stop here
                     return None;
                 }
@@ -574,17 +514,9 @@ mod tests {
         writer.flush().unwrap();
 
         // Scan with bounds [b, d)
-        let lower = CompositeBound {
-            key: b"b",
-            run_id: run.run_id,
-            offset: 0,
-        };
-        let upper = CompositeBound {
-            key: b"d",
-            run_id: run.run_id,
-            offset: 0,
-        };
-        let results: Vec<_> = run.scan_range(Some(lower), Some(upper)).collect();
+        let lower: (&[u8], _, _) = (b"b", run.run_id, 0);
+        let upper: (&[u8], _, _) = (b"d", run.run_id, 0);
+        let results: Vec<_> =  run.scan_range(Some(lower), Some(upper)).collect();
 
         assert_eq!(results.len(), 2);
         assert_eq!(results[0].0, OVCU32::initial_value());
@@ -661,26 +593,10 @@ mod tests {
         ];
 
         // Test finding start position
-        let b_a = ParsedBound::from_components(CompositeBound {
-            key: b"a",
-            run_id: run.run_id,
-            offset: 0,
-        });
-        let b_b = ParsedBound::from_components(CompositeBound {
-            key: b"b",
-            run_id: run.run_id,
-            offset: 0,
-        });
-        let b_d = ParsedBound::from_components(CompositeBound {
-            key: b"d",
-            run_id: run.run_id,
-            offset: 0,
-        });
-        let b_f = ParsedBound::from_components(CompositeBound {
-            key: b"f",
-            run_id: run.run_id,
-            offset: 0,
-        });
+        let b_a = KeyRunIdOffsetBound::from_components((b"a", run.run_id, 0));
+        let b_b = KeyRunIdOffsetBound::from_components((b"b", run.run_id, 0));
+        let b_d = KeyRunIdOffsetBound::from_components((b"d", run.run_id, 0));
+        let b_f = KeyRunIdOffsetBound::from_components((b"f", run.run_id, 0));
 
         assert_eq!(
             run.find_start_position(Some(&b_a)),

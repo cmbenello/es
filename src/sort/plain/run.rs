@@ -4,6 +4,7 @@ use crate::diskio::constants::align_down;
 use crate::diskio::file::SharedFd;
 use crate::diskio::io_stats::IoStatsTracker;
 use crate::sort::core::engine::RunSummary;
+use crate::sort::core::run_format::KeyRunIdOffsetBound;
 use std::io::{Read, Write};
 use std::sync::Arc;
 
@@ -127,16 +128,16 @@ impl Run {
 
     pub fn scan_range(
         &self,
-        lower_inc: &[u8],
-        upper_exc: &[u8],
+        lower_inc: Option<(&[u8], u32, usize)>,
+        upper_exc: Option<(&[u8], u32, usize)>,
     ) -> Box<dyn Iterator<Item = (Vec<u8>, Vec<u8>)> + Send> {
         self.scan_range_with_io_tracker(lower_inc, upper_exc, None)
     }
 
     pub fn scan_range_with_io_tracker(
         &self,
-        lower_inc: &[u8],
-        upper_exc: &[u8],
+        lower_inc: Option<(&[u8], u32, usize)>,
+        upper_exc: Option<(&[u8], u32, usize)>,
         io_tracker: Option<IoStatsTracker>,
     ) -> Box<dyn Iterator<Item = (Vec<u8>, Vec<u8>)> + Send> {
         // Handle empty runs (no entries written)
@@ -172,8 +173,8 @@ impl Run {
             // We'll need to skip the first few bytes after seeking
             return Box::new(RunIterator {
                 reader,
-                lower_bound: lower_inc.to_vec(),
-                upper_bound: upper_exc.to_vec(),
+                lower_inc: lower_inc.map(KeyRunIdOffsetBound::from_components),
+                upper_exc: upper_exc.map(KeyRunIdOffsetBound::from_components),
                 bytes_read: aligned_offset,
                 total_bytes: self.total_bytes,
                 skip_bytes,
@@ -183,8 +184,8 @@ impl Run {
 
         Box::new(RunIterator {
             reader,
-            lower_bound: lower_inc.to_vec(),
-            upper_bound: upper_exc.to_vec(),
+            lower_inc: lower_inc.map(KeyRunIdOffsetBound::from_components),
+            upper_exc: upper_exc.map(KeyRunIdOffsetBound::from_components),
             bytes_read: self.start_bytes, // Start from the beginning of this run
             total_bytes: self.total_bytes,
             skip_bytes: 0,
@@ -195,8 +196,8 @@ impl Run {
 
 struct RunIterator {
     reader: AlignedReader,
-    lower_bound: Vec<u8>,
-    upper_bound: Vec<u8>,
+    lower_inc: Option<KeyRunIdOffsetBound>,
+    upper_exc: Option<KeyRunIdOffsetBound>,
     bytes_read: usize,
     total_bytes: usize,
     skip_bytes: usize,   // Bytes to skip after seeking to aligned position
@@ -276,10 +277,10 @@ impl Iterator for RunIterator {
             }
 
             // Check if key is in range [lower_inc, upper_exc)
-            if !self.lower_bound.is_empty() && key < self.lower_bound {
+            if !self.lower_inc.is_empty() && key < self.lower_inc {
                 continue;
             }
-            if !self.upper_bound.is_empty() && key >= self.upper_bound {
+            if !self.upper_exc.is_empty() && key >= self.upper_exc {
                 // Since data is sorted in runs, we can stop here
                 return None;
             }

@@ -1,6 +1,7 @@
 use std::hint::black_box;
 use std::path::Path;
 use std::sync::Arc;
+use std::sync::atomic::AtomicU32;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use crate::diskio::aligned_writer::AlignedWriter;
@@ -11,6 +12,10 @@ use crate::sort::core::engine::SortHooks;
 use crate::sort::core::engine::{RunSummary, Scanner};
 use crate::sort::run_sink::RunSink;
 use crate::{SortOutput, SortStats};
+
+
+// Global run id generator
+pub(crate) static RUN_ID_COUNTER: AtomicU32 = AtomicU32::new(0);
 
 pub trait RunFormat: Clone + Send + Sync + 'static {
     type Run: RunSummary + Send + Sync + 'static;
@@ -46,8 +51,8 @@ pub trait RunFormat: Clone + Send + Sync + 'static {
 
     fn scan_range(
         run: &Self::Run,
-        lower_bound: &[u8],
-        upper_bound: &[u8],
+        lower_bound: Option<(&[u8], u32, usize)>, // (key, run_id, offset). Set run_id and offset to 0 if not applicable.
+        upper_bound: Option<(&[u8], u32, usize)>, // (key, run_id, offset). Set run_id and offset to 0 if not applicable.
         io_tracker: Option<IoStatsTracker>,
     ) -> Box<dyn Iterator<Item = Self::Record> + Send>;
 
@@ -55,7 +60,7 @@ pub trait RunFormat: Clone + Send + Sync + 'static {
         iterators: Vec<Box<dyn Iterator<Item = Self::Record> + Send>>,
     ) -> Box<dyn Iterator<Item = Self::Record> + Send>;
 
-    fn start_key<'a>(run: &'a Self::Run) -> Option<&'a [u8]>;
+    fn start_key<'a>(run: &'a Self::Run) -> Option<(&'a [u8], u32, usize)>;
 
     fn record_key<'a>(record: &'a Self::Record) -> &'a [u8];
     fn record_value<'a>(record: &'a Self::Record) -> &'a [u8];
@@ -77,8 +82,8 @@ pub enum MergeableRun<F: RunFormat> {
 impl<F: RunFormat> MergeableRun<F> {
     pub fn scan_range_with_io_tracker(
         &self,
-        lower_bound: &[u8],
-        upper_bound: &[u8],
+        lower_bound: Option<(&[u8], u32, usize)>, // (key, run_id, offset)
+        upper_bound: Option<(&[u8], u32, usize)>, // (key, run_id, offset)
         io_tracker: Option<IoStatsTracker>,
     ) -> Box<dyn Iterator<Item = F::Record> + Send> {
         match self {
@@ -91,14 +96,14 @@ impl<F: RunFormat> MergeableRun<F> {
                     return Box::new(std::iter::empty());
                 }
 
-                let start_partition = if lower_bound.is_empty() {
+                let start_partition = if lower_bound.is_none() {
                     0
                 } else {
                     let mut ok = -1;
                     let mut ng = non_empty_runs.len() as isize;
                     while (ng - ok).abs() > 1 {
                         let mid = (ok + ng) / 2;
-                        if F::start_key(non_empty_runs[mid as usize]).unwrap() < lower_bound {
+                        if F::start_key(non_empty_runs[mid as usize]).unwrap() < lower_bound.unwrap() {
                             ok = mid;
                         } else {
                             ng = mid;
@@ -107,14 +112,14 @@ impl<F: RunFormat> MergeableRun<F> {
                     if ok == -1 { 0 } else { ok as usize }
                 };
 
-                let end_partition = if upper_bound.is_empty() {
+                let end_partition = if upper_bound.is_none() {
                     non_empty_runs.len()
                 } else {
                     let mut ok = non_empty_runs.len() as isize;
                     let mut ng = -1;
                     while (ng - ok).abs() > 1 {
                         let mid = (ok + ng) / 2;
-                        if upper_bound <= F::start_key(non_empty_runs[mid as usize]).unwrap() {
+                        if upper_bound.unwrap() <= F::start_key(non_empty_runs[mid as usize]).unwrap() {
                             ok = mid;
                         } else {
                             ng = mid;
@@ -297,7 +302,7 @@ impl<F: RunFormat> SortOutput for RunsOutput<F> {
     fn iter(&self) -> Box<dyn Iterator<Item = (Vec<u8>, Vec<u8>)>> {
         Box::new(
             self.run
-                .scan_range_with_io_tracker(&[], &[], None)
+                .scan_range_with_io_tracker(None, None, None)
                 .map(F::record_into_kv),
         )
     }
@@ -334,8 +339,8 @@ impl<F: RunFormat> SortHooks for FormatSortHooks<F> {
         &self,
         runs: Arc<Vec<Self::MergeableRun>>,
         thread_id: usize,
-        lower_bound: Vec<u8>,
-        upper_bound: Vec<u8>,
+        lower_bound: Option<(&[u8], u32, usize)>,
+        upper_bound: Option<(&[u8], u32, usize)>,
         dir: &Path,
         io_tracker: Arc<IoStatsTracker>,
         discard_output: bool,
@@ -345,8 +350,8 @@ impl<F: RunFormat> SortHooks for FormatSortHooks<F> {
             .iter()
             .map(|run| {
                 run.scan_range_with_io_tracker(
-                    &lower_bound,
-                    &upper_bound,
+                    lower_bound,
+                    upper_bound,
                     Some((*io_tracker).clone()),
                 )
             })
@@ -402,5 +407,59 @@ impl<F: RunFormat> SortHooks for FormatSortHooks<F> {
         run_size: usize,
     ) -> crate::replacement_selection::ReplacementSelectionStats {
         F::run_replacement_selection(scanner, sink, run_size)
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct KeyRunIdOffsetBound {
+    pub key: Vec<u8>,
+    pub run_id: u32,
+    pub offset: usize,
+}
+
+impl KeyRunIdOffsetBound {
+    pub fn from_components((key, run_id, offset): (&[u8], u32, usize)) -> Self {
+        Self {
+            key: key.to_vec(),
+            run_id,
+            offset,
+        }
+    }
+
+    #[inline]
+    pub fn lt(&self, key: &[u8], run_id: u32, offset: usize) -> bool {
+        cmp_key_run_offset((key, run_id, offset), (&self.key, self.run_id, self.offset))
+            == std::cmp::Ordering::Less
+    }
+
+    #[inline]
+    pub fn ge(&self, key: &[u8], run_id: u32, offset: usize) -> bool {
+        matches!(
+            cmp_key_run_offset((key, run_id, offset), (&self.key, self.run_id, self.offset)),
+            std::cmp::Ordering::Greater | std::cmp::Ordering::Equal
+        )
+    }
+}
+
+impl From<&[u8]> for KeyRunIdOffsetBound {
+    fn from(key: &[u8]) -> Self {
+        Self {
+            key: key.to_vec(),
+            run_id: 0,
+            offset: 0,
+        }
+    }
+}
+
+pub fn cmp_key_run_offset(
+    (key_a, run_id_a, offset_a): (&[u8], u32, usize),
+    (key_b, run_id_b, offset_b): (&[u8], u32, usize),
+) -> std::cmp::Ordering {
+    match key_a.cmp(key_b) {
+        std::cmp::Ordering::Equal => match run_id_a.cmp(&run_id_b) {
+            std::cmp::Ordering::Equal => offset_a.cmp(&offset_b),
+            ord => ord,
+        },
+        ord => ord,
     }
 }
