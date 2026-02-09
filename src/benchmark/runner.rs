@@ -33,7 +33,7 @@ impl BenchmarkRunner {
 
         println!("Running benchmark for config: {}", self.config.config_name);
         println!(
-            "Parameters: Run Gen Threads: {}, Use OVC: {}, Run Size: {:.2} MB, Run Gen Memory: {:.1} MB, Merge Threads: {}, Merge Fanin: {}, Merge Memory: {:.1} MB, Imbalance Factor: {:.1}",
+            "Parameters: Run Gen Threads: {}, Use OVC: {}, Run Size: {:.2} MB, Run Gen Memory: {:.1} MB, Merge Threads: {}, Merge Fanin: {}, Merge Memory: {:.1} MB, Imbalance Factor: {:.1}, Partition: {:?}",
             self.config.run_gen_threads,
             self.config.use_ovc,
             self.config.run_size_mb,
@@ -42,6 +42,7 @@ impl BenchmarkRunner {
             self.config.merge_fanin,
             self.config.merge_memory_mb,
             self.config.imbalance_factor,
+            self.config.partition_type,
         );
         println!("{}", "=".repeat(80));
 
@@ -75,8 +76,7 @@ impl BenchmarkRunner {
         println!("Merge threads: {}", self.config.merge_threads);
         println!("Merge fan-in: {}", self.config.merge_fanin);
         println!("Merge memory (MB): {:.1}", self.config.merge_memory_mb);
-        println!("Sketch type: {}", self.config.sketch_type);
-        println!("Sketch size: {}", self.config.sketch_size);
+        println!("Partition type: {:?}", self.config.partition_type);
         println!(
             "Run indexing interval: {}",
             self.config.run_indexing_interval
@@ -218,11 +218,9 @@ impl BenchmarkRunner {
                 self.config.merge_fanin,
                 temp_dir,
             );
-            sorter.set_sketch_type(self.config.sketch_type);
-            sorter.set_sketch_size(self.config.sketch_size);
-            sorter.set_sketch_sampling_interval(self.config.sketch_sampling_interval);
             sorter.set_run_indexing_interval(self.config.run_indexing_interval);
             sorter.set_imbalance_factor(self.config.imbalance_factor);
+            sorter.set_partition_type(self.config.partition_type);
             sorter.set_discard_final_output(self.config.discard_final_output);
 
             sorter.sort(input)?
@@ -234,11 +232,9 @@ impl BenchmarkRunner {
                 self.config.merge_fanin,
                 temp_dir,
             );
-            sorter.set_sketch_type(self.config.sketch_type);
-            sorter.set_sketch_size(self.config.sketch_size);
-            sorter.set_sketch_sampling_interval(self.config.sketch_sampling_interval);
             sorter.set_run_indexing_interval(self.config.run_indexing_interval);
             sorter.set_imbalance_factor(self.config.imbalance_factor);
+            sorter.set_partition_type(self.config.partition_type);
             sorter.set_discard_final_output(self.config.discard_final_output);
 
             sorter.sort(input)?

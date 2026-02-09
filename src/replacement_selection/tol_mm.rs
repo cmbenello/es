@@ -461,7 +461,6 @@ impl<'a, S: RunSink> RunEmitter<KeyValueMM> for SinkEmitter<'a, S> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::sketch::{Sketch, SketchType};
     use crate::sort::core::engine::RunSummary;
 
     #[derive(Clone)]

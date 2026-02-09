@@ -7,7 +7,7 @@ use es::benchmark::{
 };
 use es::diskio::constants::DEFAULT_BUFFER_SIZE;
 use es::kvbin::{binary_file_name, create_kvbin_from_input};
-use es::sketch::SketchType;
+use es::sort::core::engine::PartitionType;
 use std::path::PathBuf;
 
 // TPC-H lineitem column cardinality reference table
@@ -48,6 +48,23 @@ use std::path::PathBuf;
 // SF=100:  ~600 million rows
 // SF=1000: ~6 billion rows
 
+#[derive(clap::ValueEnum, Clone, Copy, Debug)]
+enum PartitionArg {
+    RangeOnly,
+    RangeCnt,
+    RangeSize,
+}
+
+impl From<PartitionArg> for PartitionType {
+    fn from(value: PartitionArg) -> Self {
+        match value {
+            PartitionArg::RangeOnly => PartitionType::RangeOnly,
+            PartitionArg::RangeCnt => PartitionType::RangeCnt,
+            PartitionArg::RangeSize => PartitionType::RangeSize,
+        }
+    }
+}
+
 #[derive(Parser)]
 #[command(name = "lineitem_benchmark")]
 #[command(about = "TPC-H Lineitem CSV Sort Benchmark")]
@@ -87,6 +104,10 @@ struct Args {
     #[arg(long, default_value = "1.0")]
     imbalance_factor: f64,
 
+    /// Merge partition type (`range-only`, `range-cnt`, `range-size`)
+    #[arg(long, default_value = "range-cnt", value_name = "PARTITION")]
+    partition_type: PartitionArg,
+
     /// Discard final output (no write) for benchmarking
     #[arg(long, default_value = "false")]
     discard_final_output: bool,
@@ -98,18 +119,6 @@ struct Args {
     /// Value column indices (comma-separated)
     #[arg(short = 'v', long, default_value = "0,3")]
     value_columns: String,
-
-    /// Sketch type for quantile estimation (`kll` or `reservoir-sampling`)
-    #[arg(long, default_value = "kll", value_name = "SKETCH")]
-    sketch_type: SketchType,
-
-    /// Sketch size for quantile estimation
-    #[arg(long, default_value = "200")]
-    sketch_size: usize,
-
-    /// Sketch sampling interval (update the sketch every N records of the run)
-    #[arg(long, default_value = "100")]
-    sketch_sampling_interval: usize,
 
     /// Directory for temporary files
     #[arg(short, long, default_value = ".")]
@@ -224,9 +233,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         cooldown_seconds: args.cooldown_seconds,
         verify: args.verify,
         temp_dir: args.dir,
-        sketch_type: args.sketch_type,
-        sketch_size: args.sketch_size,
-        sketch_sampling_interval: args.sketch_sampling_interval,
         run_indexing_interval,
         run_gen_threads,
         use_ovc: args.ovc,
@@ -238,6 +244,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             * (merge_threads as f64)
             * (DEFAULT_BUFFER_SIZE as f64 / 1024.0 / 1024.0),
         imbalance_factor: args.imbalance_factor,
+        partition_type: args.partition_type.into(),
         discard_final_output: args.discard_final_output,
     };
 

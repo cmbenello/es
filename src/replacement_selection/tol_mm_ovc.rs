@@ -548,7 +548,6 @@ impl OvcRunValidator {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::sketch::{Sketch, SketchType};
     use crate::sort::core::engine::RunSummary;
 
     #[derive(Clone)]

@@ -2,7 +2,7 @@ use crate::diskio::aligned_writer::AlignedWriter;
 use crate::diskio::io_stats::IoStatsTracker;
 use crate::sort::core::engine::SorterCore;
 use crate::sort::core::run_format::{
-    FormatSortHooks, MergeableRun as GenericMergeableRun, RunFormat,
+    FormatSortHooks, IndexEntry, MergeableRun as GenericMergeableRun, RunFormat,
     RunsOutput as GenericRunsOutput,
 };
 use crate::sort::plain::merge::MergeIterator;
@@ -23,6 +23,10 @@ impl RunFormat for PlainRunFormat {
 
     fn new_run(writer: AlignedWriter, indexing_interval: usize) -> Result<Self::Run, String> {
         Run::from_writer_with_indexing_interval(writer, indexing_interval)
+    }
+
+    fn create_merge_run_with_id(writer: AlignedWriter, run_id: u32) -> Result<Self::Run, String> {
+        Run::from_writer_with_indexing_interval_and_id(writer, 1000, run_id)
     }
 
     fn finalize_run(run: &mut Self::Run) -> AlignedWriter {
@@ -51,6 +55,14 @@ impl RunFormat for PlainRunFormat {
         iterators: Vec<Box<dyn Iterator<Item = Self::Record> + Send>>,
     ) -> Box<dyn Iterator<Item = Self::Record> + Send> {
         Box::new(MergeIterator::new(iterators))
+    }
+
+    fn run_id(run: &Self::Run) -> u32 {
+        run.run_id()
+    }
+
+    fn sparse_index<'a>(run: &'a Self::Run) -> &'a [IndexEntry] {
+        run.sparse_index()
     }
 
     fn start_key<'a>(run: &'a Self::Run) -> Option<(&'a [u8], u32, usize)> {
@@ -111,7 +123,6 @@ mod tests {
     use crate::diskio::aligned_writer::AlignedWriter;
     use crate::diskio::file::SharedFd;
     use crate::rand::small_thread_rng;
-    use crate::sketch::SketchType;
     use rand::seq::SliceRandom;
     use std::sync::Arc;
     use tempfile::TempDir;
@@ -207,9 +218,6 @@ mod tests {
         let num_records = 100000;
         let num_threads_run_gen = 2;
         let run_gen_mem = 512 * 1024;
-        let sketch_type = SketchType::Kll;
-        let sketch_size = 200;
-        let sketch_sampling_interval = 1000;
         let run_indexing_interval = 1000;
         let fanin = 100;
         let num_threads = 4;
@@ -241,6 +249,7 @@ mod tests {
             fanin,
             num_threads,
             imbalance_factor,
+            crate::sort::core::engine::PartitionType::default(),
             temp_dir.path(),
         )
         .unwrap();

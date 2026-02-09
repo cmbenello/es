@@ -27,6 +27,8 @@ pub trait RunFormat: Clone + Send + Sync + 'static {
         Self::new_run(writer, 1000)
     }
 
+    fn create_merge_run_with_id(writer: AlignedWriter, run_id: u32) -> Result<Self::Run, String>;
+
     fn finalize_run(run: &mut Self::Run) -> AlignedWriter;
 
     fn append_from_kv(state: &mut Self::AppendState, run: &mut Self::Run, key: &[u8], value: &[u8]);
@@ -50,14 +52,18 @@ pub trait RunFormat: Clone + Send + Sync + 'static {
 
     fn scan_range(
         run: &Self::Run,
-        lower_bound: Option<(&[u8], u32, usize)>, // KeyRunIdOffsetBound: (key, run_id, offset). Set run_id and offset to 0 if not applicable.
-        upper_bound: Option<(&[u8], u32, usize)>, // KeyRunIdOffsetBound: (key, run_id, offset). Set run_id and offset to 0 if not applicable.
+        lower_inc: Option<(&[u8], u32, usize)>, // KeyRunIdOffsetBound: (key, run_id, offset). Set run_id and offset to 0 if not applicable.
+        upper_exc: Option<(&[u8], u32, usize)>, // KeyRunIdOffsetBound: (key, run_id, offset). Set run_id and offset to 0 if not applicable.
         io_tracker: Option<IoStatsTracker>,
     ) -> Box<dyn Iterator<Item = Self::Record> + Send>;
 
     fn merge_iterators(
         iterators: Vec<Box<dyn Iterator<Item = Self::Record> + Send>>,
     ) -> Box<dyn Iterator<Item = Self::Record> + Send>;
+
+    fn run_id(run: &Self::Run) -> u32;
+
+    fn sparse_index<'a>(run: &'a Self::Run) -> &'a [IndexEntry];
 
     fn start_key<'a>(run: &'a Self::Run) -> Option<(&'a [u8], u32, usize)>;
 
@@ -72,6 +78,224 @@ pub trait RunFormat: Clone + Send + Sync + 'static {
         run_size: usize,
     ) -> crate::replacement_selection::ReplacementSelectionStats;
 }
+/// Sparse index entry inside a single run.
+///
+/// `file_offset` is relative to the start of that run's byte range.
+#[derive(Debug, Clone)]
+pub struct IndexEntry {
+    pub key: Vec<u8>,
+    pub file_offset: usize,
+}
+
+#[derive(Clone, Copy)]
+pub struct SparseIndexRef<'a> {
+    pub run_id: u32,
+    pub entry: &'a IndexEntry,
+}
+
+impl<'a> SparseIndexRef<'a> {
+    pub fn key(&self) -> &'a [u8] {
+        self.entry.key.as_slice()
+    }
+
+    pub fn file_offset(&self) -> usize {
+        self.entry.file_offset
+    }
+
+    pub fn as_key_run_offset(&self) -> (&'a [u8], u32, usize) {
+        (
+            self.entry.key.as_slice(),
+            self.run_id,
+            self.entry.file_offset,
+        )
+    }
+}
+
+struct SparseIndexSegment<'a> {
+    run_id: u32,
+    entries: &'a [IndexEntry],
+    total_bytes: usize,
+    base_bytes: usize,
+}
+
+pub struct MultiSparseIndexes<'a> {
+    segments: Vec<SparseIndexSegment<'a>>,
+    segment_ends: Vec<usize>,
+    total_len: usize,
+    total_bytes: usize,
+}
+
+impl<'a> MultiSparseIndexes<'a> {
+    /// Creates a logical concatenation view of per-run sparse indexes.
+    ///
+    /// No `IndexEntry` is copied. We only store segment metadata:
+    ///
+    /// ```text
+    /// input segments
+    ///   seg0 (run_id=10): [ (a,0), (d,128), (g,256) ]
+    ///   seg1 (run_id=11): [ (h,0), (k,160) ]
+    ///
+    /// logical global array
+    ///   idx: 0       1        2        3       4
+    ///        (a,10,0)(d,10,128)(g,10,256)(h,11,0)(k,11,160)
+    ///
+    /// segment_ends = [3, 5]
+    /// total_len    = 5
+    /// ```
+    ///
+    /// `global_offset_at(i)` maps a logical index to cumulative bytes across
+    /// segments using `base_bytes + entry.file_offset`.
+    fn from_segments(mut segments: Vec<SparseIndexSegment<'a>>) -> Self {
+        segments.retain(|segment| !segment.entries.is_empty());
+        let mut segment_ends = Vec::with_capacity(segments.len());
+        let mut total_len = 0;
+        let mut total_bytes = 0;
+        for segment in &mut segments {
+            segment.base_bytes = total_bytes;
+            total_len += segment.entries.len();
+            segment_ends.push(total_len);
+            total_bytes += segment.total_bytes;
+        }
+
+        Self {
+            segments,
+            segment_ends,
+            total_len,
+            total_bytes,
+        }
+    }
+
+    pub fn len(&self) -> usize {
+        self.total_len
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.total_len == 0
+    }
+
+    fn locate(&self, index: usize) -> Option<(usize, usize)> {
+        if index >= self.total_len {
+            return None;
+        }
+
+        let needle = index + 1;
+        let segment_index = match self.segment_ends.binary_search(&needle) {
+            Ok(pos) | Err(pos) => pos,
+        };
+        let segment_start = if segment_index == 0 {
+            0
+        } else {
+            self.segment_ends[segment_index - 1]
+        };
+        let entry_index = index - segment_start;
+        Some((segment_index, entry_index))
+    }
+
+    pub fn get(&self, index: usize) -> Option<SparseIndexRef<'a>> {
+        let (segment_index, entry_index) = self.locate(index)?;
+        let segment = &self.segments[segment_index];
+        Some(SparseIndexRef {
+            run_id: segment.run_id,
+            entry: &segment.entries[entry_index],
+        })
+    }
+
+    pub fn total_bytes(&self) -> usize {
+        self.total_bytes
+    }
+
+    pub fn global_offset_at(&self, index: usize) -> Option<usize> {
+        let (segment_index, entry_index) = self.locate(index)?;
+        let segment = &self.segments[segment_index];
+        Some(segment.base_bytes + segment.entries[entry_index].file_offset)
+    }
+
+    pub fn iter(&'a self) -> impl Iterator<Item = SparseIndexRef<'a>> + 'a {
+        self.segments.iter().flat_map(|segment| {
+            let run_id = segment.run_id;
+            segment
+                .entries
+                .iter()
+                .map(move |entry| SparseIndexRef { run_id, entry })
+        })
+    }
+
+    pub fn binary_search_by<F>(&self, mut cmp: F) -> Result<usize, usize>
+    where
+        F: FnMut(SparseIndexRef<'a>) -> std::cmp::Ordering,
+    {
+        let mut left = 0;
+        let mut right = self.total_len;
+        while left < right {
+            let mid = left + (right - left) / 2;
+            let entry = self.get(mid).expect("index is within bounds");
+            match cmp(entry) {
+                std::cmp::Ordering::Less => left = mid + 1,
+                std::cmp::Ordering::Greater => right = mid,
+                std::cmp::Ordering::Equal => return Ok(mid),
+            }
+        }
+        Err(left)
+    }
+
+    pub fn lower_bound_range(
+        &self,
+        key: &[u8],
+        run_id: u32,
+        offset: usize,
+        mut lo: usize,
+        mut hi: usize,
+    ) -> usize {
+        while lo < hi {
+            let mid = lo + (hi - lo) / 2;
+            let entry = self.get(mid).expect("index is within bounds");
+            if matches!(
+                cmp_key_run_offset(entry.as_key_run_offset(), (key, run_id, offset)),
+                std::cmp::Ordering::Less
+            ) {
+                lo = mid + 1;
+            } else {
+                hi = mid;
+            }
+        }
+        lo
+    }
+
+    pub fn upper_bound_range(
+        &self,
+        key: &[u8],
+        run_id: u32,
+        offset: usize,
+        mut lo: usize,
+        mut hi: usize,
+    ) -> usize {
+        while lo < hi {
+            let mid = lo + (hi - lo) / 2;
+            let entry = self.get(mid).expect("index is within bounds");
+            if matches!(
+                cmp_key_run_offset(entry.as_key_run_offset(), (key, run_id, offset)),
+                std::cmp::Ordering::Less | std::cmp::Ordering::Equal
+            ) {
+                lo = mid + 1;
+            } else {
+                hi = mid;
+            }
+        }
+        lo
+    }
+
+    pub fn upper_bound(&self, key: &[u8], run_id: u32, offset: usize) -> usize {
+        self.upper_bound_range(key, run_id, offset, 0, self.total_len)
+    }
+
+    pub fn lower_bound(&self, key: &[u8], run_id: u32, offset: usize) -> usize {
+        match self.binary_search_by(|entry| {
+            cmp_key_run_offset(entry.as_key_run_offset(), (key, run_id, offset))
+        }) {
+            Ok(pos) | Err(pos) => pos,
+        }
+    }
+}
 
 pub enum MergeableRun<F: RunFormat> {
     Single(F::Run),
@@ -81,12 +305,12 @@ pub enum MergeableRun<F: RunFormat> {
 impl<F: RunFormat> MergeableRun<F> {
     pub fn scan_range_with_io_tracker(
         &self,
-        lower_bound: Option<(&[u8], u32, usize)>, // (key, run_id, offset)
-        upper_bound: Option<(&[u8], u32, usize)>, // (key, run_id, offset)
+        lower_inc: Option<(&[u8], u32, usize)>, // (key, run_id, offset)
+        upper_exc: Option<(&[u8], u32, usize)>, // (key, run_id, offset)
         io_tracker: Option<IoStatsTracker>,
     ) -> Box<dyn Iterator<Item = F::Record> + Send> {
         match self {
-            MergeableRun::Single(run) => F::scan_range(run, lower_bound, upper_bound, io_tracker),
+            MergeableRun::Single(run) => F::scan_range(run, lower_inc, upper_exc, io_tracker),
             MergeableRun::RangePartitioned(runs) => {
                 let non_empty_runs: Vec<&F::Run> =
                     runs.iter().filter(|r| F::start_key(r).is_some()).collect();
@@ -95,15 +319,17 @@ impl<F: RunFormat> MergeableRun<F> {
                     return Box::new(std::iter::empty());
                 }
 
-                let start_partition = if lower_bound.is_none() {
+                let start_partition = if lower_inc.is_none() {
                     0
                 } else {
                     let mut ok = -1;
                     let mut ng = non_empty_runs.len() as isize;
                     while (ng - ok).abs() > 1 {
                         let mid = (ok + ng) / 2;
-                        if F::start_key(non_empty_runs[mid as usize]).unwrap()
-                            < lower_bound.unwrap()
+                        if cmp_key_run_offset(
+                            F::start_key(non_empty_runs[mid as usize]).unwrap(),
+                            lower_inc.unwrap(),
+                        ) == std::cmp::Ordering::Less
                         {
                             ok = mid;
                         } else {
@@ -113,16 +339,20 @@ impl<F: RunFormat> MergeableRun<F> {
                     if ok == -1 { 0 } else { ok as usize }
                 };
 
-                let end_partition = if upper_bound.is_none() {
+                let end_partition = if upper_exc.is_none() {
                     non_empty_runs.len()
                 } else {
                     let mut ok = non_empty_runs.len() as isize;
                     let mut ng = -1;
                     while (ng - ok).abs() > 1 {
                         let mid = (ok + ng) / 2;
-                        if upper_bound.unwrap()
-                            <= F::start_key(non_empty_runs[mid as usize]).unwrap()
-                        {
+                        if matches!(
+                            cmp_key_run_offset(
+                                upper_exc.unwrap(),
+                                F::start_key(non_empty_runs[mid as usize]).unwrap(),
+                            ),
+                            std::cmp::Ordering::Less | std::cmp::Ordering::Equal
+                        ) {
                             ok = mid;
                         } else {
                             ng = mid;
@@ -133,12 +363,7 @@ impl<F: RunFormat> MergeableRun<F> {
 
                 let mut iterators = Vec::with_capacity(end_partition - start_partition);
                 for run in non_empty_runs[start_partition..end_partition].iter() {
-                    iterators.push(F::scan_range(
-                        run,
-                        lower_bound,
-                        upper_bound,
-                        io_tracker.clone(),
-                    ));
+                    iterators.push(F::scan_range(run, lower_inc, upper_exc, io_tracker.clone()));
                 }
 
                 Box::new(RangePartitionedIterator::<F>::new(iterators))
@@ -151,6 +376,31 @@ impl<F: RunFormat> MergeableRun<F> {
             MergeableRun::Single(run) => run.total_entries(),
             MergeableRun::RangePartitioned(runs) => {
                 runs.iter().map(|run| run.total_entries()).sum()
+            }
+        }
+    }
+
+    pub fn sparse_indexes(&self) -> MultiSparseIndexes<'_> {
+        match self {
+            MergeableRun::Single(run) => {
+                MultiSparseIndexes::from_segments(vec![SparseIndexSegment {
+                    run_id: F::run_id(run),
+                    entries: F::sparse_index(run),
+                    total_bytes: run.total_bytes(),
+                    base_bytes: 0,
+                }])
+            }
+            MergeableRun::RangePartitioned(runs) => {
+                let segments = runs
+                    .iter()
+                    .map(|run| SparseIndexSegment {
+                        run_id: F::run_id(run),
+                        entries: F::sparse_index(run),
+                        total_bytes: run.total_bytes(),
+                        base_bytes: 0,
+                    })
+                    .collect();
+                MultiSparseIndexes::from_segments(segments)
             }
         }
     }
@@ -342,6 +592,7 @@ impl<F: RunFormat> SortHooks for FormatSortHooks<F> {
         &self,
         runs: Arc<Vec<Self::MergeableRun>>,
         thread_id: usize,
+        run_id: u32,
         lower_bound: Option<(&[u8], u32, usize)>,
         upper_bound: Option<(&[u8], u32, usize)>,
         dir: &Path,
@@ -383,7 +634,7 @@ impl<F: RunFormat> SortHooks for FormatSortHooks<F> {
             );
             let writer = AlignedWriter::from_fd_with_tracker(fd, Some((*io_tracker).clone()))
                 .map_err(|e| format!("Failed to create run writer: {}", e))?;
-            let mut output_run = F::create_merge_run(writer)
+            let mut output_run = F::create_merge_run_with_id(writer, run_id)
                 .map_err(|e| format!("Failed to create merge output run: {}", e))?;
             let mut append_state = F::AppendState::default();
 
@@ -397,6 +648,10 @@ impl<F: RunFormat> SortHooks for FormatSortHooks<F> {
             let thread_time_ms = thread_start.elapsed().as_millis();
             Ok((MergeableRun::Single(output_run), thread_time_ms))
         }
+    }
+
+    fn sparse_indexes<'a>(&self, run: &'a Self::MergeableRun) -> MultiSparseIndexes<'a> {
+        run.sparse_indexes()
     }
 
     fn into_output(&self, run: Self::MergeableRun, stats: SortStats) -> Box<dyn SortOutput> {

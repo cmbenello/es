@@ -3,7 +3,7 @@ use crate::diskio::io_stats::IoStatsTracker;
 use crate::ovc::offset_value_coding_32::OVCU32;
 use crate::sort::core::engine::SorterCore;
 use crate::sort::core::run_format::{
-    FormatSortHooks, MergeableRun as GenericMergeableRun, RunFormat,
+    FormatSortHooks, IndexEntry, MergeableRun as GenericMergeableRun, RunFormat,
     RunsOutput as GenericRunsOutput,
 };
 use crate::sort::ovc::merge::MergeWithOVC;
@@ -29,6 +29,10 @@ impl RunFormat for OvcRunFormat {
 
     fn new_run(writer: AlignedWriter, indexing_interval: usize) -> Result<Self::Run, String> {
         RunWithOVC::from_writer_with_indexing_interval(writer, indexing_interval)
+    }
+
+    fn create_merge_run_with_id(writer: AlignedWriter, run_id: u32) -> Result<Self::Run, String> {
+        RunWithOVC::from_writer_with_indexing_interval_and_id(writer, 1000, run_id)
     }
 
     fn finalize_run(run: &mut Self::Run) -> AlignedWriter {
@@ -78,6 +82,14 @@ impl RunFormat for OvcRunFormat {
             1 => iterators.into_iter().next().unwrap(),
             _ => Box::new(MergeWithOVC::new(iterators)),
         }
+    }
+
+    fn run_id(run: &Self::Run) -> u32 {
+        run.run_id()
+    }
+
+    fn sparse_index<'a>(run: &'a Self::Run) -> &'a [IndexEntry] {
+        run.sparse_index()
     }
 
     fn start_key<'a>(run: &'a Self::Run) -> Option<(&'a [u8], u32, usize)> {
@@ -134,12 +146,12 @@ impl SorterCore<OvcSortHooks> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::InMemInput;
     use crate::diskio::aligned_writer::AlignedWriter;
     use crate::diskio::file::SharedFd;
     use crate::ovc::offset_value_coding_32::compute_ovc_delta;
     use crate::rand::small_thread_rng;
     use crate::sort::ovc::run::RunWithOVC;
-    use crate::{InMemInput, sketch::SketchType};
     use rand::seq::SliceRandom;
     use std::sync::Arc;
     use tempfile::TempDir;
@@ -246,6 +258,7 @@ mod tests {
             fanin,
             num_threads,
             imbalance_factor,
+            crate::sort::core::engine::PartitionType::default(),
             temp_dir.path(),
         )
         .unwrap();
@@ -294,6 +307,7 @@ mod tests {
             2,   // fanin
             2,   // num_threads
             1.0, // imbalance_factor
+            crate::sort::core::engine::PartitionType::default(),
             temp_dir.path(),
         )
         .unwrap();

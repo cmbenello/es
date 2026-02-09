@@ -1,5 +1,4 @@
 use crate::ovc::offset_value_coding_32::OVCU32;
-use crate::sketch::Sketch;
 use crate::sort::core::engine::RunSummary;
 
 pub trait RunSink: Send {

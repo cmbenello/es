@@ -4,17 +4,12 @@ use crate::diskio::constants::align_down;
 use crate::diskio::file::SharedFd;
 use crate::diskio::io_stats::IoStatsTracker;
 use crate::sort::core::engine::RunSummary;
-use crate::sort::core::run_format::{KeyRunIdOffsetBound, RUN_ID_COUNTER, cmp_key_run_offset};
+use crate::sort::core::run_format::{
+    IndexEntry, KeyRunIdOffsetBound, RUN_ID_COUNTER, cmp_key_run_offset,
+};
 use std::io::{Read, Write};
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
-
-// Sparse index entry
-#[derive(Debug, Clone)]
-pub struct IndexEntry {
-    pub key: Vec<u8>,
-    pub file_offset: usize,
-}
 
 // File-based run implementation with direct I/O
 pub struct Run {
@@ -37,12 +32,21 @@ impl Run {
         writer: AlignedWriter,
         indexing_interval: usize,
     ) -> Result<Self, String> {
+        let run_id = RUN_ID_COUNTER.fetch_add(1, Ordering::AcqRel);
+        Self::from_writer_with_indexing_interval_and_id(writer, indexing_interval, run_id)
+    }
+
+    pub fn from_writer_with_indexing_interval_and_id(
+        writer: AlignedWriter,
+        indexing_interval: usize,
+        run_id: u32,
+    ) -> Result<Self, String> {
         // Get current position in the file
         let start_bytes = writer.position() as usize;
         let fd = writer.get_fd();
 
         Ok(Self {
-            run_id: RUN_ID_COUNTER.fetch_add(1, Ordering::AcqRel),
+            run_id,
             fd,
             writer: Some(writer),
             total_entries: 0,
@@ -75,6 +79,10 @@ impl Run {
 
     pub fn start_key(&self) -> Option<&[u8]> {
         self.sparse_index.first().map(|entry| entry.key.as_slice())
+    }
+
+    pub fn sparse_index(&self) -> &Vec<IndexEntry> {
+        &self.sparse_index
     }
 
     fn find_start_position(

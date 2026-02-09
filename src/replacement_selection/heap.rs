@@ -539,7 +539,6 @@ mod tests {
 
     mod driver {
         use super::*;
-        use crate::sketch::{Sketch, SketchType};
         use crate::sort::core::engine::RunSummary;
         use crate::sort::run_sink::RunSink;
 
