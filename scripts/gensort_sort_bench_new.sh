@@ -136,12 +136,7 @@ done
 # EXPERIMENT 2: MEMORY CLIFF (Fixed 44 Threads)
 # ==============================================================================
 echo "=== EXP 2: MEMORY CLIFF (44 THREADS) ==="
-# 8, 6, 4 should be Safe. 2, 1 Fail. 
-# We skip 2 to avoid overlap with Exp 1. 
 for m in 32 24 16 8 6 4 2 1; do
-  # Skip overlap with Exp 1
-  if [[ "$m" == "2" ]]; then continue; fi
-  
   run_bench "Exp2" "44" "44" "$m"
   cooldown
 done
@@ -152,7 +147,6 @@ done
 # ==============================================================================
 echo "=== EXP 3: NO-OVC (44 THREADS) ==="
 for m in 32 24 16 8 6 4 2 1; do
-  # Skip overlap with Exp 1
   run_bench "Exp3" "44" "44" "$m" "--ovc=false"
   cooldown
 done
