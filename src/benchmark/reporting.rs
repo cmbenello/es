@@ -185,12 +185,18 @@ fn print_merge_operations_table(result: &BenchmarkResult, max_merges: usize) {
                     0.0
                 };
 
-                // For single run, slowest and fastest are the same
-                let time_s = m.time_ms as f64 / 1000.0;
+                let (slow_s, fast_s) = if !m.per_thread_times_ms.is_empty() {
+                    let min_time = *m.per_thread_times_ms.iter().min().unwrap_or(&0);
+                    let max_time = *m.per_thread_times_ms.iter().max().unwrap_or(&0);
+                    (max_time as f64 / 1000.0, min_time as f64 / 1000.0)
+                } else {
+                    let time_s = m.time_ms as f64 / 1000.0;
+                    (time_s, time_s)
+                };
 
                 line.push_str(&format!(
                     " {:<10} {:<10} {:<10.2} {:<12.2} {:<12.2}",
-                    part_avg, part_max, imbalance, time_s, time_s
+                    part_avg, part_max, imbalance, slow_s, fast_s
                 ));
             } else {
                 // No merge data for this pass
@@ -212,7 +218,8 @@ fn print_merge_operations_table(result: &BenchmarkResult, max_merges: usize) {
         let mut part_avgs: Vec<u64> = Vec::new();
         let mut part_maxs: Vec<u64> = Vec::new();
         let mut imbalances: Vec<f64> = Vec::new();
-        let mut times_s: Vec<f64> = Vec::new();
+        let mut slow_times_s: Vec<f64> = Vec::new();
+        let mut fast_times_s: Vec<f64> = Vec::new();
 
         for s in &result.stats {
             if mi < s.per_merge_stats.len() {
@@ -234,16 +241,28 @@ fn print_merge_operations_table(result: &BenchmarkResult, max_merges: usize) {
                 part_avgs.push(part_avg);
                 part_maxs.push(part_max);
                 imbalances.push(imbalance);
-                times_s.push(m.time_ms as f64 / 1000.0);
+                if !m.per_thread_times_ms.is_empty() {
+                    let min_time = *m.per_thread_times_ms.iter().min().unwrap_or(&0);
+                    let max_time = *m.per_thread_times_ms.iter().max().unwrap_or(&0);
+                    slow_times_s.push(max_time as f64 / 1000.0);
+                    fast_times_s.push(min_time as f64 / 1000.0);
+                } else {
+                    let time_s = m.time_ms as f64 / 1000.0;
+                    slow_times_s.push(time_s);
+                    fast_times_s.push(time_s);
+                }
             }
         }
 
-        if !times_s.is_empty() {
+        if !slow_times_s.is_empty() {
             let avg_part_avg = part_avgs.iter().sum::<u64>() / part_avgs.len() as u64;
             let avg_part_max = part_maxs.iter().sum::<u64>() / part_maxs.len() as u64;
             let avg_imbalance = imbalances.iter().sum::<f64>() / imbalances.len() as f64;
-            let slowest_time = times_s.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
-            let fastest_time = times_s.iter().cloned().fold(f64::INFINITY, f64::min);
+            let slowest_time = slow_times_s
+                .iter()
+                .cloned()
+                .fold(f64::NEG_INFINITY, f64::max);
+            let fastest_time = fast_times_s.iter().cloned().fold(f64::INFINITY, f64::min);
 
             agg_line.push_str(&format!(
                 " {:<10} {:<10} {:<10.2} {:<12.2} {:<12.2}",

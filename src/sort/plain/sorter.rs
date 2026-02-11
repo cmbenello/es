@@ -2,7 +2,7 @@ use crate::diskio::aligned_writer::AlignedWriter;
 use crate::diskio::io_stats::IoStatsTracker;
 use crate::sort::core::engine::SorterCore;
 use crate::sort::core::run_format::{
-    FormatSortHooks, IndexEntry, MergeableRun as GenericMergeableRun, RunFormat,
+    FormatSortHooks, IndexEntry, IndexingInterval, MergeableRun as GenericMergeableRun, RunFormat,
     RunsOutput as GenericRunsOutput,
 };
 use crate::sort::plain::merge::MergeIterator;
@@ -21,12 +21,19 @@ impl RunFormat for PlainRunFormat {
     type Record = (Vec<u8>, Vec<u8>);
     type AppendState = ();
 
-    fn new_run(writer: AlignedWriter, indexing_interval: usize) -> Result<Self::Run, String> {
+    fn new_run(
+        writer: AlignedWriter,
+        indexing_interval: IndexingInterval,
+    ) -> Result<Self::Run, String> {
         Run::from_writer_with_indexing_interval(writer, indexing_interval)
     }
 
-    fn create_merge_run_with_id(writer: AlignedWriter, run_id: u32) -> Result<Self::Run, String> {
-        Run::from_writer_with_indexing_interval_and_id(writer, 1000, run_id)
+    fn create_merge_run_with_id(
+        writer: AlignedWriter,
+        indexing_interval: IndexingInterval,
+        run_id: u32,
+    ) -> Result<Self::Run, String> {
+        Run::from_writer_with_indexing_interval_and_id(writer, indexing_interval, run_id)
     }
 
     fn finalize_run(run: &mut Self::Run) -> AlignedWriter {
@@ -104,13 +111,15 @@ impl SorterCore<PlainSortHooks> {
         run_gen_mem: usize,
         merge_threads: usize,
         merge_fanin: usize,
+        run_indexing_interval: usize,
         base_dir: impl AsRef<std::path::Path>,
     ) -> Self {
-        SorterCore::with_defaults(
+        SorterCore::with_indexing_interval(
             run_gen_threads,
             run_gen_mem,
             merge_threads,
             merge_fanin,
+            run_indexing_interval,
             base_dir,
         )
     }

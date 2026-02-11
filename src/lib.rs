@@ -109,7 +109,18 @@ impl std::fmt::Display for SortStats {
                     let max_time = *merge_stat.per_thread_times_ms.iter().max().unwrap_or(&0);
                     let avg_time = merge_stat.per_thread_times_ms.iter().sum::<u128>() as f64
                         / merge_stat.per_thread_times_ms.len() as f64;
-                    let time_imbalance = max_time as f64 / avg_time;
+                    let time_imbalance = if avg_time > 0.0 {
+                        max_time as f64 / avg_time
+                    } else {
+                        0.0
+                    };
+                    let format_imbalance = |max: u64, avg: f64| -> String {
+                        if avg > 0.0 {
+                            format!("{:.2}x", max as f64 / avg)
+                        } else {
+                            "n/a".to_string()
+                        }
+                    };
 
                     if self.per_merge_stats.len() > 1 {
                         writeln!(f, "  Thread timing (merge pass {}):", i + 1)?;
@@ -124,6 +135,43 @@ impl std::fmt::Display for SortStats {
                         "    Time imbalance factor (max/avg): {:.2}x",
                         time_imbalance
                     )?;
+                    if !merge_stat.merge_entry_num.is_empty() {
+                        let total_entries: u64 = merge_stat.merge_entry_num.iter().sum();
+                        let avg_entries =
+                            total_entries as f64 / merge_stat.merge_entry_num.len() as f64;
+                        let max_entries = *merge_stat.merge_entry_num.iter().max().unwrap_or(&0);
+                        writeln!(
+                            f,
+                            "    Entry imbalance factor (max/avg): {}",
+                            format_imbalance(max_entries, avg_entries)
+                        )?;
+                    }
+                    if !merge_stat.merge_entry_bytes.is_empty() {
+                        let total_bytes: u64 = merge_stat.merge_entry_bytes.iter().sum();
+                        let avg_bytes =
+                            total_bytes as f64 / merge_stat.merge_entry_bytes.len() as f64;
+                        let max_bytes = *merge_stat.merge_entry_bytes.iter().max().unwrap_or(&0);
+                        writeln!(
+                            f,
+                            "    Byte imbalance factor (max/avg): {}",
+                            format_imbalance(max_bytes, avg_bytes)
+                        )?;
+                    }
+                    if !merge_stat.per_thread_io_stats.is_empty() {
+                        let io_bytes: Vec<u64> = merge_stat
+                            .per_thread_io_stats
+                            .iter()
+                            .map(|stats| stats.total_bytes())
+                            .collect();
+                        let total_io: u64 = io_bytes.iter().sum();
+                        let avg_io = total_io as f64 / io_bytes.len() as f64;
+                        let max_io = *io_bytes.iter().max().unwrap_or(&0);
+                        writeln!(
+                            f,
+                            "    I/O imbalance factor (max/avg): {}",
+                            format_imbalance(max_io, avg_io)
+                        )?;
+                    }
 
                     // Show all thread times if not too many threads
                     if merge_stat.per_thread_times_ms.len() <= 32 {
@@ -157,12 +205,54 @@ impl std::fmt::Display for SortStats {
                     let total: u64 = merge_stat.merge_entry_num.iter().sum();
                     let avg = total as f64 / merge_stat.merge_entry_num.len() as f64;
                     let max = *merge_stat.merge_entry_num.iter().max().unwrap_or(&0);
-                    let imbalance = max as f64 / avg;
+                    let entry_imbalance = if avg > 0.0 {
+                        Some(max as f64 / avg)
+                    } else {
+                        None
+                    };
+                    let bytes_imbalance = if !merge_stat.merge_entry_bytes.is_empty() {
+                        let total_bytes: u64 = merge_stat.merge_entry_bytes.iter().sum();
+                        let avg_bytes =
+                            total_bytes as f64 / merge_stat.merge_entry_bytes.len() as f64;
+                        let max_bytes = *merge_stat.merge_entry_bytes.iter().max().unwrap_or(&0);
+                        (avg_bytes > 0.0).then_some(max_bytes as f64 / avg_bytes)
+                    } else {
+                        None
+                    };
+                    let time_imbalance = if !merge_stat.per_thread_times_ms.is_empty() {
+                        let avg_time = merge_stat.per_thread_times_ms.iter().sum::<u128>() as f64
+                            / merge_stat.per_thread_times_ms.len() as f64;
+                        let max_time = *merge_stat.per_thread_times_ms.iter().max().unwrap_or(&0);
+                        (avg_time > 0.0).then_some(max_time as f64 / avg_time)
+                    } else {
+                        None
+                    };
+                    let io_imbalance = if !merge_stat.per_thread_io_stats.is_empty() {
+                        let io_bytes: Vec<u64> = merge_stat
+                            .per_thread_io_stats
+                            .iter()
+                            .map(|stats| stats.total_bytes())
+                            .collect();
+                        let total_io: u64 = io_bytes.iter().sum();
+                        let avg_io = total_io as f64 / io_bytes.len() as f64;
+                        let max_io = *io_bytes.iter().max().unwrap_or(&0);
+                        (avg_io > 0.0).then_some(max_io as f64 / avg_io)
+                    } else {
+                        None
+                    };
+                    let format_opt = |value: Option<f64>| -> String {
+                        value
+                            .map(|v| format!("{:.2}x", v))
+                            .unwrap_or_else(|| "n/a".to_string())
+                    };
                     writeln!(
                         f,
-                        "      Partitions: {}, imbalance: {:.2}x",
+                        "      Partitions: {}, entry imbal: {}, byte imbal: {}, time imbal: {}, io imbal: {}",
                         merge_stat.merge_entry_num.len(),
-                        imbalance
+                        format_opt(entry_imbalance),
+                        format_opt(bytes_imbalance),
+                        format_opt(time_imbalance),
+                        format_opt(io_imbalance)
                     )?;
                 }
             }
@@ -202,9 +292,11 @@ pub struct RunGenerationStats {
 pub struct MergeStats {
     pub output_runs: usize,
     pub merge_entry_num: Vec<u64>,
+    pub merge_entry_bytes: Vec<u64>,
     pub time_ms: u128,
     pub io_stats: Option<IoStats>,
     pub per_thread_times_ms: Vec<u128>,
+    pub per_thread_io_stats: Vec<IoStats>,
 }
 
 // Input implementation

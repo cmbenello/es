@@ -16,7 +16,6 @@ pub struct BenchmarkConfig {
     pub cooldown_seconds: u64,
     pub verify: bool,
     pub temp_dir: PathBuf,
-    pub run_indexing_interval: usize,
     pub run_gen_threads: usize,
     pub use_ovc: bool,
     pub run_size_mb: f64,

@@ -77,10 +77,6 @@ impl BenchmarkRunner {
         println!("Merge fan-in: {}", self.config.merge_fanin);
         println!("Merge memory (MB): {:.1}", self.config.merge_memory_mb);
         println!("Partition type: {:?}", self.config.partition_type);
-        println!(
-            "Run indexing interval: {}",
-            self.config.run_indexing_interval
-        );
         println!("Temporary directory: {:?}", self.config.temp_dir);
         println!("Warmup runs: {}", self.config.warmup_runs);
         println!("Runs per configuration: {}", self.config.benchmark_runs);
@@ -216,9 +212,9 @@ impl BenchmarkRunner {
                 (self.config.run_size_mb * 1024.0 * 1024.0) as usize,
                 self.config.merge_threads,
                 self.config.merge_fanin,
+                100,
                 temp_dir,
             );
-            sorter.set_run_indexing_interval(self.config.run_indexing_interval);
             sorter.set_imbalance_factor(self.config.imbalance_factor);
             sorter.set_partition_type(self.config.partition_type);
             sorter.set_discard_final_output(self.config.discard_final_output);
@@ -230,9 +226,9 @@ impl BenchmarkRunner {
                 (self.config.run_size_mb * 1024.0 * 1024.0) as usize,
                 self.config.merge_threads,
                 self.config.merge_fanin,
+                100,
                 temp_dir,
             );
-            sorter.set_run_indexing_interval(self.config.run_indexing_interval);
             sorter.set_imbalance_factor(self.config.imbalance_factor);
             sorter.set_partition_type(self.config.partition_type);
             sorter.set_discard_final_output(self.config.discard_final_output);

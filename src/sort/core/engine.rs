@@ -9,7 +9,8 @@ use crate::diskio::file::SharedFd;
 use crate::diskio::io_stats::IoStatsTracker;
 use crate::rand::small_thread_rng;
 use crate::sort::core::run_format::{
-    KeyRunIdOffsetBound, MultiSparseIndexes, RUN_ID_COUNTER, SparseIndexRef, cmp_key_run_offset,
+    IndexingInterval, KeyRunIdOffsetBound, MultiSparseIndexes, RUN_ID_COUNTER, SparseIndexRef,
+    cmp_key_run_offset,
 };
 use crate::sort::run_sink::RunSink;
 use crate::{
@@ -154,7 +155,11 @@ pub trait SortHooks: Clone + Send + Sync + 'static {
     type MergeableRun: RunSummary + Send + Sync + 'static;
     type Sink: RunSink<MergeableRun = Self::MergeableRun> + Send;
 
-    fn create_sink(&self, writer: AlignedWriter, run_indexing_interval: usize) -> Self::Sink;
+    fn create_sink(
+        &self,
+        writer: AlignedWriter,
+        run_indexing_interval: IndexingInterval,
+    ) -> Self::Sink;
 
     fn dummy_run(&self) -> Self::MergeableRun;
 
@@ -165,6 +170,7 @@ pub trait SortHooks: Clone + Send + Sync + 'static {
         runs: Arc<Vec<Self::MergeableRun>>,
         thread_id: usize,
         run_id: u32,
+        run_indexing_interval: IndexingInterval,
         lower_inc: Option<(&[u8], u32, usize)>,
         upper_exc: Option<(&[u8], u32, usize)>,
         dir: &Path,
@@ -191,7 +197,7 @@ pub struct SorterCore<H: SortHooks> {
     run_gen_mem: usize,
     merge_threads: usize,
     merge_fanin: usize,
-    run_indexing_interval: usize,
+    run_indexing_interval: IndexingInterval,
     imbalance_factor: f64,
     partition_type: PartitionType,
     temp_dir_info: Arc<TempDirInfo>,
@@ -205,6 +211,7 @@ impl<H: SortHooks> SorterCore<H> {
         run_gen_mem: usize,
         merge_threads: usize,
         merge_fanin: usize,
+        run_indexing_interval: IndexingInterval,
         base_dir: impl AsRef<Path>,
     ) -> Self {
         let timestamp = SystemTime::now()
@@ -223,7 +230,7 @@ impl<H: SortHooks> SorterCore<H> {
             run_gen_mem,
             merge_threads,
             merge_fanin,
-            run_indexing_interval: 10,
+            run_indexing_interval,
             imbalance_factor: 1.0,
             partition_type: PartitionType::default(),
             temp_dir_info: Arc::new(TempDirInfo {
@@ -238,16 +245,23 @@ impl<H: SortHooks> SorterCore<H> {
         self.temp_dir_info.as_ref().as_ref()
     }
 
-    pub fn set_run_indexing_interval(&mut self, interval: usize) {
-        self.run_indexing_interval = interval;
-    }
-
     pub fn set_imbalance_factor(&mut self, factor: f64) {
         self.imbalance_factor = factor;
     }
 
     pub fn set_partition_type(&mut self, partition_type: PartitionType) {
         self.partition_type = partition_type;
+        let budget_bytes = self.run_gen_mem.saturating_mul(5) / 100;
+        self.run_indexing_interval = match partition_type {
+            PartitionType::RangeSize => IndexingInterval::bytes_with_budget(
+                self.run_indexing_interval.value(),
+                budget_bytes,
+            ),
+            _ => IndexingInterval::records_with_budget(
+                self.run_indexing_interval.value(),
+                budget_bytes,
+            ),
+        };
     }
 
     pub fn set_discard_final_output(&mut self, discard: bool) {
@@ -272,6 +286,16 @@ impl<H: SortHooks> SorterCore<H> {
         &self,
         runs: Vec<H::MergeableRun>,
     ) -> Result<(H::MergeableRun, Vec<MergeStats>), String> {
+        let merge_indexing_interval = match self.run_indexing_interval {
+            IndexingInterval::Bytes {
+                stride,
+                budget_bytes,
+            } => IndexingInterval::Bytes {
+                stride,
+                budget_bytes,
+            },
+            IndexingInterval::Records { .. } => IndexingInterval::records(1000),
+        };
         multi_merge_with_hooks(
             &self.hooks,
             runs,
@@ -279,6 +303,7 @@ impl<H: SortHooks> SorterCore<H> {
             self.merge_threads,
             self.imbalance_factor,
             self.partition_type,
+            merge_indexing_interval,
             self.temp_dir_info.as_ref().as_ref(),
             self.discard_final_output,
         )
@@ -300,7 +325,7 @@ impl<H: SortHooks> SorterCore<H> {
             sort_input,
             num_threads,
             run_gen_mem,
-            run_indexing_interval,
+            IndexingInterval::records(run_indexing_interval),
             dir,
         )
     }
@@ -316,6 +341,10 @@ impl<H: SortHooks> SorterCore<H> {
     where
         H: Default,
     {
+        let merge_indexing_interval = match partition_type {
+            PartitionType::RangeSize => IndexingInterval::bytes(1000),
+            _ => IndexingInterval::records(1000),
+        };
         multi_merge_with_hooks(
             &H::default(),
             runs,
@@ -323,6 +352,7 @@ impl<H: SortHooks> SorterCore<H> {
             num_threads,
             imbalance_factor,
             partition_type,
+            merge_indexing_interval,
             dir.as_ref(),
             false, // Default: don't discard output
         )
@@ -330,19 +360,22 @@ impl<H: SortHooks> SorterCore<H> {
 }
 
 impl<H: SortHooks + Default> SorterCore<H> {
-    pub fn with_defaults(
+    pub fn with_indexing_interval(
         run_gen_threads: usize,
         run_gen_mem: usize,
         merge_threads: usize,
         merge_fanin: usize,
+        run_indexing_interval: usize,
         base_dir: impl AsRef<Path>,
     ) -> Self {
+        let budget_bytes = run_gen_mem.saturating_mul(5) / 100;
         Self::with_hooks(
             H::default(),
             run_gen_threads,
             run_gen_mem,
             merge_threads,
             merge_fanin,
+            IndexingInterval::records_with_budget(run_indexing_interval, budget_bytes),
             base_dir,
         )
     }
@@ -364,7 +397,7 @@ fn run_generation_with_hooks<H: SortHooks>(
     sort_input: Box<dyn SortInput>,
     num_threads: usize,
     run_gen_mem: usize,
-    run_indexing_interval: usize,
+    run_indexing_interval: IndexingInterval,
     dir: impl AsRef<Path>,
 ) -> Result<(Vec<H::MergeableRun>, RunGenerationStats), String> {
     let dir = dir.as_ref();
@@ -408,6 +441,7 @@ fn multi_merge_with_hooks<H: SortHooks>(
     num_threads: usize,
     imbalance_factor: f64,
     partition_type: PartitionType,
+    run_indexing_interval: IndexingInterval,
     dir: &Path,
     discard_final_output: bool,
 ) -> Result<(H::MergeableRun, Vec<MergeStats>), String> {
@@ -418,9 +452,11 @@ fn multi_merge_with_hooks<H: SortHooks>(
         let merge_stats = MergeStats {
             output_runs: 0,
             merge_entry_num: vec![],
+            merge_entry_bytes: vec![],
             time_ms: 0,
             io_stats: None,
             per_thread_times_ms: vec![],
+            per_thread_io_stats: vec![],
         };
         return Ok((hooks.dummy_run(), vec![merge_stats]));
     }
@@ -430,9 +466,11 @@ fn multi_merge_with_hooks<H: SortHooks>(
         let merge_stats = MergeStats {
             output_runs: 1,
             merge_entry_num: vec![run.total_entries() as u64],
+            merge_entry_bytes: vec![run.total_bytes() as u64],
             time_ms: 0,
             io_stats: None,
             per_thread_times_ms: vec![],
+            per_thread_io_stats: vec![],
         };
         return Ok((run, vec![merge_stats]));
     }
@@ -445,6 +483,7 @@ fn multi_merge_with_hooks<H: SortHooks>(
             num_threads,
             imbalance_factor,
             partition_type,
+            run_indexing_interval,
             dir,
             discard_final_output,
         )?;
@@ -484,6 +523,7 @@ fn multi_merge_with_hooks<H: SortHooks>(
             num_threads,
             imbalance_factor,
             partition_type,
+            run_indexing_interval,
             dir,
             should_discard,
         )?;
@@ -509,6 +549,7 @@ fn merge_once_with_hooks<H: SortHooks>(
     num_threads: usize,
     imbalance_factor: f64,
     partition_type: PartitionType,
+    run_indexing_interval: IndexingInterval,
     dir: &Path,
     discard_output: bool,
 ) -> Result<(H::MergeableRun, MergeStats), String> {
@@ -516,28 +557,32 @@ fn merge_once_with_hooks<H: SortHooks>(
         let merge_stats = MergeStats {
             output_runs: 0,
             merge_entry_num: vec![],
+            merge_entry_bytes: vec![],
             time_ms: 0,
             io_stats: None,
             per_thread_times_ms: vec![],
+            per_thread_io_stats: vec![],
         };
         return Ok((hooks.dummy_run(), merge_stats));
     }
 
     if output_runs.len() == 1 {
         let entry_count = output_runs[0].total_entries() as u64;
+        let entry_bytes = output_runs[0].total_bytes() as u64;
         let merge_stats = MergeStats {
             output_runs: 1,
             merge_entry_num: vec![entry_count],
+            merge_entry_bytes: vec![entry_bytes],
             time_ms: 0,
             io_stats: None,
             per_thread_times_ms: vec![],
+            per_thread_io_stats: vec![],
         };
         let run = output_runs.into_iter().next().unwrap();
         return Ok((run, merge_stats));
     }
 
     let merge_start = Instant::now();
-    let merge_io_tracker = Arc::new(IoStatsTracker::new());
     let merge_threads = num_threads;
 
     println!(
@@ -557,7 +602,8 @@ fn merge_once_with_hooks<H: SortHooks>(
     for thread_id in 0..merge_threads {
         let runs = Arc::clone(&runs_arc);
         let dir = dir.to_path_buf();
-        let io_tracker = Arc::clone(&merge_io_tracker);
+        let thread_io_tracker = Arc::new(IoStatsTracker::new());
+        let io_tracker = Arc::clone(&thread_io_tracker);
         let hooks = hooks.clone();
         let run_id = run_id_base + thread_id as u32;
 
@@ -614,9 +660,21 @@ fn merge_once_with_hooks<H: SortHooks>(
                     .map(|b| (b.key.as_slice(), b.run_id, b.offset)),
             };
 
+            let format_bound = |bound: Option<(&[u8], u32, usize)>| -> String {
+                match bound {
+                    None => "None".to_string(),
+                    Some((key, run_id, offset)) => {
+                        let key_str = String::from_utf8_lossy(key);
+                        format!("(\"{}\", run={}, offset={})", key_str, run_id, offset)
+                    }
+                }
+            };
+
             println!(
-                "Thread {}: partitioning with lower {:?} and upper {:?}",
-                thread_id, lower_inc, upper_exc
+                "Thread {}: partitioning with lower {} and upper {}",
+                thread_id,
+                format_bound(lower_inc),
+                format_bound(upper_exc)
             );
 
             hooks
@@ -624,13 +682,17 @@ fn merge_once_with_hooks<H: SortHooks>(
                     runs,
                     thread_id,
                     run_id,
+                    run_indexing_interval,
                     lower_inc,
                     upper_exc,
                     &dir,
                     io_tracker,
                     discard_output,
                 )
-                .map(|(run, thread_time)| (thread_id, run, thread_time))
+                .map(|(run, thread_time)| {
+                    let io_stats = thread_io_tracker.get_detailed_stats();
+                    (thread_id, run, thread_time, io_stats)
+                })
         });
 
         merge_handles.push(handle);
@@ -638,27 +700,50 @@ fn merge_once_with_hooks<H: SortHooks>(
 
     let mut output_runs = Vec::new();
     let mut per_thread_times_ms = Vec::new();
+    let mut per_thread_io_stats = Vec::new();
 
     for handle in merge_handles {
         let result = handle
             .join()
             .map_err(|_| "Merge worker panicked".to_string())?;
-        let (thread_id, run, thread_time) = result?;
+        let (thread_id, run, thread_time, io_stats) = result?;
         output_runs.push((thread_id, run));
         per_thread_times_ms.push((thread_id, thread_time));
+        per_thread_io_stats.push((thread_id, io_stats));
     }
 
     output_runs.sort_by_key(|(thread_id, _)| *thread_id);
     per_thread_times_ms.sort_by_key(|(thread_id, _)| *thread_id);
+    per_thread_io_stats.sort_by_key(|(thread_id, _)| *thread_id);
 
     let output_runs: Vec<_> = output_runs.into_iter().map(|(_, run)| run).collect();
     let per_thread_times_ms: Vec<_> = per_thread_times_ms
         .into_iter()
         .map(|(_, time)| time)
         .collect();
+    let per_thread_io_stats: Vec<_> = per_thread_io_stats
+        .into_iter()
+        .map(|(_, stats)| stats)
+        .collect();
 
     let merge_time_ms = merge_start.elapsed().as_millis();
-    let merge_io_stats = Some(merge_io_tracker.get_detailed_stats());
+    let merge_io_stats = if per_thread_io_stats.is_empty() {
+        None
+    } else {
+        let mut merged = crate::IoStats {
+            read_ops: 0,
+            read_bytes: 0,
+            write_ops: 0,
+            write_bytes: 0,
+        };
+        for stats in &per_thread_io_stats {
+            merged.read_ops = merged.read_ops.saturating_add(stats.read_ops);
+            merged.read_bytes = merged.read_bytes.saturating_add(stats.read_bytes);
+            merged.write_ops = merged.write_ops.saturating_add(stats.write_ops);
+            merged.write_bytes = merged.write_bytes.saturating_add(stats.write_bytes);
+        }
+        Some(merged)
+    };
 
     let merge_entry_num: Vec<u64> = output_runs
         .iter()
@@ -672,7 +757,7 @@ fn merge_once_with_hooks<H: SortHooks>(
     let total_entries = merge_entry_num.iter().sum::<u64>();
     let num_runs = output_runs.len();
 
-    let mut output = format!(
+    println!(
         "Merge phase took {} ms | Merged {} entries ({} bytes) across {} runs",
         merge_time_ms, total_entries, merge_bytes, num_runs
     );
@@ -682,44 +767,143 @@ fn merge_once_with_hooks<H: SortHooks>(
             *per_thread_times_ms.iter().min().unwrap(),
             *per_thread_times_ms.iter().max().unwrap(),
         );
-        output.push_str(&format!(
-            " | Thread timing: min={} ms, max={} ms",
-            min_time, max_time
-        ));
-    }
-
-    if merge_entry_num.len() > 1 {
-        let avg = total_entries as f64 / merge_entry_num.len() as f64;
-        let max_entries = *merge_entry_num.iter().max().unwrap();
-        output.push_str(&format!(
-            " | Partition sizes: imbalance={:.2}x",
-            max_entries as f64 / avg
-        ));
+        println!("Thread timing: min={} ms, max={} ms", min_time, max_time);
     }
 
     if !merge_entry_num.is_empty() {
-        let mut per_thread = String::new();
+        let min_entries = *merge_entry_num.iter().min().unwrap();
+        let max_entries = *merge_entry_num.iter().max().unwrap();
+        let avg_entries = total_entries as f64 / merge_entry_num.len() as f64;
+        let min_bytes = *merge_entry_bytes.iter().min().unwrap();
+        let max_bytes = *merge_entry_bytes.iter().max().unwrap();
+        let avg_bytes = merge_bytes as f64 / merge_entry_bytes.len() as f64;
+        let per_thread_time_ms: Vec<u64> = (0..merge_entry_num.len())
+            .map(|idx| {
+                per_thread_times_ms
+                    .get(idx)
+                    .copied()
+                    .unwrap_or(0)
+                    .min(u64::MAX as u128) as u64
+            })
+            .collect();
+        let per_thread_io_bytes: Vec<u64> = (0..merge_entry_num.len())
+            .map(|idx| {
+                per_thread_io_stats
+                    .get(idx)
+                    .map(|stats| stats.total_bytes())
+                    .unwrap_or(0)
+            })
+            .collect();
+        let min_time = *per_thread_time_ms.iter().min().unwrap_or(&0);
+        let max_time = *per_thread_time_ms.iter().max().unwrap_or(&0);
+        let avg_time = if per_thread_time_ms.is_empty() {
+            0.0
+        } else {
+            per_thread_time_ms.iter().sum::<u64>() as f64 / per_thread_time_ms.len() as f64
+        };
+        let min_io = *per_thread_io_bytes.iter().min().unwrap_or(&0);
+        let max_io = *per_thread_io_bytes.iter().max().unwrap_or(&0);
+        let avg_io = if per_thread_io_bytes.is_empty() {
+            0.0
+        } else {
+            per_thread_io_bytes.iter().sum::<u64>() as f64 / per_thread_io_bytes.len() as f64
+        };
+
+        let format_ratio = |num: u64, den: u64| -> String {
+            if den == 0 {
+                "n/a".to_string()
+            } else {
+                format!("{:.2}x", num as f64 / den as f64)
+            }
+        };
+
+        let mut rows = Vec::new();
         for (idx, (entries, bytes)) in merge_entry_num
             .iter()
             .zip(merge_entry_bytes.iter())
             .enumerate()
         {
-            if !per_thread.is_empty() {
-                per_thread.push_str(", ");
-            }
-            per_thread.push_str(&format!("t{}={} entries ({} bytes)", idx, entries, bytes));
+            let time_ms = per_thread_time_ms.get(idx).copied().unwrap_or(0);
+            let io_bytes = per_thread_io_bytes.get(idx).copied().unwrap_or(0);
+            rows.push(vec![
+                format!("T{}", idx),
+                entries.to_string(),
+                bytes.to_string(),
+                time_ms.to_string(),
+                io_bytes.to_string(),
+            ]);
         }
-        output.push_str(&format!(" | Per-thread: {}", per_thread));
-    }
+        rows.push(vec![
+            "Min".to_string(),
+            min_entries.to_string(),
+            min_bytes.to_string(),
+            min_time.to_string(),
+            min_io.to_string(),
+        ]);
+        rows.push(vec![
+            "Avg".to_string(),
+            format!("{:.2}", avg_entries),
+            format!("{:.2}", avg_bytes),
+            format!("{:.2}", avg_time),
+            format!("{:.2}", avg_io),
+        ]);
+        rows.push(vec![
+            "Max".to_string(),
+            max_entries.to_string(),
+            max_bytes.to_string(),
+            max_time.to_string(),
+            max_io.to_string(),
+        ]);
+        rows.push(vec![
+            "Min/Max".to_string(),
+            format_ratio(min_entries, max_entries),
+            format_ratio(min_bytes, max_bytes),
+            format_ratio(min_time, max_time),
+            format_ratio(min_io, max_io),
+        ]);
 
-    println!("{}", output);
+        let headers = vec![
+            "thread".to_string(),
+            "entry cnt".to_string(),
+            "size".to_string(),
+            "time ms".to_string(),
+            "io bytes".to_string(),
+        ];
+        let mut widths: Vec<usize> = headers.iter().map(|h| h.len()).collect();
+        for row in &rows {
+            for (idx, cell) in row.iter().enumerate() {
+                widths[idx] = widths[idx].max(cell.len());
+            }
+        }
+
+        let format_row = |cells: &[String]| -> String {
+            let mut parts = Vec::with_capacity(cells.len());
+            for (idx, cell) in cells.iter().enumerate() {
+                let width = widths[idx];
+                if idx == 0 {
+                    parts.push(format!("{:<width$}", cell, width = width));
+                } else {
+                    parts.push(format!("{:>width$}", cell, width = width));
+                }
+            }
+            parts.join(" | ")
+        };
+
+        println!("Partition metrics (entries, bytes, time ms, io bytes):");
+        println!("{}", format_row(&headers));
+        for row in rows {
+            println!("{}", format_row(&row));
+        }
+    }
 
     let merge_stats = MergeStats {
         output_runs: output_runs.len(),
         merge_entry_num,
+        merge_entry_bytes,
         time_ms: merge_time_ms,
         io_stats: merge_io_stats,
         per_thread_times_ms,
+        per_thread_io_stats,
     };
 
     Ok((hooks.combine_runs(output_runs), merge_stats))
@@ -1201,6 +1385,9 @@ mod tests {
     use super::*;
     use crate::diskio::aligned_writer::AlignedWriter;
     use crate::diskio::file::SharedFd;
+    use crate::ovc::offset_value_coding_32::OVCU32;
+    use crate::sort::ovc::run::RunWithOVC;
+    use crate::sort::ovc::sorter::MergeableRunWithOVC;
     use crate::sort::plain::run::Run;
     use crate::sort::plain::sorter::MergeableRun;
     use std::sync::Arc;
@@ -1210,10 +1397,31 @@ mod tests {
         let path = temp_dir.path().join(name);
         let fd = Arc::new(SharedFd::new_from_path(&path, true).unwrap());
         let writer = AlignedWriter::from_fd(fd).unwrap();
-        let mut run = Run::from_writer_with_indexing_interval(writer, 1).unwrap();
+        let mut run =
+            Run::from_writer_with_indexing_interval(writer, IndexingInterval::records(1)).unwrap();
         let value = vec![b'v'; value_len];
         for key in keys {
             run.append(key, &value);
+        }
+        run.finalize_write();
+        run
+    }
+
+    fn build_ovc_run(
+        temp_dir: &TempDir,
+        name: &str,
+        keys: &[&[u8]],
+        value_len: usize,
+    ) -> RunWithOVC {
+        let path = temp_dir.path().join(name);
+        let fd = Arc::new(SharedFd::new_from_path(&path, true).unwrap());
+        let writer = AlignedWriter::from_fd(fd).unwrap();
+        let mut run =
+            RunWithOVC::from_writer_with_indexing_interval(writer, IndexingInterval::records(1))
+                .unwrap();
+        let value = vec![b'v'; value_len];
+        for key in keys {
+            run.append(OVCU32::initial_value(), key, &value);
         }
         run.finalize_write();
         run
@@ -1229,7 +1437,11 @@ mod tests {
         let path = temp_dir.path().join(name);
         let fd = Arc::new(SharedFd::new_from_path(&path, true).unwrap());
         let writer = AlignedWriter::from_fd(fd).unwrap();
-        let mut run = Run::from_writer_with_indexing_interval(writer, indexing_interval).unwrap();
+        let mut run = Run::from_writer_with_indexing_interval(
+            writer,
+            IndexingInterval::records(indexing_interval),
+        )
+        .unwrap();
         let value = vec![b'v'; value_len];
         for key in keys {
             run.append(key, &value);
@@ -1462,6 +1674,51 @@ mod tests {
     }
 
     #[test]
+    fn test_partition_by_entry_count_two_runs_with_ovc() {
+        let temp_dir = TempDir::new().unwrap();
+        let run0 = build_ovc_run(
+            &temp_dir,
+            "ovc_run0.dat",
+            &[
+                b"a0", b"a1", b"a2", b"a3", b"a4", b"a5", b"a6", b"a7", b"a8", b"a9",
+            ],
+            1,
+        );
+        let run1 = build_ovc_run(
+            &temp_dir,
+            "ovc_run1.dat",
+            &[
+                b"b0", b"b1", b"b2", b"b3", b"b4", b"b5", b"b6", b"b7", b"b8", b"b9",
+            ],
+            1,
+        );
+        let run1_id = run1.run_id();
+
+        let mergeable_runs = vec![
+            MergeableRunWithOVC::Single(run0),
+            MergeableRunWithOVC::Single(run1),
+        ];
+        let indexes: Vec<_> = mergeable_runs
+            .iter()
+            .map(|run| run.sparse_indexes())
+            .collect();
+
+        let bounds = partition_by_key_range_and_entry_count(&indexes, 2, 1.0);
+        let expected = expected_bounds_by_count(&indexes, 2, 1.0);
+        assert_eq!(bounds.len(), 3);
+        assert!(bounds[0].is_none());
+        assert!(bounds[2].is_none());
+        for (got, exp) in bounds.iter().zip(expected.iter()) {
+            assert_same_bound(got, exp);
+        }
+
+        let mid = bounds[1].as_ref().expect("expected midpoint boundary");
+        assert_eq!(mid.key, b"b0");
+        assert_eq!(mid.run_id, run1_id);
+        assert_eq!(mid.offset, 0);
+    }
+
+    #[test]
     fn test_partition_by_entry_count_sparse_interval_10() {
         let temp_dir = TempDir::new().unwrap();
         let run0 = build_run_with_prefix_and_interval(&temp_dir, "run0_i10.dat", "a", 50, 1, 10);
@@ -1553,6 +1810,45 @@ mod tests {
 
         let mid = bounds[1].as_ref().expect("expected midpoint boundary");
         assert_eq!(mid.key, b"b2");
+        assert_eq!(mid.run_id, run1_id);
+    }
+
+    #[test]
+    fn test_partition_by_size_two_runs_with_ovc() {
+        let temp_dir = TempDir::new().unwrap();
+        let run0 = build_ovc_run(
+            &temp_dir,
+            "ovc_run0_size.dat",
+            &[b"a0", b"a1", b"a2", b"a3", b"a4"],
+            1,
+        );
+        let run1 = build_ovc_run(
+            &temp_dir,
+            "ovc_run1_size.dat",
+            &[b"b0", b"b1", b"b2", b"b3", b"b4"],
+            100,
+        );
+        let run1_id = run1.run_id();
+
+        let mergeable_runs = vec![
+            MergeableRunWithOVC::Single(run0),
+            MergeableRunWithOVC::Single(run1),
+        ];
+        let indexes: Vec<_> = mergeable_runs
+            .iter()
+            .map(|run| run.sparse_indexes())
+            .collect();
+
+        let bounds = partition_by_key_range_and_size(&indexes, 2, 1.0);
+        let expected = expected_bounds_by_size(&indexes, 2, 1.0);
+        assert_eq!(bounds.len(), 3);
+        assert!(bounds[0].is_none());
+        assert!(bounds[2].is_none());
+        for (got, exp) in bounds.iter().zip(expected.iter()) {
+            assert_same_bound(got, exp);
+        }
+
+        let mid = bounds[1].as_ref().expect("expected midpoint boundary");
         assert_eq!(mid.run_id, run1_id);
     }
 

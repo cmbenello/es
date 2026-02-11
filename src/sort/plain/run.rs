@@ -5,7 +5,7 @@ use crate::diskio::file::SharedFd;
 use crate::diskio::io_stats::IoStatsTracker;
 use crate::sort::core::engine::RunSummary;
 use crate::sort::core::run_format::{
-    IndexEntry, KeyRunIdOffsetBound, RUN_ID_COUNTER, cmp_key_run_offset,
+    IndexEntry, IndexingInterval, KeyRunIdOffsetBound, RUN_ID_COUNTER, cmp_key_run_offset,
 };
 use std::io::{Read, Write};
 use std::sync::Arc;
@@ -20,17 +20,21 @@ pub struct Run {
     start_bytes: usize,
     total_bytes: usize,
     sparse_index: Vec<IndexEntry>,
-    indexing_interval: usize,
+    index_bytes: usize,
+    indexing_interval: IndexingInterval,
+    next_index_at_entry: usize,
+    next_index_at_bytes: usize,
 }
 
 impl Run {
-    pub fn from_writer(writer: AlignedWriter) -> Result<Self, String> {
-        Self::from_writer_with_indexing_interval(writer, 1000)
+    #[cfg(test)]
+    pub(crate) fn from_writer(writer: AlignedWriter) -> Result<Self, String> {
+        Self::from_writer_with_indexing_interval(writer, IndexingInterval::records(1000))
     }
 
     pub fn from_writer_with_indexing_interval(
         writer: AlignedWriter,
-        indexing_interval: usize,
+        indexing_interval: IndexingInterval,
     ) -> Result<Self, String> {
         let run_id = RUN_ID_COUNTER.fetch_add(1, Ordering::AcqRel);
         Self::from_writer_with_indexing_interval_and_id(writer, indexing_interval, run_id)
@@ -38,7 +42,7 @@ impl Run {
 
     pub fn from_writer_with_indexing_interval_and_id(
         writer: AlignedWriter,
-        indexing_interval: usize,
+        indexing_interval: IndexingInterval,
         run_id: u32,
     ) -> Result<Self, String> {
         // Get current position in the file
@@ -53,7 +57,10 @@ impl Run {
             start_bytes,
             total_bytes: 0,
             sparse_index: Vec::new(),
+            index_bytes: 0,
             indexing_interval,
+            next_index_at_entry: 0,
+            next_index_at_bytes: 0,
         })
     }
 
@@ -123,20 +130,108 @@ impl Run {
 }
 
 impl Run {
+    fn should_sample_index(&self) -> bool {
+        self.sparse_index.is_empty()
+            || match self.indexing_interval {
+                IndexingInterval::Records { .. } => self.total_entries >= self.next_index_at_entry,
+                IndexingInterval::Bytes { .. } => self.total_bytes >= self.next_index_at_bytes,
+            }
+    }
+
+    fn record_sparse_index(&mut self, key: &[u8]) {
+        self.sparse_index.push(IndexEntry {
+            key: key.to_vec(),
+            file_offset: self.total_bytes,
+        });
+        let entry_bytes = std::mem::size_of::<IndexEntry>().saturating_add(key.len());
+        self.index_bytes = self.index_bytes.saturating_add(entry_bytes);
+        let interval = self.indexing_interval;
+        match interval {
+            IndexingInterval::Records {
+                stride,
+                budget_bytes,
+            } => self.update_record_interval(stride, budget_bytes),
+            IndexingInterval::Bytes {
+                stride,
+                budget_bytes,
+            } => self.update_byte_interval(stride, budget_bytes),
+        }
+    }
+
+    fn avg_index_entry_bytes(&self) -> usize {
+        let entries = self.sparse_index.len().max(1);
+        self.index_bytes.saturating_add(entries.saturating_sub(1)) / entries
+    }
+
+    fn update_record_interval(&mut self, stride: usize, budget_bytes: Option<usize>) {
+        let records_seen = self.total_entries.saturating_add(1);
+        match budget_bytes {
+            Some(budget) => {
+                if self.index_bytes >= budget {
+                    self.indexing_interval = IndexingInterval::Records {
+                        stride: usize::MAX,
+                        budget_bytes: Some(budget),
+                    };
+                    self.next_index_at_entry = usize::MAX;
+                } else {
+                    let avg_entry_bytes = self.avg_index_entry_bytes();
+                    let max_entries = (budget / avg_entry_bytes).max(1);
+                    let target_stride =
+                        records_seen.saturating_add(max_entries.saturating_sub(1)) / max_entries;
+                    let new_stride = stride.max(target_stride.max(1));
+                    self.indexing_interval = IndexingInterval::Records {
+                        stride: new_stride,
+                        budget_bytes: Some(budget),
+                    };
+                    self.next_index_at_entry = self.total_entries.saturating_add(new_stride);
+                }
+            }
+            None => {
+                self.next_index_at_entry = self.total_entries.saturating_add(stride);
+            }
+        }
+    }
+
+    fn update_byte_interval(&mut self, stride: usize, budget_bytes: Option<usize>) {
+        match budget_bytes {
+            Some(budget) => {
+                if self.index_bytes >= budget {
+                    self.indexing_interval = IndexingInterval::Bytes {
+                        stride: usize::MAX,
+                        budget_bytes: Some(budget),
+                    };
+                    self.next_index_at_bytes = usize::MAX;
+                } else {
+                    let avg_entry_bytes = self.avg_index_entry_bytes();
+                    let target_stride = avg_entry_bytes
+                        .saturating_mul(self.total_bytes)
+                        .saturating_add(budget.saturating_sub(1))
+                        / budget;
+                    let new_stride = stride.max(target_stride.max(1));
+                    self.indexing_interval = IndexingInterval::Bytes {
+                        stride: new_stride,
+                        budget_bytes: Some(budget),
+                    };
+                    self.next_index_at_bytes = self.total_bytes.saturating_add(new_stride);
+                }
+            }
+            None => {
+                self.next_index_at_bytes = self.total_bytes.saturating_add(stride);
+            }
+        }
+    }
+
     pub fn append(&mut self, key: &[u8], value: &[u8]) {
-        let writer = self
-            .writer
-            .as_mut()
-            .expect("RunImpl is not initialized with a writer");
+        if self.writer.is_none() {
+            panic!("RunImpl is not initialized with a writer");
+        }
 
         // Use sampling interval for sparse index
-        if self.total_entries % self.indexing_interval == 0 {
-            let index_entry = IndexEntry {
-                key: key.to_vec(),
-                file_offset: self.total_bytes,
-            };
-            self.sparse_index.push(index_entry);
+        if self.should_sample_index() {
+            self.record_sparse_index(key);
         }
+
+        let writer = self.writer.as_mut().unwrap();
 
         let key_len = key.len() as u32;
         let value_len = value.len() as u32;
@@ -1220,26 +1315,44 @@ mod tests {
     #[test]
     fn test_indexing_interval_sparse_index() {
         let writer = get_test_writer("indexing_interval");
-        let mut run = Run::from_writer_with_indexing_interval(writer, 500).unwrap();
+        let interval = 500;
+        let total_entries = 50000;
+        let key_len = 5;
+        let value_len = 50;
+        let entry_bytes = 8 + key_len + value_len;
+        let mut run =
+            Run::from_writer_with_indexing_interval(writer, IndexingInterval::records(interval))
+                .unwrap();
 
         // Add many entries to test sampling interval
         // Should sample every 500th entry
-        for i in 0..50000 {
+        for i in 0..total_entries {
             let key = format!("{:05}", i).into_bytes();
-            let value = vec![b'v'; 50]; // 50 byte value
+            let value = vec![b'v'; value_len]; // 50 byte value
             run.append(&key, &value);
         }
         let writer = run.finalize_write();
         drop(writer); // Ensure all data is written
 
         // Verify sparse index has entries based on sampling interval
-        let expected_entries = 50000 / 500; // Every 500th entry
+        let expected_entries = total_entries / interval; // Every 500th entry
         assert_eq!(
             run.sparse_index.len(),
             expected_entries,
             "Sparse index should have exactly {} entries",
             expected_entries
         );
+
+        let first_entry = run.sparse_index.first().unwrap();
+        assert_eq!(first_entry.key, b"00000");
+        assert_eq!(first_entry.file_offset, 0);
+
+        for (i, entry) in run.sparse_index.iter().enumerate() {
+            let expected_index = i * interval;
+            let expected_key = format!("{:05}", expected_index);
+            assert_eq!(entry.key, expected_key.as_bytes());
+            assert_eq!(entry.file_offset, expected_index * entry_bytes);
+        }
 
         // Verify index entries are sorted by offset after finalize
         for i in 1..run.sparse_index.len() {
@@ -1270,6 +1383,95 @@ mod tests {
         // Should get approximately half the entries
         assert_eq!(results.len(), 25000);
         assert_eq!(results[0].0, b"25000");
+    }
+
+    #[test]
+    fn test_byte_indexing_interval_sparse_index() {
+        let writer = get_test_writer("byte_indexing_interval");
+        let mut run =
+            Run::from_writer_with_indexing_interval(writer, IndexingInterval::bytes(15)).unwrap();
+
+        for _ in 0..5 {
+            run.append(b"k", b"v");
+        }
+        let writer = run.finalize_write();
+        drop(writer);
+
+        let offsets: Vec<usize> = run
+            .sparse_index
+            .iter()
+            .map(|entry| entry.file_offset)
+            .collect();
+        assert_eq!(offsets, vec![0, 20, 40]);
+    }
+
+    #[test]
+    fn test_record_budget_adaptive_sampling() {
+        let writer = get_test_writer("record_budget_adaptive");
+        let stride = 7;
+        let key_len = 4;
+        let value_len = 1;
+        let index_entry_bytes = std::mem::size_of::<IndexEntry>() + key_len;
+        let budget = index_entry_bytes * 3;
+        let data_entry_bytes = 8 + key_len + value_len;
+        let mut run = Run::from_writer_with_indexing_interval(
+            writer,
+            IndexingInterval::records_with_budget(stride, budget),
+        )
+        .unwrap();
+
+        for i in 0..50 {
+            let key = format!("{:04}", i).into_bytes();
+            run.append(&key, b"v");
+        }
+        let writer = run.finalize_write();
+        drop(writer);
+
+        assert_eq!(run.sparse_index.len(), 3);
+        assert_eq!(run.sparse_index.first().unwrap().file_offset, 0);
+        let expected_indices = [0, stride, stride * 2];
+        for (entry, expected_index) in run.sparse_index.iter().zip(expected_indices) {
+            let expected_key = format!("{:04}", expected_index);
+            assert_eq!(entry.key, expected_key.as_bytes());
+            assert_eq!(entry.file_offset, expected_index * data_entry_bytes);
+        }
+        let index_bytes = run.sparse_index.len() * index_entry_bytes;
+        assert_eq!(index_bytes, budget);
+    }
+
+    #[test]
+    fn test_byte_budget_adaptive_sampling() {
+        let writer = get_test_writer("byte_budget_adaptive");
+        let stride = 64;
+        let key_len = 3;
+        let value_len = 1;
+        let index_entry_bytes = std::mem::size_of::<IndexEntry>() + key_len;
+        let budget = index_entry_bytes * 2;
+        let data_entry_bytes = 8 + key_len + value_len;
+        let mut run = Run::from_writer_with_indexing_interval(
+            writer,
+            IndexingInterval::bytes_with_budget(stride, budget),
+        )
+        .unwrap();
+
+        for i in 0..50 {
+            let key = format!("{:03}", i).into_bytes();
+            run.append(&key, b"v");
+        }
+        let writer = run.finalize_write();
+        drop(writer);
+
+        assert_eq!(run.sparse_index.len(), 2);
+        let offsets: Vec<usize> = run
+            .sparse_index
+            .iter()
+            .map(|entry| entry.file_offset)
+            .collect();
+        assert_eq!(offsets[0], 0);
+        assert!(offsets[1] >= stride);
+        assert_eq!(offsets[1] % data_entry_bytes, 0);
+        let index_bytes = run.sparse_index.len() * index_entry_bytes;
+        assert_eq!(index_bytes, budget);
     }
 
     #[test]

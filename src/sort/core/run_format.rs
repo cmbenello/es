@@ -21,13 +21,23 @@ pub trait RunFormat: Clone + Send + Sync + 'static {
     type Record: Send + 'static;
     type AppendState: Default + Send + 'static;
 
-    fn new_run(writer: AlignedWriter, indexing_interval: usize) -> Result<Self::Run, String>;
+    fn new_run(
+        writer: AlignedWriter,
+        indexing_interval: IndexingInterval,
+    ) -> Result<Self::Run, String>;
 
-    fn create_merge_run(writer: AlignedWriter) -> Result<Self::Run, String> {
-        Self::new_run(writer, 1000)
+    fn create_merge_run(
+        writer: AlignedWriter,
+        indexing_interval: IndexingInterval,
+    ) -> Result<Self::Run, String> {
+        Self::new_run(writer, indexing_interval)
     }
 
-    fn create_merge_run_with_id(writer: AlignedWriter, run_id: u32) -> Result<Self::Run, String>;
+    fn create_merge_run_with_id(
+        writer: AlignedWriter,
+        indexing_interval: IndexingInterval,
+        run_id: u32,
+    ) -> Result<Self::Run, String>;
 
     fn finalize_run(run: &mut Self::Run) -> AlignedWriter;
 
@@ -77,6 +87,84 @@ pub trait RunFormat: Clone + Send + Sync + 'static {
         sink: &mut S,
         run_size: usize,
     ) -> crate::replacement_selection::ReplacementSelectionStats;
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IndexingInterval {
+    Records {
+        stride: usize,
+        budget_bytes: Option<usize>,
+    },
+    Bytes {
+        stride: usize,
+        budget_bytes: Option<usize>,
+    },
+}
+
+impl IndexingInterval {
+    pub fn records(interval: usize) -> Self {
+        IndexingInterval::Records {
+            stride: interval.max(1),
+            budget_bytes: None,
+        }
+    }
+
+    pub fn records_with_budget(interval: usize, budget_bytes: usize) -> Self {
+        IndexingInterval::Records {
+            stride: interval.max(1),
+            budget_bytes: Some(budget_bytes.max(1)),
+        }
+    }
+
+    pub fn bytes(stride: usize) -> Self {
+        IndexingInterval::Bytes {
+            stride: stride.max(1),
+            budget_bytes: None,
+        }
+    }
+
+    pub fn bytes_with_budget(stride: usize, budget_bytes: usize) -> Self {
+        IndexingInterval::Bytes {
+            stride: stride.max(1),
+            budget_bytes: Some(budget_bytes.max(1)),
+        }
+    }
+
+    pub fn value(self) -> usize {
+        match self {
+            IndexingInterval::Records { stride, .. } => stride,
+            IndexingInterval::Bytes { stride, .. } => stride,
+        }
+    }
+
+    pub fn budget_bytes(self) -> Option<usize> {
+        match self {
+            IndexingInterval::Records { budget_bytes, .. }
+            | IndexingInterval::Bytes { budget_bytes, .. } => budget_bytes,
+        }
+    }
+
+    pub fn with_value(self, interval: usize) -> Self {
+        match self {
+            IndexingInterval::Records { budget_bytes, .. } => IndexingInterval::Records {
+                stride: interval.max(1),
+                budget_bytes,
+            },
+            IndexingInterval::Bytes { budget_bytes, .. } => IndexingInterval::Bytes {
+                stride: interval.max(1),
+                budget_bytes,
+            },
+        }
+    }
+}
+
+impl std::fmt::Display for IndexingInterval {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            IndexingInterval::Records { stride, .. } => write!(f, "{} records", stride),
+            IndexingInterval::Bytes { stride, .. } => write!(f, "{} bytes", stride),
+        }
+    }
 }
 /// Sparse index entry inside a single run.
 ///
@@ -300,6 +388,7 @@ impl<'a> MultiSparseIndexes<'a> {
 pub enum MergeableRun<F: RunFormat> {
     Single(F::Run),
     RangePartitioned(Vec<F::Run>),
+    StatsOnly { entries: usize, bytes: usize },
 }
 
 impl<F: RunFormat> MergeableRun<F> {
@@ -368,6 +457,7 @@ impl<F: RunFormat> MergeableRun<F> {
 
                 Box::new(RangePartitionedIterator::<F>::new(iterators))
             }
+            MergeableRun::StatsOnly { .. } => Box::new(std::iter::empty()),
         }
     }
 
@@ -377,6 +467,7 @@ impl<F: RunFormat> MergeableRun<F> {
             MergeableRun::RangePartitioned(runs) => {
                 runs.iter().map(|run| run.total_entries()).sum()
             }
+            MergeableRun::StatsOnly { entries, .. } => *entries,
         }
     }
 
@@ -402,6 +493,7 @@ impl<F: RunFormat> MergeableRun<F> {
                     .collect();
                 MultiSparseIndexes::from_segments(segments)
             }
+            MergeableRun::StatsOnly { .. } => MultiSparseIndexes::from_segments(Vec::new()),
         }
     }
 
@@ -409,6 +501,7 @@ impl<F: RunFormat> MergeableRun<F> {
         match self {
             MergeableRun::Single(run) => run.total_bytes(),
             MergeableRun::RangePartitioned(runs) => runs.iter().map(|run| run.total_bytes()).sum(),
+            MergeableRun::StatsOnly { bytes, .. } => *bytes,
         }
     }
 
@@ -416,6 +509,7 @@ impl<F: RunFormat> MergeableRun<F> {
         match self {
             MergeableRun::Single(run) => vec![run],
             MergeableRun::RangePartitioned(runs) => runs,
+            MergeableRun::StatsOnly { .. } => vec![],
         }
     }
 }
@@ -460,19 +554,17 @@ impl<F: RunFormat> Iterator for RangePartitionedIterator<F> {
 
 pub struct RunWriterSink<F: RunFormat> {
     run_writer: Option<AlignedWriter>,
-    run_indexing_interval: usize,
-    records_seen: u64,
+    run_indexing_interval: IndexingInterval,
     current_run: Option<F::Run>,
     append_state: Option<F::AppendState>,
     runs: Vec<MergeableRun<F>>,
 }
 
 impl<F: RunFormat> RunWriterSink<F> {
-    pub fn new(writer: AlignedWriter, run_indexing_interval: usize) -> Self {
+    pub fn new(writer: AlignedWriter, run_indexing_interval: IndexingInterval) -> Self {
         Self {
             run_writer: Some(writer),
             run_indexing_interval,
-            records_seen: 0,
             current_run: None,
             append_state: None,
             runs: Vec::new(),
@@ -572,7 +664,11 @@ impl<F: RunFormat> SortHooks for FormatSortHooks<F> {
     type MergeableRun = MergeableRun<F>;
     type Sink = RunWriterSink<F>;
 
-    fn create_sink(&self, writer: AlignedWriter, run_indexing_interval: usize) -> Self::Sink {
+    fn create_sink(
+        &self,
+        writer: AlignedWriter,
+        run_indexing_interval: IndexingInterval,
+    ) -> Self::Sink {
         RunWriterSink::new(writer, run_indexing_interval)
     }
 
@@ -582,8 +678,28 @@ impl<F: RunFormat> SortHooks for FormatSortHooks<F> {
 
     fn combine_runs(&self, runs: Vec<Self::MergeableRun>) -> Self::MergeableRun {
         let mut combined = Vec::new();
+        let mut stats_entries = 0usize;
+        let mut stats_bytes = 0usize;
+        let mut has_stats = false;
         for run in runs {
-            combined.extend(run.into_runs());
+            match run {
+                MergeableRun::StatsOnly { entries, bytes } => {
+                    has_stats = true;
+                    stats_entries = stats_entries.saturating_add(entries);
+                    stats_bytes = stats_bytes.saturating_add(bytes);
+                }
+                other => combined.extend(other.into_runs()),
+            }
+        }
+        if has_stats {
+            debug_assert!(
+                combined.is_empty(),
+                "stats-only runs should not be mixed with materialized runs"
+            );
+            return MergeableRun::StatsOnly {
+                entries: stats_entries,
+                bytes: stats_bytes,
+            };
         }
         MergeableRun::RangePartitioned(combined)
     }
@@ -593,6 +709,7 @@ impl<F: RunFormat> SortHooks for FormatSortHooks<F> {
         runs: Arc<Vec<Self::MergeableRun>>,
         thread_id: usize,
         run_id: u32,
+        run_indexing_interval: IndexingInterval,
         lower_bound: Option<(&[u8], u32, usize)>,
         upper_bound: Option<(&[u8], u32, usize)>,
         dir: &Path,
@@ -615,14 +732,17 @@ impl<F: RunFormat> SortHooks for FormatSortHooks<F> {
 
         if discard_output {
             // Discard mode: iterate through all records but don't write
-            for _record in merged_iter {
-                // Just consume the iterator without writing
-                black_box(_record);
+            let mut entries = 0usize;
+            for record in merged_iter {
+                entries = entries.saturating_add(1);
+                black_box(record);
             }
 
             let thread_time_ms = thread_start.elapsed().as_millis();
-            // Return empty run list to indicate discarded output
-            Ok((MergeableRun::RangePartitioned(vec![]), thread_time_ms))
+            Ok((
+                MergeableRun::StatsOnly { entries, bytes: 0 },
+                thread_time_ms,
+            ))
         } else {
             // Normal mode: write to file
             let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap();
@@ -634,7 +754,7 @@ impl<F: RunFormat> SortHooks for FormatSortHooks<F> {
             );
             let writer = AlignedWriter::from_fd_with_tracker(fd, Some((*io_tracker).clone()))
                 .map_err(|e| format!("Failed to create run writer: {}", e))?;
-            let mut output_run = F::create_merge_run_with_id(writer, run_id)
+            let mut output_run = F::create_merge_run_with_id(writer, run_indexing_interval, run_id)
                 .map_err(|e| format!("Failed to create merge output run: {}", e))?;
             let mut append_state = F::AppendState::default();
 
