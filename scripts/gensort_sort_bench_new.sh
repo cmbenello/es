@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Usage: ./gensort_resource_bench.sh <path/to/gensort.data> [output_dir]
+# Usage: ./gensort_sort_bench_new.sh <path/to/gensort.data> [output_dir]
 
 if [[ ${1-} == "" ]]; then
   echo "Usage: $0 <path/to/gensort.data> [output_dir]" >&2
@@ -29,6 +29,18 @@ BINARY=./target/release/examples/gen_sort_cli
 
 cooldown() {
   sleep 30
+}
+
+clear_cache_if_available() {
+  if [[ -x /usr/local/sbin/clearcache3.sh ]]; then
+    if [[ $(id -u) -eq 0 ]]; then
+      /usr/local/sbin/clearcache3.sh || echo "Warning: clearcache3.sh failed" >&2
+    elif command -v sudo >/dev/null 2>&1; then
+      sudo /usr/local/sbin/clearcache3.sh || echo "Warning: clearcache3.sh failed (sudo)" >&2
+    else
+      echo "Warning: clearcache3.sh found but sudo not available" >&2
+    fi
+  fi
 }
 
 run_bench() {
@@ -120,6 +132,7 @@ run_bench() {
   fi
 
   rm -rf "$temp_dir"
+  clear_cache_if_available
 }
 
 

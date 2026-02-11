@@ -9,10 +9,6 @@ if [[ ${1-} == "" ]]; then
 fi
 
 INPUT_CSV=$1
-# if [[ ! -f "$INPUT_CSV" ]]; then
-#   echo "Input CSV not found: $INPUT_CSV" >&2
-#   exit 1
-# fi
 
 TS=$(date +"%Y-%m-%d_%H-%M-%S")
 OUT_DIR=${2:-"logs/lineitem_bench_${TS}"}
@@ -29,6 +25,18 @@ BINARY=./target/release/examples/lineitem_benchmark_cli
 
 cooldown() {
   sleep 30
+}
+
+clear_cache_if_available() {
+  if [[ -x /usr/local/sbin/clearcache3.sh ]]; then
+    if [[ $(id -u) -eq 0 ]]; then
+      /usr/local/sbin/clearcache3.sh || echo "Warning: clearcache3.sh failed" >&2
+    elif command -v sudo >/dev/null 2>&1; then
+      sudo /usr/local/sbin/clearcache3.sh || echo "Warning: clearcache3.sh failed (sudo)" >&2
+    else
+      echo "Warning: clearcache3.sh found but sudo not available" >&2
+    fi
+  fi
 }
 
 run_bench() {
@@ -122,6 +130,7 @@ run_bench() {
   fi
 
   rm -rf "$temp_dir"
+  clear_cache_if_available
 }
 
 # ==============================================================================

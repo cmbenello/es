@@ -34,14 +34,14 @@ pub trait RunSummary {
 
 #[derive(Debug, Clone, Copy)]
 pub enum PartitionType {
-    RangeOnly,
-    RangeCnt,
-    RangeSize,
+    KeyOnly,
+    CountBalanced,
+    SizeBalanced,
 }
 
 impl Default for PartitionType {
     fn default() -> Self {
-        Self::RangeCnt
+        Self::SizeBalanced
     }
 }
 
@@ -253,7 +253,7 @@ impl<H: SortHooks> SorterCore<H> {
         self.partition_type = partition_type;
         let budget_bytes = self.run_gen_mem.saturating_mul(5) / 100;
         self.run_indexing_interval = match partition_type {
-            PartitionType::RangeSize => IndexingInterval::bytes_with_budget(
+            PartitionType::SizeBalanced => IndexingInterval::bytes_with_budget(
                 self.run_indexing_interval.value(),
                 budget_bytes,
             ),
@@ -342,7 +342,7 @@ impl<H: SortHooks> SorterCore<H> {
         H: Default,
     {
         let merge_indexing_interval = match partition_type {
-            PartitionType::RangeSize => IndexingInterval::bytes(1000),
+            PartitionType::SizeBalanced => IndexingInterval::bytes(1000),
             _ => IndexingInterval::records(1000),
         };
         multi_merge_with_hooks(
@@ -596,7 +596,7 @@ fn merge_once_with_hooks<H: SortHooks>(
 
     let run_id_base = RUN_ID_COUNTER.fetch_add(merge_threads as u32, Ordering::AcqRel);
 
-    let partition_by_size = matches!(partition_type, PartitionType::RangeSize);
+    let partition_by_size = matches!(partition_type, PartitionType::SizeBalanced);
     let total_bytes: usize = runs_arc.iter().map(|run| run.total_bytes()).sum();
 
     for thread_id in 0..merge_threads {
@@ -648,13 +648,13 @@ fn merge_once_with_hooks<H: SortHooks>(
             };
 
             let lower_inc = match partition_type {
-                PartitionType::RangeOnly => lower.as_ref().map(|b| (b.key.as_slice(), 0, 0)),
+                PartitionType::KeyOnly => lower.as_ref().map(|b| (b.key.as_slice(), 0, 0)),
                 _ => lower
                     .as_ref()
                     .map(|b| (b.key.as_slice(), b.run_id, b.offset)),
             };
             let upper_exc = match partition_type {
-                PartitionType::RangeOnly => upper.as_ref().map(|b| (b.key.as_slice(), 0, 0)),
+                PartitionType::KeyOnly => upper.as_ref().map(|b| (b.key.as_slice(), 0, 0)),
                 _ => upper
                     .as_ref()
                     .map(|b| (b.key.as_slice(), b.run_id, b.offset)),

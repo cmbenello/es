@@ -44,7 +44,7 @@ mod tests {
     #[test]
     fn test_pathological_key_distribution_with_ovc() {
         let mut sorter = ExternalSorterWithOVC::new(4, 1024 * 1024, 4, 10000, 100, ovc_test_dir());
-        sorter.set_partition_type(es::sort::engine::PartitionType::RangeOnly);
+        sorter.set_partition_type(es::sort::engine::PartitionType::KeyOnly);
 
         let mut data = Vec::new();
 

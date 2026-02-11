@@ -50,17 +50,17 @@ use std::path::PathBuf;
 
 #[derive(clap::ValueEnum, Clone, Copy, Debug)]
 enum PartitionArg {
-    RangeOnly,
-    RangeCnt,
-    RangeSize,
+    KeyOnly,
+    CountBalanced,
+    SizeBalanced,
 }
 
 impl From<PartitionArg> for PartitionType {
     fn from(value: PartitionArg) -> Self {
         match value {
-            PartitionArg::RangeOnly => PartitionType::RangeOnly,
-            PartitionArg::RangeCnt => PartitionType::RangeCnt,
-            PartitionArg::RangeSize => PartitionType::RangeSize,
+            PartitionArg::KeyOnly => PartitionType::KeyOnly,
+            PartitionArg::CountBalanced => PartitionType::CountBalanced,
+            PartitionArg::SizeBalanced => PartitionType::SizeBalanced,
         }
     }
 }
@@ -104,8 +104,8 @@ struct Args {
     #[arg(long, default_value = "1.0")]
     imbalance_factor: f64,
 
-    /// Merge partition type (`range-only`, `range-cnt`, `range-size`)
-    #[arg(long, default_value = "range-cnt", value_name = "PARTITION")]
+    /// Merge partition type (`key-only`, `count-balanced`, `size-balanced`)
+    #[arg(long, default_value = "size-balanced", value_name = "PARTITION")]
     partition_type: PartitionArg,
 
     /// Discard final output (no write) for benchmarking

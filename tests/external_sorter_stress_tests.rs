@@ -44,7 +44,7 @@ fn test_very_large_dataset() {
 #[test]
 fn test_pathological_key_distribution() {
     let mut sorter = ExternalSorter::new(4, 1024 * 1024, 4, 10000, 100, test_dir());
-    sorter.set_partition_type(es::sort::engine::PartitionType::RangeSize);
+    sorter.set_partition_type(es::sort::engine::PartitionType::SizeBalanced);
 
     let mut data = Vec::new();
 
