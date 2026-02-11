@@ -128,7 +128,7 @@ run_bench() {
 # ==============================================================================
 echo "=== EXP 1: SCALABILITY (10GB RAM) ==="
 for t in 4 8 16 24 32 40 44; do
-  run_bench "Exp1" "$t" "$t" "10" "--discard-final-output=true"
+  run_bench "Exp1" "$t" "$t" "10" "--discard-final-output=true" "true"
   cooldown
 done
 
