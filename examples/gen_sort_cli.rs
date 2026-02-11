@@ -117,9 +117,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .merge_fanin
         .expect("--merge-fanin required unless --estimate-size");
 
-    let dataset_mb = input_provider.estimate_data_size_mb()?;
-    let total_memory_mb = run_size_mb * run_gen_threads as f64;
-    let run_indexing_interval = compute_run_indexing_interval(dataset_mb, total_memory_mb);
+    let partition_type: PartitionType = args.partition_type.into();
 
     // Create benchmark configuration
     let config = BenchmarkConfig {
@@ -129,7 +127,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         cooldown_seconds: args.cooldown_seconds,
         verify: args.verify,
         temp_dir: args.dir,
-        run_indexing_interval,
         run_gen_threads,
         use_ovc: args.ovc,
         run_size_mb,
@@ -140,7 +137,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             * (merge_threads as f64)
             * (DEFAULT_BUFFER_SIZE as f64 / 1024.0 / 1024.0),
         imbalance_factor: args.imbalance_factor,
-        partition_type: args.partition_type.into(),
+        partition_type,
         discard_final_output: args.discard_final_output,
     };
 
@@ -162,12 +159,4 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     print_benchmark_summary(&result);
 
     Ok(())
-}
-
-fn compute_run_indexing_interval(dataset_mb: f64, memory_mb: f64) -> usize {
-    if !dataset_mb.is_finite() || !memory_mb.is_finite() || memory_mb <= 0.0 {
-        return 1000;
-    }
-    let interval = (dataset_mb / (memory_mb * 0.05)).ceil();
-    interval.max(1000.0) as usize
 }

@@ -25,66 +25,23 @@ PAGE_SIZE_KB=64
 
 echo "Building gen_sort_cli example (release)..."
 cargo build --release --example gen_sort_cli >/dev/null
+BINARY=./target/release/examples/gen_sort_cli
 
 cooldown() {
   sleep 30
 }
 
-run_calculated_case() {
-  local exp_prefix="$1"
-  local active_threads="$2"
-  local mem_gb="$3"
-  local extra_flags="${4-}"
-
-  # 1. Calculate Buffer Size (MB) per thread
-  # run_size_mb = (MemGB * 1024) / Threads
-  local run_size_mb=$(echo "scale=2; ($mem_gb * 1024) / $active_threads" | bc)
-
-  # 2. Calculate Max Feasible Fan-In (Physical Limit)
-  # FanIn <= (MemGB * 1024^2) / (Threads * PageKB)
-  local max_fanin=$(echo "($mem_gb * 1024 * 1024) / ($active_threads * $PAGE_SIZE_KB)" | bc)
-
-  local name="${exp_prefix}_Thr${active_threads}_Mem${mem_gb}GB"
-  local temp_dir="${OUT_DIR}/${name}_tmp"
-  mkdir -p "$temp_dir"
-
-  echo "----------------------------------------------------------------"
-  echo "BENCHMARK: $name"
-  echo "  Mem Constraint: ${mem_gb} GB"
-  echo "  Threads:        $active_threads"
-  echo "  Buffer/Thread:  $run_size_mb MB"
-  echo "  Max Fan-In:     $max_fanin"
-  echo "----------------------------------------------------------------"
-
-  cargo run --release --example gen_sort_cli -- \
-    -n "$name" \
-    -i "$INPUT_DATA" \
-    --run-gen-threads "$active_threads" \
-    --merge-threads "$active_threads" \
-    --run-size-mb "$run_size_mb" \
-    --merge-fanin "$max_fanin" \
-    --warmup-runs 1 \
-    --benchmark-runs 3 \
-    --cooldown-seconds 30 \
-    --dir "$temp_dir" \
-    --discard-final-output \
-    $extra_flags 2>&1 | tee -a "${OUT_DIR}/${name}.log"
-
-  rm -rf "$temp_dir"
-}
-
-run_asymmetric_case() {
+run_bench() {
   local exp_prefix="$1"
   local run_gen_threads="$2"
   local merge_threads="$3"
   local mem_gb="$4"
   local extra_flags="${5-}"
+  local track_mem="${6-false}"
 
-  # 1. Calculate Buffer Size (MB) per thread
   # run_size_mb = (MemGB * 1024) / RunGenThreads
   local run_size_mb=$(echo "scale=2; ($mem_gb * 1024) / $run_gen_threads" | bc)
 
-  # 2. Calculate Max Feasible Fan-In (Physical Limit)
   # FanIn <= (MemGB * 1024^2) / (MergeThreads * PageKB)
   local max_fanin=$(echo "($mem_gb * 1024 * 1024) / ($merge_threads * $PAGE_SIZE_KB)" | bc)
 
@@ -94,38 +51,84 @@ run_asymmetric_case() {
 
   echo "----------------------------------------------------------------"
   echo "BENCHMARK: $name"
-  echo "  Mem Constraint: ${mem_gb} GB"
+  echo "  Mem Constraint:  ${mem_gb} GB"
   echo "  Run Gen Threads: $run_gen_threads"
   echo "  Merge Threads:   $merge_threads"
   echo "  Buffer/Thread:   $run_size_mb MB"
   echo "  Max Fan-In:      $max_fanin"
   echo "----------------------------------------------------------------"
 
-  cargo run --release --example gen_sort_cli -- \
-    -n "$name" \
-    -i "$INPUT_DATA" \
-    --run-gen-threads "$run_gen_threads" \
-    --merge-threads "$merge_threads" \
-    --run-size-mb "$run_size_mb" \
-    --merge-fanin "$max_fanin" \
-    --warmup-runs 1 \
-    --benchmark-runs 3 \
-    --cooldown-seconds 30 \
-    --dir "$temp_dir" \
-    --discard-final-output \
-    $extra_flags 2>&1 | tee -a "${OUT_DIR}/${name}.log"
+  local log_file="${OUT_DIR}/${name}.log"
+
+  if [[ "$track_mem" == "true" ]]; then
+    local mem_log="${OUT_DIR}/${name}_mem.log"
+    local pid_file="${temp_dir}/bin.pid"
+    local start_ms
+    start_ms=$(date +%s%3N)
+
+    # Subshell writes its own PID before exec-ing so we can track RSS
+    # while keeping stdout piped through tee.
+    (
+      echo $BASHPID > "$pid_file"
+      exec "$BINARY" \
+        -n "$name" \
+        -i "$INPUT_DATA" \
+        --run-gen-threads "$run_gen_threads" \
+        --merge-threads "$merge_threads" \
+        --run-size-mb "$run_size_mb" \
+        --merge-fanin "$max_fanin" \
+        --warmup-runs 0 \
+        --benchmark-runs 3 \
+        --cooldown-seconds 30 \
+        --dir "$temp_dir" \
+        $extra_flags
+    ) 2>&1 | tee -a "$log_file" &
+    local pipe_bg=$!
+
+    while [[ ! -s "$pid_file" ]]; do sleep 0.01; done
+    local bin_pid
+    bin_pid=$(cat "$pid_file")
+
+    # Poll RSS every 5s; write "elapsed_ms rss_kb" to mem log
+    (
+      while kill -0 "$bin_pid" 2>/dev/null; do
+        local rss elapsed_ms now_ms
+        rss=$(ps -o rss= -p "$bin_pid" 2>/dev/null | tr -d ' ')
+        now_ms=$(date +%s%3N)
+        elapsed_ms=$(( now_ms - start_ms ))
+        [[ -n "$rss" ]] && echo "$elapsed_ms $rss"
+        sleep 5
+      done
+    ) > "$mem_log" &
+    local poll_pid=$!
+
+    wait "$pipe_bg"
+    wait "$poll_pid" 2>/dev/null || true
+  else
+    "$BINARY" \
+      -n "$name" \
+      -i "$INPUT_DATA" \
+      --run-gen-threads "$run_gen_threads" \
+      --merge-threads "$merge_threads" \
+      --run-size-mb "$run_size_mb" \
+      --merge-fanin "$max_fanin" \
+      --warmup-runs 0 \
+      --benchmark-runs 3 \
+      --cooldown-seconds 30 \
+      --dir "$temp_dir" \
+      $extra_flags 2>&1 | tee -a "$log_file"
+  fi
 
   rm -rf "$temp_dir"
 }
 
 
 # ==============================================================================
-# EXPERIMENT 1: SCALABILITY TRAP (Fixed 2GB RAM)
+# EXPERIMENT 1: SCALABILITY TRAP (Fixed 10GB RAM)
 # ==============================================================================
-echo "=== EXP 1: SCALABILITY (2GB RAM) ==="
-# 4, 8, 16 should be Safe. 24 Borderline. 32, 40 Fail.
+echo "=== EXP 1: SCALABILITY (10GB RAM) ==="
 for t in 4 8 16 24 32 40 44; do
-  run_calculated_case "Exp1" "$t" "2"
+  run_bench "Exp1" "$t" "$t" "10" "--discard-final-output=true"
   cooldown
 done
 
@@ -139,7 +142,7 @@ for m in 32 24 16 8 6 4 2 1; do
   # Skip overlap with Exp 1
   if [[ "$m" == "2" ]]; then continue; fi
   
-  run_calculated_case "Exp2" "44" "$m"
+  run_bench "Exp2" "44" "44" "$m"
   cooldown
 done
 
@@ -150,7 +153,7 @@ done
 echo "=== EXP 3: NO-OVC (44 THREADS) ==="
 for m in 32 24 16 8 6 4 2 1; do
   # Skip overlap with Exp 1
-  run_calculated_case "Exp3" "44" "$m" "--ovc=false"
+  run_bench "Exp3" "44" "44" "$m" "--ovc=false"
   cooldown
 done
 
@@ -159,28 +162,8 @@ done
 # ==============================================================================
 echo "=== EXP 3.1: NO-OVC (Scalability, 2GB RAM) ==="
 for t in 4 8 16 24 32 40 44; do
-  run_calculated_case "Exp3.1" "$t" "2" "--ovc=false"
+  run_bench "Exp3.1" "$t" "$t" "2" "--ovc=false"
   cooldown
-done
-
-# ==============================================================================
-# EXPERIMENT 4: Reservoir Sampling vs KLL (Fixed 2GB RAM)
-# ==============================================================================
-echo "=== EXP 4: SKETCHING IMPACT (2GB RAM) ==="
-for t in 4 8 16 24 32 40 44; do
-  run_calculated_case "Exp4" "$t" "2" "--sketch-type reservoir-sampling"
-  cooldown
-done
-
-# ==============================================================================
-# EXPERIMENT 5: Imbalance Impact (Fixed 2GB RAM, 4/24/44 Threads)
-# ==============================================================================
-echo "=== EXP 5: IMBALANCE FACTOR IMPACT (4/24/44 THREADS, 2GB RAM) ==="
-for t in 4 24 44; do
-  for i in 1.0 1.5 2.0 3.0 4.0; do
-    run_calculated_case "Exp5_Thr${t}_Imbalance${i}" "$t" "2" "--imbalance-factor ${i}"
-    cooldown
-  done
 done
 
 # ==============================================================================
@@ -204,7 +187,7 @@ for rg in "${RUNGEN_GRID[@]}"; do
     config_count=$((config_count + 1))
     echo ">>> Grid Progress: $config_count / $total_grid_configs (asymmetric only) <<<"
 
-    run_asymmetric_case "Exp6" "$rg" "$mg" "2"
+    run_bench "Exp6" "$rg" "$mg" "2"
     cooldown
   done
 done
