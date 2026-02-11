@@ -127,6 +127,8 @@ run_bench() {
         --warmup-runs "$WARMUP_RUNS" \
         --benchmark-runs "$BENCHMARK_RUNS" \
         --cooldown-seconds "$CLI_COOLDOWN_SECONDS" \
+        --partition-type "$partition_type" \
+        --imbalance-factor "$imbalance_factor" \
         --dir "$temp_dir" \
         $extra_flags
     ) 2>&1 | tee -a "$log_file" &
@@ -162,6 +164,8 @@ run_bench() {
       --warmup-runs "$WARMUP_RUNS" \
       --benchmark-runs "$BENCHMARK_RUNS" \
       --cooldown-seconds "$CLI_COOLDOWN_SECONDS" \
+      --partition-type "$partition_type" \
+      --imbalance-factor "$imbalance_factor" \
       --dir "$temp_dir" \
       $extra_flags 2>&1 | tee -a "$log_file"
   fi
