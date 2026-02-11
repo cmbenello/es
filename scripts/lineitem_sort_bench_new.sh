@@ -18,13 +18,17 @@ mkdir -p "$OUT_DIR"
 # CONFIGURATION
 # ---------------------------------------------------------
 PAGE_SIZE_KB=64
+WARMUP_RUNS=0
+BENCHMARK_RUNS=3
+CLI_COOLDOWN_SECONDS=30
+SLEEP_BETWEEN_CONFIGS_SECONDS=30
 
 echo "Building lineitem_benchmark_cli example (release)..."
 cargo build --release --example lineitem_benchmark_cli >/dev/null
 BINARY=./target/release/examples/lineitem_benchmark_cli
 
 cooldown() {
-  sleep 30
+  sleep "$SLEEP_BETWEEN_CONFIGS_SECONDS"
 }
 
 clear_cache_if_available() {
@@ -47,6 +51,26 @@ run_bench() {
   local extra_flags="${5-}"
   local track_mem="${6-false}"
 
+  local discard_output="false"
+  local ovc="true"
+  local partition_type="size-balanced"
+  local imbalance_factor="1.0"
+
+  if [[ "$extra_flags" == *"--discard-final-output"* ]]; then
+    discard_output="true"
+  fi
+  if [[ "$extra_flags" == *"--ovc=false"* ]]; then
+    ovc="false"
+  elif [[ "$extra_flags" == *"--ovc=true"* ]]; then
+    ovc="true"
+  fi
+  if [[ "$extra_flags" =~ --partition-type[=\ ]([^[:space:]]+) ]]; then
+    partition_type="${BASH_REMATCH[1]}"
+  fi
+  if [[ "$extra_flags" =~ --imbalance-factor[=\ ]([^[:space:]]+) ]]; then
+    imbalance_factor="${BASH_REMATCH[1]}"
+  fi
+
   # run_size_mb = (MemGB * 1024) / RunGenThreads
   local run_size_mb=$(echo "scale=2; ($mem_gb * 1024) / $run_gen_threads" | bc)
 
@@ -64,6 +88,17 @@ run_bench() {
   echo "  Merge Threads:   $merge_threads"
   echo "  Buffer/Thread:   $run_size_mb MB"
   echo "  Max Fan-In:      $max_fanin"
+  echo "  Discard Output:  $discard_output"
+  echo "  OVC:             $ovc"
+  echo "  Partition Type:  $partition_type"
+  echo "  Imbalance Factor:$imbalance_factor"
+  echo "  Warmup Runs:     $WARMUP_RUNS"
+  echo "  Bench Runs:      $BENCHMARK_RUNS"
+  echo "  Cooldown (s):    $CLI_COOLDOWN_SECONDS"
+  echo "  Temp Dir:        $temp_dir"
+  if [[ -n "$extra_flags" ]]; then
+    echo "  Extra Flags:     $extra_flags"
+  fi
   echo "----------------------------------------------------------------"
 
   local log_file="${OUT_DIR}/${name}.log"
@@ -86,9 +121,9 @@ run_bench() {
         --merge-threads "$merge_threads" \
         --run-size-mb "$run_size_mb" \
         --merge-fanin "$max_fanin" \
-        --warmup-runs 0 \
-        --benchmark-runs 3 \
-        --cooldown-seconds 30 \
+        --warmup-runs "$WARMUP_RUNS" \
+        --benchmark-runs "$BENCHMARK_RUNS" \
+        --cooldown-seconds "$CLI_COOLDOWN_SECONDS" \
         --dir "$temp_dir" \
         $extra_flags
     ) 2>&1 | tee -a "$log_file" &
@@ -122,9 +157,9 @@ run_bench() {
       --merge-threads "$merge_threads" \
       --run-size-mb "$run_size_mb" \
       --merge-fanin "$max_fanin" \
-      --warmup-runs 0 \
-      --benchmark-runs 3 \
-      --cooldown-seconds 30 \
+      --warmup-runs "$WARMUP_RUNS" \
+      --benchmark-runs "$BENCHMARK_RUNS" \
+      --cooldown-seconds "$CLI_COOLDOWN_SECONDS" \
       --dir "$temp_dir" \
       $extra_flags 2>&1 | tee -a "$log_file"
   fi
