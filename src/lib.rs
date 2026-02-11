@@ -14,6 +14,12 @@ pub trait SortInput {
         num_scanners: usize,
         io_tracker: Option<IoStatsTracker>,
     ) -> Vec<Box<dyn Iterator<Item = (Vec<u8>, Vec<u8>)> + Send>>;
+
+    /// Optional size estimate for the total input data in bytes.
+    /// Implementers should return `None` if an estimate is unavailable.
+    fn estimated_size_bytes(&self) -> Option<u64> {
+        None
+    }
 }
 
 pub trait SortOutput {
@@ -326,6 +332,15 @@ impl SortInput for InMemInput {
         }
 
         scanners
+    }
+
+    fn estimated_size_bytes(&self) -> Option<u64> {
+        let total = self
+            .data
+            .iter()
+            .map(|(key, value)| (8 + key.len() + value.len()) as u64)
+            .sum();
+        Some(total)
     }
 }
 

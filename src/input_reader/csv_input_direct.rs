@@ -170,6 +170,10 @@ impl SortInput for CsvInputDirect {
 
         scanners
     }
+
+    fn estimated_size_bytes(&self) -> Option<u64> {
+        Some(self.file_size)
+    }
 }
 
 // ReaderType enum removed - now only using ManagedAlignedReader
@@ -542,7 +546,7 @@ mod tests {
         let csv_input = CsvInputDirect::new(&path, config).unwrap();
 
         // Sort using external sorter with multiple threads
-        let mut sorter = ExternalSorter::new(4, 256 * 1024, 4, 10000, 100, dir.as_path());
+        let mut sorter = ExternalSorter::new(4, 256 * 1024, 4, 10000, dir.as_path());
         let output = sorter.sort(Box::new(csv_input)).unwrap();
 
         let results: Vec<_> = output.iter().collect();

@@ -212,7 +212,6 @@ impl BenchmarkRunner {
                 (self.config.run_size_mb * 1024.0 * 1024.0) as usize,
                 self.config.merge_threads,
                 self.config.merge_fanin,
-                100,
                 temp_dir,
             );
             sorter.set_imbalance_factor(self.config.imbalance_factor);
@@ -226,7 +225,6 @@ impl BenchmarkRunner {
                 (self.config.run_size_mb * 1024.0 * 1024.0) as usize,
                 self.config.merge_threads,
                 self.config.merge_fanin,
-                100,
                 temp_dir,
             );
             sorter.set_imbalance_factor(self.config.imbalance_factor);

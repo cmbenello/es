@@ -15,6 +15,7 @@ pub type RunsOutput = GenericRunsOutput<PlainRunFormat>;
 
 #[derive(Clone, Copy, Default)]
 pub struct PlainRunFormat;
+const DEFAULT_RUN_INDEXING_INTERVAL: usize = 100;
 
 impl RunFormat for PlainRunFormat {
     type Run = Run;
@@ -103,10 +104,40 @@ impl RunFormat for PlainRunFormat {
             run_gen_mem.saturating_mul(95) / 100,
         )
     }
+
+    fn set_sparse_index_bootstrap(
+        run: &mut Self::Run,
+        avg_key_bytes: f64,
+        avg_record_bytes: f64,
+        sample_count: usize,
+    ) {
+        run.set_sparse_index_bootstrap(avg_key_bytes, avg_record_bytes, sample_count);
+    }
+
+    fn sparse_index_bootstrap(run: &Self::Run) -> Option<(f64, f64, usize)> {
+        run.sparse_index_bootstrap()
+    }
 }
 
 impl SorterCore<PlainSortHooks> {
     pub fn new(
+        run_gen_threads: usize,
+        run_gen_mem: usize,
+        merge_threads: usize,
+        merge_fanin: usize,
+        base_dir: impl AsRef<std::path::Path>,
+    ) -> Self {
+        Self::new_with_indexing_interval(
+            run_gen_threads,
+            run_gen_mem,
+            merge_threads,
+            merge_fanin,
+            DEFAULT_RUN_INDEXING_INTERVAL,
+            base_dir,
+        )
+    }
+
+    pub fn new_with_indexing_interval(
         run_gen_threads: usize,
         run_gen_mem: usize,
         merge_threads: usize,

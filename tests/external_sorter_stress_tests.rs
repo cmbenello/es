@@ -20,7 +20,7 @@ fn test_dir() -> PathBuf {
 #[ignore] // Run with: cargo test --ignored test_very_large_dataset
 fn test_very_large_dataset() {
     // Test with 1M entries
-    let mut sorter = ExternalSorter::new(8, 16 * 1024 * 1024, 8, 10000, 100, test_dir()); // 16MB buffer
+    let mut sorter = ExternalSorter::new(8, 16 * 1024 * 1024, 8, 10000, test_dir()); // 16MB buffer
 
     let mut data = Vec::new();
     for i in 0..1_000_000 {
@@ -43,8 +43,8 @@ fn test_very_large_dataset() {
 
 #[test]
 fn test_pathological_key_distribution() {
-    let mut sorter = ExternalSorter::new(4, 1024 * 1024, 4, 10000, 100, test_dir());
-    sorter.set_partition_type(es::sort::engine::PartitionType::SizeBalanced);
+    let mut sorter = ExternalSorter::new(4, 1024 * 1024, 4, 10000, test_dir());
+    sorter.set_partition_type(es::sort::engine::PartitionType::CountBalanced);
 
     let mut data = Vec::new();
 
@@ -85,7 +85,7 @@ fn test_pathological_key_distribution() {
 #[test]
 fn test_memory_pressure() {
     // Test behavior under memory pressure with large values
-    let mut sorter = ExternalSorter::new(2, 128 * 1024, 2, 10000, 100, test_dir()); // 128KB buffer
+    let mut sorter = ExternalSorter::new(2, 128 * 1024, 2, 10000, test_dir()); // 128KB buffer
 
     let mut data = Vec::new();
     for i in 0..100 {
@@ -112,14 +112,8 @@ fn test_memory_pressure() {
 fn test_extreme_thread_counts() {
     // Test with various thread counts including edge cases
     for num_threads in [1, 16, 32, 64] {
-        let mut sorter = ExternalSorter::new(
-            num_threads,
-            1024 * 1024,
-            num_threads,
-            10000,
-            100,
-            test_dir(),
-        );
+        let mut sorter =
+            ExternalSorter::new(num_threads, 1024 * 1024, num_threads, 10000, test_dir());
 
         let mut data = Vec::new();
         let entries = 100000;
@@ -147,7 +141,7 @@ fn test_max_memory_edge_cases() {
     let max_memories = [128 * 1024, 256 * 1024, 512 * 1024, 1024 * 1024]; // 128KB to 1MB
 
     for &max_memory in &max_memories {
-        let mut sorter = ExternalSorter::new(2, max_memory, 2, 10000, 100, test_dir());
+        let mut sorter = ExternalSorter::new(2, max_memory, 2, 10000, test_dir());
 
         let mut data = Vec::new();
         for i in 0..500 {
@@ -178,7 +172,7 @@ fn test_concurrent_massive_sorts() {
     let handles: Vec<_> = (0..num_concurrent)
         .map(|thread_id| {
             thread::spawn(move || {
-                let mut sorter = ExternalSorter::new(4, 1024 * 1024, 4, 10000, 100, test_dir());
+                let mut sorter = ExternalSorter::new(4, 1024 * 1024, 4, 10000, test_dir());
 
                 let mut data = Vec::new();
                 for i in 0..entries_per_sort {
@@ -215,7 +209,7 @@ fn test_concurrent_massive_sorts() {
 #[test]
 fn test_all_identical_keys() {
     // Test when all keys are identical
-    let mut sorter = ExternalSorter::new(2, 512 * 1024, 2, 10000, 100, test_dir());
+    let mut sorter = ExternalSorter::new(2, 512 * 1024, 2, 10000, test_dir());
 
     let mut data = Vec::new();
     for i in 0..10_000 {
@@ -237,7 +231,7 @@ fn test_all_identical_keys() {
 #[test]
 fn test_alternating_small_large() {
     // Alternate between very small and very large entries
-    let mut sorter = ExternalSorter::new(2, 512 * 1024, 2, 10000, 100, test_dir());
+    let mut sorter = ExternalSorter::new(2, 512 * 1024, 2, 10000, test_dir());
 
     let mut data = Vec::new();
     for i in 0..1000 {
@@ -275,7 +269,7 @@ fn test_random_binary_keys() {
     use rand::Rng;
     let mut rng = rand::rng();
 
-    let mut sorter = ExternalSorter::new(4, 1024 * 1024, 4, 10000, 100, test_dir());
+    let mut sorter = ExternalSorter::new(4, 1024 * 1024, 4, 10000, test_dir());
 
     let mut data = Vec::new();
     for _ in 0..5000 {
@@ -304,7 +298,7 @@ fn test_random_binary_keys() {
 #[test]
 fn test_progressive_key_lengths() {
     // Keys that progressively get longer
-    let mut sorter = ExternalSorter::new(2, 512 * 1024, 2, 10000, 100, test_dir());
+    let mut sorter = ExternalSorter::new(2, 512 * 1024, 2, 10000, test_dir());
 
     let mut data = Vec::new();
     for i in 0..100 {
@@ -334,7 +328,7 @@ fn test_progressive_key_lengths() {
 #[test]
 fn test_interleaved_runs() {
     // Force creation of many runs with interleaved data
-    let mut sorter = ExternalSorter::new(2, 512 * 1024, 2, 10000, 100, test_dir());
+    let mut sorter = ExternalSorter::new(2, 512 * 1024, 2, 10000, test_dir());
 
     let mut data = Vec::new();
     // Create data that will form many runs
@@ -368,7 +362,7 @@ fn test_stress_file_handles() {
             let counter = Arc::clone(&counter);
             thread::spawn(move || {
                 let id = counter.fetch_add(1, Ordering::SeqCst);
-                let mut sorter = ExternalSorter::new(4, 1024 * 1024, 4, 10000, 100, test_dir());
+                let mut sorter = ExternalSorter::new(4, 1024 * 1024, 4, 10000, test_dir());
 
                 let mut data = Vec::new();
                 for i in 0..1000 {
@@ -387,4 +381,59 @@ fn test_stress_file_handles() {
     for handle in handles {
         handle.join().unwrap();
     }
+}
+
+#[test]
+fn reproduce_size_partition_tail_imbalance() {
+    // Reproduce skewed partitions even with unique keys by combining:
+    // - low-cardinality prefix (lexicographic skew toward the tail)
+    // - large keys/values (sparser index under a small budget)
+    // This mirrors lineitem-style heavy tails where key-range partitioning skews.
+    let run_gen_mem = 10 * 1024 * 1024; // 1 MiB to force many runs
+    let mut sorter =
+        ExternalSorter::new_with_indexing_interval(4, run_gen_mem, 4, 10_000, 1000, test_dir());
+    sorter.set_partition_type(es::sort::engine::PartitionType::CountBalanced);
+    // sorter.set_discard_final_output(true);
+
+    let total = 5_000_000usize;
+    let heavy = (total as f64 * 0.95) as usize;
+    let mut data = Vec::with_capacity(total);
+
+    let long_suffix = "X".repeat(512);
+    for i in 0..heavy {
+        let key = format!("Z{:08}{}", i, long_suffix);
+        let value = vec![b'v'; 256];
+        data.push((key.into_bytes(), value));
+    }
+
+    for i in 0..(total - heavy) {
+        let key = format!("A{:08}", i);
+        let value = vec![b'v'; 16];
+        data.push((key.into_bytes(), value));
+    }
+
+    // Shuffle to avoid any accidental ordering advantages
+    use rand::seq::SliceRandom;
+    let mut rng = rand::rng();
+    data.shuffle(&mut rng);
+
+    let input = InMemInput { data };
+    let output = sorter.sort(Box::new(input)).unwrap();
+    let stats = output.stats();
+    let merge = stats
+        .per_merge_stats
+        .first()
+        .expect("expected at least one merge pass");
+
+    let total_entries: u64 = merge.merge_entry_num.iter().sum();
+    let avg_entries = total_entries as f64 / merge.merge_entry_num.len() as f64;
+    let max_entries = *merge.merge_entry_num.iter().max().unwrap_or(&0) as f64;
+    let imbalance = if avg_entries > 0.0 {
+        max_entries / avg_entries
+    } else {
+        0.0
+    };
+
+    println!("Partition entry imbalance (max/avg): {:.2}x", imbalance);
+    println!("{}", stats);
 }

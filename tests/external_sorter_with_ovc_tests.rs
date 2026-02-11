@@ -9,41 +9,41 @@ mod tests {
     #[test]
     fn test_basic_sort_with_ovc() {
         sorter_behavior::basic_sort(|| {
-            ExternalSorterWithOVC::new(2, 512 * 1024, 2, 10000, 100, ovc_test_dir())
+            ExternalSorterWithOVC::new(2, 512 * 1024, 2, 10000, ovc_test_dir())
         });
     }
 
     #[test]
     fn test_external_sort_with_ovc() {
         sorter_behavior::small_buffer_external_sort(|| {
-            ExternalSorterWithOVC::new(2, 128 * 1024, 2, 10000, 100, ovc_test_dir())
+            ExternalSorterWithOVC::new(2, 128 * 1024, 2, 10000, ovc_test_dir())
         });
     }
 
     #[test]
     fn test_empty_input_with_ovc() {
         sorter_behavior::empty_input(|| {
-            ExternalSorterWithOVC::new(2, 512 * 1024, 2, 10000, 100, ovc_test_dir())
+            ExternalSorterWithOVC::new(2, 512 * 1024, 2, 10000, ovc_test_dir())
         });
     }
 
     #[test]
     fn test_single_element_with_ovc() {
         sorter_behavior::single_element(|| {
-            ExternalSorterWithOVC::new(2, 512 * 1024, 2, 10000, 100, ovc_test_dir())
+            ExternalSorterWithOVC::new(2, 512 * 1024, 2, 10000, ovc_test_dir())
         });
     }
 
     #[test]
     fn test_duplicate_keys_with_ovc() {
         sorter_behavior::duplicate_keys(|| {
-            ExternalSorterWithOVC::new(2, 512 * 1024, 2, 10000, 100, ovc_test_dir())
+            ExternalSorterWithOVC::new(2, 512 * 1024, 2, 10000, ovc_test_dir())
         });
     }
 
     #[test]
     fn test_pathological_key_distribution_with_ovc() {
-        let mut sorter = ExternalSorterWithOVC::new(4, 1024 * 1024, 4, 10000, 100, ovc_test_dir());
+        let mut sorter = ExternalSorterWithOVC::new(4, 1024 * 1024, 4, 10000, ovc_test_dir());
         sorter.set_partition_type(es::sort::engine::PartitionType::KeyOnly);
 
         let mut data = Vec::new();
@@ -85,49 +85,49 @@ mod tests {
     #[test]
     fn test_large_values_with_ovc() {
         sorter_behavior::large_values(|| {
-            ExternalSorterWithOVC::new(2, 1024 * 1024, 2, 10000, 100, ovc_test_dir())
+            ExternalSorterWithOVC::new(2, 1024 * 1024, 2, 10000, ovc_test_dir())
         });
     }
 
     #[test]
     fn test_parallel_sorting_with_ovc() {
         sorter_behavior::large_dataset_with_threads(|threads| {
-            ExternalSorterWithOVC::new(threads, 128 * 1024, threads, 10000, 100, ovc_test_dir())
+            ExternalSorterWithOVC::new(threads, 128 * 1024, threads, 10000, ovc_test_dir())
         });
     }
 
     #[test]
     fn test_sort_stats_with_ovc() {
         sorter_behavior::stats_populated(|| {
-            ExternalSorterWithOVC::new(2, 512 * 1024, 2, 10000, 100, ovc_test_dir())
+            ExternalSorterWithOVC::new(2, 512 * 1024, 2, 10000, ovc_test_dir())
         });
     }
 
     #[test]
     fn test_ovc_run_generation_stats_with_small_buffer() {
         sorter_behavior::run_generation_stats_small_buffer(|| {
-            ExternalSorterWithOVC::new(1, 128 * 1024, 1, 10000, 100, ovc_test_dir())
+            ExternalSorterWithOVC::new(1, 128 * 1024, 1, 10000, ovc_test_dir())
         });
     }
 
     #[test]
     fn test_binary_keys_with_ovc() {
         sorter_behavior::binary_keys(|| {
-            ExternalSorterWithOVC::new(2, 512 * 1024, 2, 10000, 100, ovc_test_dir())
+            ExternalSorterWithOVC::new(2, 512 * 1024, 2, 10000, ovc_test_dir())
         });
     }
 
     #[test]
     fn test_variable_length_keys_with_ovc() {
         sorter_behavior::variable_length_keys(|| {
-            ExternalSorterWithOVC::new(2, 512 * 1024, 2, 10000, 100, ovc_test_dir())
+            ExternalSorterWithOVC::new(2, 512 * 1024, 2, 10000, ovc_test_dir())
         });
     }
 
     #[test]
     fn test_concurrent_sorters_with_ovc() {
         sorter_behavior::concurrent_sorters(|| {
-            ExternalSorterWithOVC::new(2, 512 * 1024, 2, 10000, 100, ovc_test_dir())
+            ExternalSorterWithOVC::new(2, 512 * 1024, 2, 10000, ovc_test_dir())
         });
     }
 }

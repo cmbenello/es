@@ -6,7 +6,7 @@ use es::{ExternalSorter, InMemInput, Sorter};
 
 #[test]
 fn test_basic_sort() {
-    let mut sorter = ExternalSorter::new(2, 512 * 1024, 2, 10000, 100, test_dir());
+    let mut sorter = ExternalSorter::new(2, 512 * 1024, 2, 10000, test_dir());
 
     let data = vec![
         (b"c".to_vec(), b"3".to_vec()),

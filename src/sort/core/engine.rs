@@ -5,6 +5,7 @@ use std::thread;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use crate::diskio::aligned_writer::AlignedWriter;
+use crate::diskio::constants::DEFAULT_BUFFER_SIZE;
 use crate::diskio::file::SharedFd;
 use crate::diskio::io_stats::IoStatsTracker;
 use crate::rand::small_thread_rng;
@@ -43,6 +44,15 @@ impl Default for PartitionType {
     fn default() -> Self {
         Self::SizeBalanced
     }
+}
+
+const INDEX_BUDGET_PCT: usize = 5;
+const SPARSE_INDEX_WARN_AVG_ENTRIES_PER_RUN: f64 = 10.0;
+
+fn merge_memory_budget_bytes(num_threads: usize, fanin: usize) -> usize {
+    num_threads
+        .saturating_mul(fanin)
+        .saturating_mul(DEFAULT_BUFFER_SIZE)
 }
 
 pub fn execute_run_generation<R, F>(
@@ -251,33 +261,33 @@ impl<H: SortHooks> SorterCore<H> {
 
     pub fn set_partition_type(&mut self, partition_type: PartitionType) {
         self.partition_type = partition_type;
-        let budget_bytes = self.run_gen_mem.saturating_mul(5) / 100;
-        self.run_indexing_interval = match partition_type {
-            PartitionType::SizeBalanced => IndexingInterval::bytes_with_budget(
-                self.run_indexing_interval.value(),
-                budget_bytes,
-            ),
-            _ => IndexingInterval::records_with_budget(
-                self.run_indexing_interval.value(),
-                budget_bytes,
-            ),
-        };
     }
 
     pub fn set_discard_final_output(&mut self, discard: bool) {
         self.discard_final_output = discard;
     }
 
+    fn run_generation_indexing_interval(&self) -> IndexingInterval {
+        let stride = self.run_indexing_interval.value().max(1);
+        match self.partition_type {
+            PartitionType::SizeBalanced => IndexingInterval::bytes(stride),
+            _ => IndexingInterval::records(stride),
+        }
+    }
+
     fn run_generation_internal(
         &self,
         sort_input: Box<dyn SortInput>,
+        run_indexing_interval: IndexingInterval,
+        estimated_total_data_bytes: Option<usize>,
     ) -> Result<(Vec<H::MergeableRun>, RunGenerationStats), String> {
         run_generation_with_hooks(
             &self.hooks,
             sort_input,
             self.run_gen_threads,
             self.run_gen_mem,
-            self.run_indexing_interval,
+            run_indexing_interval,
+            estimated_total_data_bytes,
             self.temp_dir_info.as_ref().as_ref(),
         )
     }
@@ -285,17 +295,22 @@ impl<H: SortHooks> SorterCore<H> {
     fn multi_merge_internal(
         &self,
         runs: Vec<H::MergeableRun>,
+        run_indexing_interval: IndexingInterval,
     ) -> Result<(H::MergeableRun, Vec<MergeStats>), String> {
-        let merge_indexing_interval = match self.run_indexing_interval {
-            IndexingInterval::Bytes {
-                stride,
-                budget_bytes,
-            } => IndexingInterval::Bytes {
-                stride,
-                budget_bytes,
-            },
-            IndexingInterval::Records { .. } => IndexingInterval::records(1000),
-        };
+        let total_data_bytes: usize = runs.iter().map(|run| run.total_bytes()).sum();
+        let merge_memory_bytes = merge_memory_budget_bytes(self.merge_threads, self.merge_fanin);
+        let total_index_budget = merge_memory_bytes.saturating_mul(INDEX_BUDGET_PCT) / 100;
+        let threads = self.merge_threads.max(1);
+        let thread_index_budget = total_index_budget.div_ceil(threads);
+        let estimated_thread_data_bytes = total_data_bytes.div_ceil(threads);
+
+        let merge_indexing_interval = match run_indexing_interval {
+            IndexingInterval::Bytes { stride, .. } => IndexingInterval::bytes(stride),
+            IndexingInterval::Records { stride, .. } => IndexingInterval::records(stride),
+        }
+        .with_budget_bytes(thread_index_budget)
+        .with_estimated_total_data_bytes(estimated_thread_data_bytes);
+
         multi_merge_with_hooks(
             &self.hooks,
             runs,
@@ -326,6 +341,7 @@ impl<H: SortHooks> SorterCore<H> {
             num_threads,
             run_gen_mem,
             IndexingInterval::records(run_indexing_interval),
+            None,
             dir,
         )
     }
@@ -341,10 +357,20 @@ impl<H: SortHooks> SorterCore<H> {
     where
         H: Default,
     {
+        let total_data_bytes: usize = runs.iter().map(|run| run.total_bytes()).sum();
+        let merge_memory_bytes = merge_memory_budget_bytes(num_threads, fanin);
+        let total_index_budget = merge_memory_bytes.saturating_mul(INDEX_BUDGET_PCT) / 100;
+        let threads = num_threads.max(1);
+        let thread_index_budget = total_index_budget.div_ceil(threads);
+        let estimated_thread_data_bytes = total_data_bytes.div_ceil(threads);
+
         let merge_indexing_interval = match partition_type {
             PartitionType::SizeBalanced => IndexingInterval::bytes(1000),
             _ => IndexingInterval::records(1000),
-        };
+        }
+        .with_budget_bytes(thread_index_budget)
+        .with_estimated_total_data_bytes(estimated_thread_data_bytes);
+
         multi_merge_with_hooks(
             &H::default(),
             runs,
@@ -368,14 +394,13 @@ impl<H: SortHooks + Default> SorterCore<H> {
         run_indexing_interval: usize,
         base_dir: impl AsRef<Path>,
     ) -> Self {
-        let budget_bytes = run_gen_mem.saturating_mul(5) / 100;
         Self::with_hooks(
             H::default(),
             run_gen_threads,
             run_gen_mem,
             merge_threads,
             merge_fanin,
-            IndexingInterval::records_with_budget(run_indexing_interval, budget_bytes),
+            IndexingInterval::records(run_indexing_interval),
             base_dir,
         )
     }
@@ -383,8 +408,20 @@ impl<H: SortHooks + Default> SorterCore<H> {
 
 impl<H: SortHooks> crate::Sorter for SorterCore<H> {
     fn sort(&mut self, sort_input: Box<dyn SortInput>) -> Result<Box<dyn SortOutput>, String> {
-        let (runs, run_gen_stats) = self.run_generation_internal(sort_input)?;
-        let (merged_run, merge_stats) = self.multi_merge_internal(runs)?;
+        let run_indexing_interval = self.run_generation_indexing_interval();
+        let estimated_total_data_bytes = sort_input.estimated_size_bytes().map(|value| {
+            if value > usize::MAX as u64 {
+                usize::MAX
+            } else {
+                value as usize
+            }
+        });
+        let (runs, run_gen_stats) = self.run_generation_internal(
+            sort_input,
+            run_indexing_interval,
+            estimated_total_data_bytes,
+        )?;
+        let (merged_run, merge_stats) = self.multi_merge_internal(runs, run_indexing_interval)?;
         let output = self
             .hooks
             .into_output(merged_run, SortStats::new(run_gen_stats, merge_stats));
@@ -398,11 +435,17 @@ fn run_generation_with_hooks<H: SortHooks>(
     num_threads: usize,
     run_gen_mem: usize,
     run_indexing_interval: IndexingInterval,
+    estimated_total_data_bytes: Option<usize>,
     dir: impl AsRef<Path>,
 ) -> Result<(Vec<H::MergeableRun>, RunGenerationStats), String> {
     let dir = dir.as_ref();
     let hooks = hooks.clone();
     let worker_hooks = hooks.clone();
+    let worker_count = num_threads.max(1);
+    let thread_index_budget = run_gen_mem.saturating_mul(INDEX_BUDGET_PCT).div_ceil(100);
+    let estimated_thread_data_bytes =
+        estimated_total_data_bytes.map(|value| value.div_ceil(worker_count));
+
     let worker =
         move |thread_id: usize, scanner: Scanner, io_tracker: Arc<IoStatsTracker>, dir: PathBuf| {
             let run_path = dir.join(format!("intermediate_{}.dat", thread_id));
@@ -412,7 +455,11 @@ fn run_generation_with_hooks<H: SortHooks>(
             );
             let run_writer = AlignedWriter::from_fd_with_tracker(fd, Some((*io_tracker).clone()))
                 .expect("Failed to create run writer");
-            let mut sink = worker_hooks.create_sink(run_writer, run_indexing_interval);
+            let mut thread_interval = run_indexing_interval.with_budget_bytes(thread_index_budget);
+            if let Some(estimated_bytes) = estimated_thread_data_bytes {
+                thread_interval = thread_interval.with_estimated_total_data_bytes(estimated_bytes);
+            }
+            let mut sink = worker_hooks.create_sink(run_writer, thread_interval);
             let thread_start = Instant::now();
             let _ = worker_hooks.run_replacement_selection(scanner, &mut sink, run_gen_mem);
             let local_runs = sink.finalize();
@@ -431,7 +478,14 @@ fn run_generation_with_hooks<H: SortHooks>(
             }
         };
 
-    execute_run_generation(sort_input, num_threads, dir, worker)
+    let (runs, stats) = execute_run_generation(sort_input, num_threads, dir, worker)?;
+    let (sparse_entries, avg_sparse_entries_per_run) = sparse_index_entry_stats(&hooks, &runs);
+    println!(
+        "Run generation sparse index: {} entries | avg sparse entries/run: {:.2}",
+        sparse_entries, avg_sparse_entries_per_run
+    );
+    warn_if_sparse_index_too_sparse("run generation", avg_sparse_entries_per_run);
+    Ok((runs, stats))
 }
 
 fn multi_merge_with_hooks<H: SortHooks>(
@@ -581,6 +635,14 @@ fn merge_once_with_hooks<H: SortHooks>(
         let run = output_runs.into_iter().next().unwrap();
         return Ok((run, merge_stats));
     }
+
+    let (sparse_entries, avg_sparse_entries_per_run) =
+        sparse_index_entry_stats(hooks, &output_runs);
+    println!(
+        "Merge input sparse index: {} entries | avg sparse entries/run: {:.2}",
+        sparse_entries, avg_sparse_entries_per_run
+    );
+    warn_if_sparse_index_too_sparse("merge input", avg_sparse_entries_per_run);
 
     let merge_start = Instant::now();
     let merge_threads = num_threads;
@@ -907,6 +969,29 @@ fn merge_once_with_hooks<H: SortHooks>(
     };
 
     Ok((hooks.combine_runs(output_runs), merge_stats))
+}
+
+fn sparse_index_entry_stats<H: SortHooks>(hooks: &H, runs: &[H::MergeableRun]) -> (usize, f64) {
+    let mut total_entries = 0usize;
+    for run in runs {
+        let indexes = hooks.sparse_indexes(run);
+        total_entries = total_entries.saturating_add(indexes.len());
+    }
+    let avg_sparse_entries_per_run = if runs.is_empty() {
+        0.0
+    } else {
+        total_entries as f64 / runs.len() as f64
+    };
+    (total_entries, avg_sparse_entries_per_run)
+}
+
+fn warn_if_sparse_index_too_sparse(context: &str, avg_sparse_entries_per_run: f64) {
+    if avg_sparse_entries_per_run <= SPARSE_INDEX_WARN_AVG_ENTRIES_PER_RUN {
+        println!(
+            "WARNING: {} sparse index density is low (avg sparse entries/run {:.2} <= {:.0})",
+            context, avg_sparse_entries_per_run, SPARSE_INDEX_WARN_AVG_ENTRIES_PER_RUN
+        );
+    }
 }
 
 /// Returns the cumulative ratio at an interior boundary without allocating a

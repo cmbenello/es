@@ -4,6 +4,14 @@ use crate::sort::core::engine::RunSummary;
 pub trait RunSink: Send {
     type MergeableRun: RunSummary + Send + Sync + 'static;
 
+    fn set_sparse_index_bootstrap(
+        &mut self,
+        _avg_key_bytes: f64,
+        _avg_record_bytes: f64,
+        _sample_count: usize,
+    ) {
+    }
+
     fn start_run(&mut self);
     fn push_record(&mut self, key: &[u8], value: &[u8]);
     /// Push a record that carries an OVC delta; default falls back to plain KV.

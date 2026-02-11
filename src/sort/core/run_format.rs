@@ -81,6 +81,21 @@ pub trait RunFormat: Clone + Send + Sync + 'static {
     fn record_value<'a>(record: &'a Self::Record) -> &'a [u8];
     fn record_into_kv(record: Self::Record) -> (Vec<u8>, Vec<u8>);
 
+    /// Optional hook to seed sparse-index estimators from replacement-selection initial fill.
+    fn set_sparse_index_bootstrap(
+        _run: &mut Self::Run,
+        _avg_key_bytes: f64,
+        _avg_record_bytes: f64,
+        _sample_count: usize,
+    ) {
+    }
+
+    /// Returns current sparse-index estimator state for a run as:
+    /// (avg_key_bytes, avg_record_bytes, sample_count).
+    fn sparse_index_bootstrap(_run: &Self::Run) -> Option<(f64, f64, usize)> {
+        None
+    }
+
     /// Run replacement selection for this format
     fn run_replacement_selection<S: RunSink<MergeableRun = MergeableRun<Self>>>(
         scanner: Scanner,
@@ -94,10 +109,12 @@ pub enum IndexingInterval {
     Records {
         stride: usize,
         budget_bytes: Option<usize>,
+        estimated_total_data_bytes: Option<usize>,
     },
     Bytes {
         stride: usize,
         budget_bytes: Option<usize>,
+        estimated_total_data_bytes: Option<usize>,
     },
 }
 
@@ -106,6 +123,7 @@ impl IndexingInterval {
         IndexingInterval::Records {
             stride: interval.max(1),
             budget_bytes: None,
+            estimated_total_data_bytes: None,
         }
     }
 
@@ -113,6 +131,7 @@ impl IndexingInterval {
         IndexingInterval::Records {
             stride: interval.max(1),
             budget_bytes: Some(budget_bytes.max(1)),
+            estimated_total_data_bytes: None,
         }
     }
 
@@ -120,6 +139,7 @@ impl IndexingInterval {
         IndexingInterval::Bytes {
             stride: stride.max(1),
             budget_bytes: None,
+            estimated_total_data_bytes: None,
         }
     }
 
@@ -127,6 +147,7 @@ impl IndexingInterval {
         IndexingInterval::Bytes {
             stride: stride.max(1),
             budget_bytes: Some(budget_bytes.max(1)),
+            estimated_total_data_bytes: None,
         }
     }
 
@@ -144,15 +165,84 @@ impl IndexingInterval {
         }
     }
 
+    pub fn estimated_total_data_bytes(self) -> Option<usize> {
+        match self {
+            IndexingInterval::Records {
+                estimated_total_data_bytes,
+                ..
+            }
+            | IndexingInterval::Bytes {
+                estimated_total_data_bytes,
+                ..
+            } => estimated_total_data_bytes,
+        }
+    }
+
     pub fn with_value(self, interval: usize) -> Self {
         match self {
-            IndexingInterval::Records { budget_bytes, .. } => IndexingInterval::Records {
+            IndexingInterval::Records {
+                budget_bytes,
+                estimated_total_data_bytes,
+                ..
+            } => IndexingInterval::Records {
                 stride: interval.max(1),
                 budget_bytes,
+                estimated_total_data_bytes,
             },
-            IndexingInterval::Bytes { budget_bytes, .. } => IndexingInterval::Bytes {
+            IndexingInterval::Bytes {
+                budget_bytes,
+                estimated_total_data_bytes,
+                ..
+            } => IndexingInterval::Bytes {
                 stride: interval.max(1),
                 budget_bytes,
+                estimated_total_data_bytes,
+            },
+        }
+    }
+
+    pub fn with_budget_bytes(self, budget_bytes: usize) -> Self {
+        match self {
+            IndexingInterval::Records {
+                stride,
+                estimated_total_data_bytes,
+                ..
+            } => IndexingInterval::Records {
+                stride,
+                budget_bytes: Some(budget_bytes.max(1)),
+                estimated_total_data_bytes,
+            },
+            IndexingInterval::Bytes {
+                stride,
+                estimated_total_data_bytes,
+                ..
+            } => IndexingInterval::Bytes {
+                stride,
+                budget_bytes: Some(budget_bytes.max(1)),
+                estimated_total_data_bytes,
+            },
+        }
+    }
+
+    pub fn with_estimated_total_data_bytes(self, estimated_total_data_bytes: usize) -> Self {
+        match self {
+            IndexingInterval::Records {
+                stride,
+                budget_bytes,
+                ..
+            } => IndexingInterval::Records {
+                stride,
+                budget_bytes,
+                estimated_total_data_bytes: Some(estimated_total_data_bytes.max(1)),
+            },
+            IndexingInterval::Bytes {
+                stride,
+                budget_bytes,
+                ..
+            } => IndexingInterval::Bytes {
+                stride,
+                budget_bytes,
+                estimated_total_data_bytes: Some(estimated_total_data_bytes.max(1)),
             },
         }
     }
@@ -391,6 +481,36 @@ pub enum MergeableRun<F: RunFormat> {
     StatsOnly { entries: usize, bytes: usize },
 }
 
+fn combine_sparse_index_bootstrap<I>(values: I) -> Option<(f64, f64, usize)>
+where
+    I: Iterator<Item = (f64, f64, usize)>,
+{
+    let mut weighted_key_sum = 0.0;
+    let mut weighted_record_sum = 0.0;
+    let mut total_samples = 0usize;
+
+    for (avg_key_bytes, avg_record_bytes, sample_count) in values {
+        if sample_count == 0 {
+            continue;
+        }
+        let weight = sample_count as f64;
+        weighted_key_sum += avg_key_bytes.max(1.0) * weight;
+        weighted_record_sum += avg_record_bytes.max(1.0) * weight;
+        total_samples = total_samples.saturating_add(sample_count);
+    }
+
+    if total_samples == 0 {
+        return None;
+    }
+
+    let total_weight = total_samples as f64;
+    Some((
+        (weighted_key_sum / total_weight).max(1.0),
+        (weighted_record_sum / total_weight).max(1.0),
+        total_samples,
+    ))
+}
+
 impl<F: RunFormat> MergeableRun<F> {
     pub fn scan_range_with_io_tracker(
         &self,
@@ -497,6 +617,16 @@ impl<F: RunFormat> MergeableRun<F> {
         }
     }
 
+    pub fn sparse_index_bootstrap(&self) -> Option<(f64, f64, usize)> {
+        match self {
+            MergeableRun::Single(run) => F::sparse_index_bootstrap(run),
+            MergeableRun::RangePartitioned(runs) => {
+                combine_sparse_index_bootstrap(runs.iter().filter_map(F::sparse_index_bootstrap))
+            }
+            MergeableRun::StatsOnly { .. } => None,
+        }
+    }
+
     pub fn total_bytes(&self) -> usize {
         match self {
             MergeableRun::Single(run) => run.total_bytes(),
@@ -558,6 +688,9 @@ pub struct RunWriterSink<F: RunFormat> {
     current_run: Option<F::Run>,
     append_state: Option<F::AppendState>,
     runs: Vec<MergeableRun<F>>,
+    bootstrap_avg_key_bytes: Option<f64>,
+    bootstrap_avg_record_bytes: Option<f64>,
+    bootstrap_sample_count: usize,
 }
 
 impl<F: RunFormat> RunWriterSink<F> {
@@ -568,6 +701,9 @@ impl<F: RunFormat> RunWriterSink<F> {
             current_run: None,
             append_state: None,
             runs: Vec::new(),
+            bootstrap_avg_key_bytes: None,
+            bootstrap_avg_record_bytes: None,
+            bootstrap_sample_count: 0,
         }
     }
 
@@ -590,6 +726,20 @@ impl<F: RunFormat> RunWriterSink<F> {
 impl<F: RunFormat> RunSink for RunWriterSink<F> {
     type MergeableRun = MergeableRun<F>;
 
+    fn set_sparse_index_bootstrap(
+        &mut self,
+        avg_key_bytes: f64,
+        avg_record_bytes: f64,
+        sample_count: usize,
+    ) {
+        if sample_count == 0 {
+            return;
+        }
+        self.bootstrap_avg_key_bytes = Some(avg_key_bytes.max(1.0));
+        self.bootstrap_avg_record_bytes = Some(avg_record_bytes.max(1.0));
+        self.bootstrap_sample_count = sample_count;
+    }
+
     fn start_run(&mut self) {
         if self.current_run.is_some() {
             return;
@@ -598,7 +748,18 @@ impl<F: RunFormat> RunSink for RunWriterSink<F> {
             .run_writer
             .take()
             .expect("Run writer should be available when starting a run");
-        let run = F::new_run(writer, self.run_indexing_interval).expect("Failed to create run");
+        let mut run = F::new_run(writer, self.run_indexing_interval).expect("Failed to create run");
+        if let (Some(avg_key), Some(avg_record)) = (
+            self.bootstrap_avg_key_bytes,
+            self.bootstrap_avg_record_bytes,
+        ) {
+            F::set_sparse_index_bootstrap(
+                &mut run,
+                avg_key,
+                avg_record,
+                self.bootstrap_sample_count,
+            );
+        }
         self.current_run = Some(run);
         self.append_state = Some(F::AppendState::default());
     }
@@ -745,6 +906,9 @@ impl<F: RunFormat> SortHooks for FormatSortHooks<F> {
             ))
         } else {
             // Normal mode: write to file
+            let merge_bootstrap = combine_sparse_index_bootstrap(
+                runs.iter().filter_map(|run| run.sparse_index_bootstrap()),
+            );
             let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap();
             let ts = format!("{}{:09}", now.as_secs(), now.subsec_nanos());
             let run_path = dir.join(format!("merge_output_{}_{}.dat", thread_id, ts));
@@ -756,6 +920,14 @@ impl<F: RunFormat> SortHooks for FormatSortHooks<F> {
                 .map_err(|e| format!("Failed to create run writer: {}", e))?;
             let mut output_run = F::create_merge_run_with_id(writer, run_indexing_interval, run_id)
                 .map_err(|e| format!("Failed to create merge output run: {}", e))?;
+            if let Some((avg_key_bytes, avg_record_bytes, sample_count)) = merge_bootstrap {
+                F::set_sparse_index_bootstrap(
+                    &mut output_run,
+                    avg_key_bytes,
+                    avg_record_bytes,
+                    sample_count,
+                );
+            }
             let mut append_state = F::AppendState::default();
 
             for record in merged_iter {

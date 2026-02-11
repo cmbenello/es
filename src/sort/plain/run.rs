@@ -20,10 +20,18 @@ pub struct Run {
     start_bytes: usize,
     total_bytes: usize,
     sparse_index: Vec<IndexEntry>,
-    index_bytes: usize,
     indexing_interval: IndexingInterval,
     next_index_at_entry: usize,
     next_index_at_bytes: usize,
+    thread_index_budget_bytes: Option<usize>,
+    estimated_total_data_bytes: Option<usize>,
+    bootstrap_avg_key_bytes: f64,
+    bootstrap_avg_record_bytes: f64,
+    bootstrap_sample_count: usize,
+    observed_key_bytes_total: usize,
+    observed_record_bytes_total: usize,
+    observed_record_count: usize,
+    warned_dynamic_stride_fallback: bool,
 }
 
 impl Run {
@@ -57,10 +65,18 @@ impl Run {
             start_bytes,
             total_bytes: 0,
             sparse_index: Vec::new(),
-            index_bytes: 0,
             indexing_interval,
             next_index_at_entry: 0,
             next_index_at_bytes: 0,
+            thread_index_budget_bytes: indexing_interval.budget_bytes(),
+            estimated_total_data_bytes: indexing_interval.estimated_total_data_bytes(),
+            bootstrap_avg_key_bytes: 0.0,
+            bootstrap_avg_record_bytes: 0.0,
+            bootstrap_sample_count: 0,
+            observed_key_bytes_total: 0,
+            observed_record_bytes_total: 0,
+            observed_record_count: 0,
+            warned_dynamic_stride_fallback: false,
         })
     }
 
@@ -138,87 +154,157 @@ impl Run {
             }
     }
 
-    fn record_sparse_index(&mut self, key: &[u8]) {
+    pub fn set_sparse_index_bootstrap(
+        &mut self,
+        avg_key_bytes: f64,
+        avg_record_bytes: f64,
+        sample_count: usize,
+    ) {
+        if sample_count == 0 {
+            return;
+        }
+        self.bootstrap_avg_key_bytes = avg_key_bytes.max(1.0);
+        self.bootstrap_avg_record_bytes = avg_record_bytes.max(1.0);
+        self.bootstrap_sample_count = sample_count;
+    }
+
+    pub fn sparse_index_bootstrap(&self) -> Option<(f64, f64, usize)> {
+        let total_count = self
+            .bootstrap_sample_count
+            .saturating_add(self.observed_record_count);
+        if total_count == 0 {
+            return None;
+        }
+        let total_weight = total_count as f64;
+        let key_sum = self.bootstrap_avg_key_bytes * (self.bootstrap_sample_count as f64)
+            + self.observed_key_bytes_total as f64;
+        let record_sum = self.bootstrap_avg_record_bytes * (self.bootstrap_sample_count as f64)
+            + self.observed_record_bytes_total as f64;
+        Some((
+            (key_sum / total_weight).max(1.0),
+            (record_sum / total_weight).max(1.0),
+            total_count,
+        ))
+    }
+
+    fn observe_record(&mut self, key_len: usize, record_bytes: usize) {
+        self.observed_key_bytes_total = self.observed_key_bytes_total.saturating_add(key_len);
+        self.observed_record_bytes_total = self
+            .observed_record_bytes_total
+            .saturating_add(record_bytes);
+        self.observed_record_count = self.observed_record_count.saturating_add(1);
+    }
+
+    fn dynamic_stride(&self) -> Option<usize> {
+        let budget_bytes = self.thread_index_budget_bytes?;
+        let estimated_total_data_bytes = self.estimated_total_data_bytes?;
+        if budget_bytes == 0 || estimated_total_data_bytes == 0 {
+            return None;
+        }
+
+        let (avg_key_bytes, avg_record_bytes, _) =
+            self.sparse_index_bootstrap().unwrap_or((1.0, 1.0, 0));
+        let avg_index_entry_bytes =
+            (std::mem::size_of::<IndexEntry>() as f64 + avg_key_bytes).max(1.0);
+        let target_samples = ((budget_bytes as f64) / avg_index_entry_bytes).max(1.0);
+
+        let stride = match self.indexing_interval {
+            IndexingInterval::Records { .. } => {
+                let estimated_records = ((estimated_total_data_bytes as f64) / avg_record_bytes)
+                    .ceil()
+                    .max(1.0);
+                (estimated_records / target_samples).ceil() as usize
+            }
+            IndexingInterval::Bytes { .. } => {
+                ((estimated_total_data_bytes as f64) / target_samples).ceil() as usize
+            }
+        };
+
+        Some(stride.max(1))
+    }
+
+    fn dynamic_stride_unavailable_reason(&self) -> &'static str {
+        if self.thread_index_budget_bytes.is_none() {
+            return "thread index budget is unavailable";
+        }
+        if self.estimated_total_data_bytes.is_none() {
+            return "estimated total data bytes is unavailable";
+        }
+        if self.thread_index_budget_bytes == Some(0) {
+            return "thread index budget is zero";
+        }
+        if self.estimated_total_data_bytes == Some(0) {
+            return "estimated total data bytes is zero";
+        }
+        "dynamic stride is unavailable"
+    }
+
+    fn warn_dynamic_stride_fallback_once(&mut self, fallback_stride: usize) {
+        if self.warned_dynamic_stride_fallback {
+            return;
+        }
+        println!(
+            "WARNING: sparse index dynamic stride fallback is in use (run_id={}, reason={}, fallback_stride={})",
+            self.run_id,
+            self.dynamic_stride_unavailable_reason(),
+            fallback_stride
+        );
+        self.warned_dynamic_stride_fallback = true;
+    }
+
+    fn update_next_sample_point(
+        &mut self,
+        sampled_record_index: usize,
+        sampled_file_offset: usize,
+    ) {
+        let stride = match self.dynamic_stride() {
+            Some(stride) => stride,
+            None => {
+                let fallback_stride = self.indexing_interval.value().max(1);
+                self.warn_dynamic_stride_fallback_once(fallback_stride);
+                fallback_stride
+            }
+        };
+        match self.indexing_interval {
+            IndexingInterval::Records {
+                budget_bytes,
+                estimated_total_data_bytes,
+                ..
+            } => {
+                self.indexing_interval = IndexingInterval::Records {
+                    stride,
+                    budget_bytes,
+                    estimated_total_data_bytes,
+                };
+                self.next_index_at_entry = sampled_record_index.saturating_add(stride);
+            }
+            IndexingInterval::Bytes {
+                budget_bytes,
+                estimated_total_data_bytes,
+                ..
+            } => {
+                self.indexing_interval = IndexingInterval::Bytes {
+                    stride,
+                    budget_bytes,
+                    estimated_total_data_bytes,
+                };
+                self.next_index_at_bytes = sampled_file_offset.saturating_add(stride);
+            }
+        }
+    }
+
+    fn record_sparse_index(
+        &mut self,
+        key: &[u8],
+        sampled_record_index: usize,
+        sampled_file_offset: usize,
+        _record_bytes: usize,
+    ) {
         self.sparse_index.push(IndexEntry {
             key: key.to_vec(),
-            file_offset: self.total_bytes,
+            file_offset: sampled_file_offset,
         });
-        let entry_bytes = std::mem::size_of::<IndexEntry>().saturating_add(key.len());
-        self.index_bytes = self.index_bytes.saturating_add(entry_bytes);
-        let interval = self.indexing_interval;
-        match interval {
-            IndexingInterval::Records {
-                stride,
-                budget_bytes,
-            } => self.update_record_interval(stride, budget_bytes),
-            IndexingInterval::Bytes {
-                stride,
-                budget_bytes,
-            } => self.update_byte_interval(stride, budget_bytes),
-        }
-    }
-
-    fn avg_index_entry_bytes(&self) -> usize {
-        let entries = self.sparse_index.len().max(1);
-        self.index_bytes.saturating_add(entries.saturating_sub(1)) / entries
-    }
-
-    fn update_record_interval(&mut self, stride: usize, budget_bytes: Option<usize>) {
-        let records_seen = self.total_entries.saturating_add(1);
-        match budget_bytes {
-            Some(budget) => {
-                if self.index_bytes >= budget {
-                    self.indexing_interval = IndexingInterval::Records {
-                        stride: usize::MAX,
-                        budget_bytes: Some(budget),
-                    };
-                    self.next_index_at_entry = usize::MAX;
-                } else {
-                    let avg_entry_bytes = self.avg_index_entry_bytes();
-                    let max_entries = (budget / avg_entry_bytes).max(1);
-                    let target_stride =
-                        records_seen.saturating_add(max_entries.saturating_sub(1)) / max_entries;
-                    let new_stride = stride.max(target_stride.max(1));
-                    self.indexing_interval = IndexingInterval::Records {
-                        stride: new_stride,
-                        budget_bytes: Some(budget),
-                    };
-                    self.next_index_at_entry = self.total_entries.saturating_add(new_stride);
-                }
-            }
-            None => {
-                self.next_index_at_entry = self.total_entries.saturating_add(stride);
-            }
-        }
-    }
-
-    fn update_byte_interval(&mut self, stride: usize, budget_bytes: Option<usize>) {
-        match budget_bytes {
-            Some(budget) => {
-                if self.index_bytes >= budget {
-                    self.indexing_interval = IndexingInterval::Bytes {
-                        stride: usize::MAX,
-                        budget_bytes: Some(budget),
-                    };
-                    self.next_index_at_bytes = usize::MAX;
-                } else {
-                    let avg_entry_bytes = self.avg_index_entry_bytes();
-                    let target_stride = avg_entry_bytes
-                        .saturating_mul(self.total_bytes)
-                        .saturating_add(budget.saturating_sub(1))
-                        / budget;
-                    let new_stride = stride.max(target_stride.max(1));
-                    self.indexing_interval = IndexingInterval::Bytes {
-                        stride: new_stride,
-                        budget_bytes: Some(budget),
-                    };
-                    self.next_index_at_bytes = self.total_bytes.saturating_add(new_stride);
-                }
-            }
-            None => {
-                self.next_index_at_bytes = self.total_bytes.saturating_add(stride);
-            }
-        }
+        self.update_next_sample_point(sampled_record_index, sampled_file_offset);
     }
 
     pub fn append(&mut self, key: &[u8], value: &[u8]) {
@@ -227,9 +313,9 @@ impl Run {
         }
 
         // Use sampling interval for sparse index
-        if self.should_sample_index() {
-            self.record_sparse_index(key);
-        }
+        let should_sample = self.should_sample_index();
+        let record_index = self.total_entries;
+        let record_offset = self.total_bytes;
 
         let writer = self.writer.as_mut().unwrap();
 
@@ -242,8 +328,14 @@ impl Run {
         writer.write_all(&key).unwrap();
         writer.write_all(&value).unwrap();
 
-        self.total_bytes += 8 + key.len() + value.len();
+        let record_bytes = 8 + key.len() + value.len();
+        self.total_bytes += record_bytes;
         self.total_entries += 1;
+        self.observe_record(key.len(), record_bytes);
+
+        if should_sample {
+            self.record_sparse_index(key, record_index, record_offset, record_bytes);
+        }
     }
 
     pub fn scan_range(
@@ -1406,51 +1498,47 @@ mod tests {
     }
 
     #[test]
-    fn test_record_budget_adaptive_sampling() {
+    fn test_record_budget_ignored_fixed_stride() {
         let writer = get_test_writer("record_budget_adaptive");
         let stride = 7;
         let key_len = 4;
         let value_len = 1;
-        let index_entry_bytes = std::mem::size_of::<IndexEntry>() + key_len;
-        let budget = index_entry_bytes * 3;
         let data_entry_bytes = 8 + key_len + value_len;
         let mut run = Run::from_writer_with_indexing_interval(
             writer,
-            IndexingInterval::records_with_budget(stride, budget),
+            IndexingInterval::records_with_budget(stride, 1),
         )
         .unwrap();
 
-        for i in 0..50 {
+        let total_entries = 50;
+        for i in 0..total_entries {
             let key = format!("{:04}", i).into_bytes();
             run.append(&key, b"v");
         }
         let writer = run.finalize_write();
         drop(writer);
 
-        assert_eq!(run.sparse_index.len(), 3);
+        let expected_entries = (total_entries + stride - 1) / stride;
+        assert_eq!(run.sparse_index.len(), expected_entries);
         assert_eq!(run.sparse_index.first().unwrap().file_offset, 0);
-        let expected_indices = [0, stride, stride * 2];
-        for (entry, expected_index) in run.sparse_index.iter().zip(expected_indices) {
+        for (i, entry) in run.sparse_index.iter().enumerate() {
+            let expected_index = i * stride;
             let expected_key = format!("{:04}", expected_index);
             assert_eq!(entry.key, expected_key.as_bytes());
             assert_eq!(entry.file_offset, expected_index * data_entry_bytes);
         }
-        let index_bytes = run.sparse_index.len() * index_entry_bytes;
-        assert_eq!(index_bytes, budget);
     }
 
     #[test]
-    fn test_byte_budget_adaptive_sampling() {
+    fn test_byte_budget_ignored_fixed_stride() {
         let writer = get_test_writer("byte_budget_adaptive");
         let stride = 64;
         let key_len = 3;
         let value_len = 1;
-        let index_entry_bytes = std::mem::size_of::<IndexEntry>() + key_len;
-        let budget = index_entry_bytes * 2;
         let data_entry_bytes = 8 + key_len + value_len;
         let mut run = Run::from_writer_with_indexing_interval(
             writer,
-            IndexingInterval::bytes_with_budget(stride, budget),
+            IndexingInterval::bytes_with_budget(stride, 1),
         )
         .unwrap();
 
@@ -1461,17 +1549,17 @@ mod tests {
         let writer = run.finalize_write();
         drop(writer);
 
-        assert_eq!(run.sparse_index.len(), 2);
         let offsets: Vec<usize> = run
             .sparse_index
             .iter()
             .map(|entry| entry.file_offset)
             .collect();
         assert_eq!(offsets[0], 0);
-        assert!(offsets[1] >= stride);
-        assert_eq!(offsets[1] % data_entry_bytes, 0);
-        let index_bytes = run.sparse_index.len() * index_entry_bytes;
-        assert_eq!(index_bytes, budget);
+        assert!(offsets.len() > 2);
+        for pair in offsets.windows(2) {
+            assert!(pair[1] >= pair[0] + stride);
+            assert_eq!(pair[1] % data_entry_bytes, 0);
+        }
     }
 
     #[test]

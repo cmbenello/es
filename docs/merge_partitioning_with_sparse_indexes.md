@@ -5,6 +5,9 @@ This document explains how merge range boundaries are computed in:
 - `src/sort/core/engine.rs`
 - `src/sort/core/run_format.rs`
 
+For how sparse-index sampling stride itself is chosen, see
+`docs/sparse_index_stride_calculation.md`.
+
 ## Sparse Index Format
 
 Each physical run stores:

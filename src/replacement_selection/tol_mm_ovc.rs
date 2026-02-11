@@ -335,6 +335,9 @@ where
     let mut rs = ReplacementSelectionOVCMM::new();
     let mut pending_record: Option<(Vec<u8>, Vec<u8>)> = None;
     let mut limit_adjusted = false;
+    let mut bootstrap_key_bytes = 0usize;
+    let mut bootstrap_record_bytes = 0usize;
+    let mut bootstrap_count = 0usize;
 
     loop {
         // --- fill until the manager is full or the scanner is empty ---
@@ -358,6 +361,9 @@ where
                     );
                 }
             };
+            bootstrap_key_bytes = bootstrap_key_bytes.saturating_add(key_len);
+            bootstrap_record_bytes = bootstrap_record_bytes.saturating_add(8 + key_len + value_len);
+            bootstrap_count = bootstrap_count.saturating_add(1);
             rs.insert_initial(record);
         }
 
@@ -406,6 +412,12 @@ where
 
     if rs.buffer_len() == 0 {
         return ReplacementSelectionStats::default();
+    }
+
+    if bootstrap_count > 0 {
+        let avg_key_bytes = bootstrap_key_bytes as f64 / bootstrap_count as f64;
+        let avg_record_bytes = bootstrap_record_bytes as f64 / bootstrap_count as f64;
+        sink.set_sparse_index_bootstrap(avg_key_bytes, avg_record_bytes, bootstrap_count);
     }
 
     rs.build();
