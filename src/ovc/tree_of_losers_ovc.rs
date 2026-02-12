@@ -1,7 +1,7 @@
 use std::cmp::Ordering;
 use std::mem;
 
-use crate::ovc::offset_value_coding_32::{OVC32Trait, OVCEntry32, OVCKeyValue32, OVCU32};
+use crate::ovc::offset_value_coding_32::{OVC32Trait, OVCEntry32, OVCKey32, OVCKeyValue32, OVCU32};
 use crate::ovc::offset_value_coding_64::{
     OVC64Trait, OVCEntry, OVCEntryWithCounter, OVCKeyValue, OVCU64, SentinelValue,
 };
@@ -147,6 +147,38 @@ impl OVCTreeKey for OVCEntry32 {
 }
 
 impl OVCTreeKey for OVCKeyValue32 {
+    type OVC = OVCU32;
+
+    fn ovc(&self) -> &Self::OVC {
+        OVC32Trait::ovc(self)
+    }
+
+    fn ovc_mut(&mut self) -> &mut Self::OVC {
+        OVC32Trait::ovc_mut(self)
+    }
+
+    fn derive_ovc_from(&mut self, prev: &Self) -> bool {
+        OVC32Trait::derive_ovc_from(self, prev)
+    }
+
+    fn compare_and_update(&mut self, other: &mut Self) -> Ordering {
+        OVC32Trait::compare_and_update(self, other)
+    }
+
+    fn compare_and_update_with_mode(&mut self, other: &mut Self, full_comp: bool) -> Ordering {
+        OVC32Trait::compare_and_update_with_mode(self, other, full_comp)
+    }
+
+    fn max_ovc(&mut self, other: &Self) {
+        OVC32Trait::max_ovc(self, other);
+    }
+
+    fn set_initial_ovc(&mut self) {
+        *OVC32Trait::ovc_mut(self) = OVCU32::initial_value();
+    }
+}
+
+impl OVCTreeKey for OVCKey32 {
     type OVC = OVCU32;
 
     fn ovc(&self) -> &Self::OVC {

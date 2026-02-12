@@ -1,6 +1,7 @@
-use crate::ovc::offset_value_coding_32::{OVC32Trait, OVCKeyValue32, OVCU32};
+use crate::ovc::offset_value_coding_32::{OVC32Trait, OVCKey32, OVCKeyValue32, OVCU32};
 use crate::ovc::offset_value_coding_64::SentinelValue;
 use crate::ovc::tree_of_losers_ovc::LoserTreeOVC;
+use crate::sort::ovc::run::RunWithOVC;
 // K-way merge iterator
 pub struct MergeWithOVC<I: Iterator<Item = (OVCU32, Vec<u8>, Vec<u8>)>> {
     // Tree of losers with OVC
@@ -51,6 +52,112 @@ impl<I: Iterator<Item = (OVCU32, Vec<u8>, Vec<u8>)>> Iterator for MergeWithOVC<I
         self.tree
             .mark_current_exhausted()
             .map(|winner| winner.take())
+    }
+}
+
+/// A source that can produce keys one at a time and copy values directly
+/// to an output writer without intermediate allocation.
+pub trait MergeSource: Send {
+    /// Read the next key from this source into the provided buffer.
+    /// Returns `(ovc, value_len)` on success. After this call, the source
+    /// reader is positioned at the start of the value bytes.
+    /// The key buffer is resized/filled with the full reconstructed key.
+    fn next_key_into(&mut self, key: &mut Vec<u8>) -> Option<(OVCU32, usize)>;
+
+    /// Copy `len` value bytes directly from this source's reader to `writer`.
+    fn copy_value_to(&mut self, writer: &mut dyn std::io::Write, len: usize);
+
+    /// Skip `len` value bytes (advance past value without reading).
+    fn skip_value(&mut self, len: usize);
+}
+
+/// Zero-copy k-way merge that writes directly to an output run.
+///
+/// Keys live in the loser tree (`OVCKey32`). Values are never buffered -
+/// they flow directly from source `AlignedReader` to output `AlignedWriter`.
+/// Key buffers are recycled through the tree via a spare buffer.
+pub struct ZeroCopyMergeWithOVC<S: MergeSource> {
+    tree: LoserTreeOVC<OVCKey32>,
+    sources: Vec<S>,
+    spare_key: Vec<u8>,
+}
+
+impl<S: MergeSource> ZeroCopyMergeWithOVC<S> {
+    pub fn new(mut sources: Vec<S>) -> Self {
+        if sources.len() < 2 {
+            panic!("ZeroCopyMergeWithOVC requires at least two sources");
+        }
+
+        let mut initial = Vec::with_capacity(sources.len());
+        let mut spare_key = Vec::new();
+
+        for source in sources.iter_mut() {
+            if let Some((ovc, value_len)) = source.next_key_into(&mut spare_key) {
+                let key = std::mem::take(&mut spare_key);
+                initial.push(OVCKey32::new(ovc, key, value_len));
+            } else {
+                initial.push(OVCKey32::late_fence());
+            }
+        }
+
+        let tree = LoserTreeOVC::new(initial);
+        Self {
+            tree,
+            sources,
+            spare_key,
+        }
+    }
+
+    /// Merge all records and write them to the output run.
+    ///
+    /// For each record: writes OVC+key header from the tree, then copies value
+    /// bytes directly from the source reader to the output writer.
+    pub fn merge_into(mut self, output: &mut RunWithOVC) {
+        loop {
+            let Some((winner_entry, source_idx)) = self.tree.peek() else {
+                break;
+            };
+            let ovc = *winner_entry.ovc();
+            let value_len = winner_entry.value_len;
+            let key = winner_entry.key();
+
+            // 1. Write winner's header+key to output
+            output.append_header_and_key(ovc, key, value_len);
+
+            // 2. Copy value directly from source reader to output writer
+            self.sources[source_idx].copy_value_to(output.writer(), value_len);
+
+            // 3. Advance: read next key from winner's source, handling duplicates
+            loop {
+                let Some((next_ovc, next_value_len)) =
+                    self.sources[source_idx].next_key_into(&mut self.spare_key)
+                else {
+                    // Source exhausted
+                    if let Some(old) = self.tree.mark_current_exhausted() {
+                        self.spare_key = old.take_key();
+                    }
+                    break;
+                };
+
+                if next_ovc.is_duplicate_value() {
+                    // Duplicate: output immediately (key in spare_key, value pending)
+                    let swapped_ovc = self.tree.replace_top_ovc(next_ovc);
+                    output.append_header_and_key(swapped_ovc, &self.spare_key, next_value_len);
+                    self.sources[source_idx].copy_value_to(output.writer(), next_value_len);
+                    // Continue loop to check for more consecutive duplicates
+                } else {
+                    // Non-duplicate: push new key to tree, recycle old winner's key
+                    let new_key = OVCKey32::new(
+                        next_ovc,
+                        std::mem::take(&mut self.spare_key),
+                        next_value_len,
+                    );
+                    let old_winner = self.tree.push(new_key);
+                    self.spare_key = old_winner.take_key();
+                    break;
+                }
+            }
+        }
     }
 }
 

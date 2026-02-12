@@ -1,4 +1,4 @@
-use std::io::{self, Read, Seek, SeekFrom};
+use std::io::{self, BufRead, Read, Seek, SeekFrom};
 use std::sync::Arc;
 
 use bytes::Bytes;
@@ -285,6 +285,26 @@ impl Read for AlignedReader {
         }
 
         Ok(total_read)
+    }
+}
+
+impl BufRead for AlignedReader {
+    fn fill_buf(&mut self) -> io::Result<&[u8]> {
+        if self.buffer_offset >= self.buffer_valid_len {
+            if self.logical_pos >= self.file_size {
+                return Ok(&[]);
+            }
+            let read = self.refill_buffer()?;
+            if read == 0 {
+                return Ok(&[]);
+            }
+        }
+        Ok(&self.buffer.as_slice()[self.buffer_offset..self.buffer_valid_len])
+    }
+
+    fn consume(&mut self, amt: usize) {
+        self.buffer_offset += amt;
+        self.logical_pos += amt as u64;
     }
 }
 

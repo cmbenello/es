@@ -683,6 +683,103 @@ impl RecordSize for OVCKeyValue32 {
     }
 }
 
+/// Key-only tree entry for zero-copy merge.
+/// Stores the key and value_len (but NOT value bytes).
+/// Values flow directly from source reader to output writer.
+#[derive(Clone, PartialEq, Eq)]
+pub struct OVCKey32 {
+    ovc: OVCU32,
+    key: Vec<u8>,
+    pub value_len: usize,
+}
+
+impl OVCKey32 {
+    pub fn new(ovc: OVCU32, key: Vec<u8>, value_len: usize) -> Self {
+        Self {
+            ovc,
+            key,
+            value_len,
+        }
+    }
+
+    /// Consume self and return the key buffer for reuse.
+    pub fn take_key(self) -> Vec<u8> {
+        self.key
+    }
+}
+
+impl OVC32Trait for OVCKey32 {
+    fn ovc(&self) -> &OVCU32 {
+        &self.ovc
+    }
+
+    fn ovc_mut(&mut self) -> &mut OVCU32 {
+        &mut self.ovc
+    }
+
+    fn key(&self) -> &[u8] {
+        &self.key
+    }
+}
+
+impl SentinelValue for OVCKey32 {
+    fn early_fence() -> Self {
+        Self {
+            ovc: OVCU32::early_fence(),
+            key: Vec::new(),
+            value_len: 0,
+        }
+    }
+
+    fn late_fence() -> Self {
+        Self {
+            ovc: OVCU32::late_fence(),
+            key: Vec::new(),
+            value_len: 0,
+        }
+    }
+
+    fn is_early_fence(&self) -> bool {
+        self.ovc.is_early_fence()
+    }
+
+    fn is_late_fence(&self) -> bool {
+        self.ovc.is_late_fence()
+    }
+}
+
+impl std::fmt::Debug for OVCKey32 {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        if self.is_early_fence() {
+            write!(f, "[EarlyFence]")
+        } else if self.is_late_fence() {
+            write!(f, "[LateFence]")
+        } else {
+            write!(
+                f,
+                "{} -> {:?} (vlen={})",
+                self.ovc, self.key, self.value_len
+            )
+        }
+    }
+}
+
+impl std::fmt::Display for OVCKey32 {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        if self.is_early_fence() {
+            write!(f, "[EarlyFence]")
+        } else if self.is_late_fence() {
+            write!(f, "[LateFence]")
+        } else {
+            write!(
+                f,
+                "{} -> {:?} (vlen={})",
+                self.ovc, self.key, self.value_len
+            )
+        }
+    }
+}
+
 #[allow(dead_code)]
 pub(crate) fn compute_ovc_delta(prev_key: Option<&[u8]>, key: &[u8]) -> OVCU32 {
     let Some(prev) = prev_key else {

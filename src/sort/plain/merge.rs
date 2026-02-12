@@ -76,6 +76,135 @@ impl<I: Iterator<Item = (Vec<u8>, Vec<u8>)>> Iterator for MergeIterator<I> {
             .map(|winner| winner.inner().take())
     }
 }
+
+/// A source that reads keys one at a time and copies values directly
+/// to an output writer without intermediate allocation.
+pub trait PlainMergeSource: Send {
+    /// Read the next key from this source into the provided buffer.
+    /// Returns `value_len` on success. After this call, the source
+    /// reader is positioned at the start of the value bytes.
+    fn next_key_into(&mut self, key: &mut Vec<u8>) -> Option<usize>;
+
+    /// Copy `len` value bytes directly from this source's reader to `writer`.
+    fn copy_value_to(&mut self, writer: &mut dyn std::io::Write, len: usize);
+}
+
+/// Key-only entry for the plain zero-copy merge tree.
+/// Values are never buffered — they stay in the source reader until copied out.
+#[derive(Clone)]
+pub struct PlainMergeKey {
+    pub key: Vec<u8>,
+    pub value_len: usize,
+}
+
+impl PlainMergeKey {
+    pub fn new(key: Vec<u8>, value_len: usize) -> Self {
+        Self { key, value_len }
+    }
+
+    pub fn take_key(self) -> Vec<u8> {
+        self.key
+    }
+}
+
+impl PartialEq for PlainMergeKey {
+    fn eq(&self, other: &Self) -> bool {
+        self.key == other.key
+    }
+}
+
+impl Eq for PlainMergeKey {}
+
+impl PartialOrd for PlainMergeKey {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.key.cmp(&other.key))
+    }
+}
+
+impl Ord for PlainMergeKey {
+    fn cmp(&self, other: &Self) -> Ordering {
+        self.key.cmp(&other.key)
+    }
+}
+
+/// Zero-copy k-way merge that writes directly to a plain output run.
+///
+/// Keys live in the loser tree (`PlainMergeKey`). Values are never buffered —
+/// they flow directly from source `AlignedReader` to output `AlignedWriter`.
+/// Key buffers are recycled through the tree via a spare buffer.
+pub struct ZeroCopyMergePlain<S: PlainMergeSource> {
+    tree: LoserTree<Sentineled<PlainMergeKey>>,
+    sources: Vec<S>,
+    spare_key: Vec<u8>,
+}
+
+impl<S: PlainMergeSource> ZeroCopyMergePlain<S> {
+    pub fn new(mut sources: Vec<S>) -> Self {
+        if sources.len() < 2 {
+            panic!("ZeroCopyMergePlain requires at least two sources");
+        }
+
+        let mut initial = Vec::with_capacity(sources.len());
+        let mut spare_key = Vec::new();
+
+        for source in sources.iter_mut() {
+            if let Some(value_len) = source.next_key_into(&mut spare_key) {
+                let key = std::mem::take(&mut spare_key);
+                initial.push(Sentineled::new(PlainMergeKey::new(key, value_len)));
+            } else {
+                initial.push(Sentineled::late_fence());
+            }
+        }
+
+        let tree = LoserTree::new(initial);
+        Self {
+            tree,
+            sources,
+            spare_key,
+        }
+    }
+
+    /// Merge all records and write them to the output run.
+    ///
+    /// For each record: writes key_len+value_len+key header from the tree,
+    /// then copies value bytes directly from the source reader to the output writer.
+    pub fn merge_into(mut self, output: &mut super::run::Run) {
+        loop {
+            let Some((winner_entry, source_idx)) = self.tree.peek() else {
+                break;
+            };
+            let winner = match winner_entry {
+                Sentineled::Normal(entry) => entry,
+                _ => break,
+            };
+            let value_len = winner.value_len;
+            let key = &winner.key;
+
+            // 1. Write winner's header+key to output
+            output.append_header_and_key(key, value_len);
+
+            // 2. Copy value directly from source reader to output writer
+            self.sources[source_idx].copy_value_to(output.writer(), value_len);
+
+            // 3. Advance: read next key from winner's source
+            if let Some(next_value_len) =
+                self.sources[source_idx].next_key_into(&mut self.spare_key)
+            {
+                // Push new key to tree, recycle old winner's key
+                let new_key =
+                    PlainMergeKey::new(std::mem::take(&mut self.spare_key), next_value_len);
+                let old_winner = self.tree.push(Sentineled::new(new_key));
+                self.spare_key = old_winner.inner().take_key();
+            } else {
+                // Source exhausted
+                if let Some(old) = self.tree.mark_current_exhausted() {
+                    self.spare_key = old.inner().take_key();
+                }
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

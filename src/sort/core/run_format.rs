@@ -1,6 +1,7 @@
 use std::hint::black_box;
 use std::path::Path;
 use std::sync::Arc;
+use std::sync::Barrier;
 use std::sync::atomic::AtomicU32;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
@@ -10,6 +11,7 @@ use crate::diskio::io_stats::IoStatsTracker;
 use crate::ovc::offset_value_coding_32::OVCU32;
 use crate::sort::core::engine::SortHooks;
 use crate::sort::core::engine::{RunSummary, Scanner};
+use crate::sort::core::sparse_index::{SPARSE_INDEX_PAGE_SIZE, SparseIndex, SparseIndexPagePool};
 use crate::sort::run_sink::RunSink;
 use crate::{SortOutput, SortStats};
 
@@ -73,7 +75,7 @@ pub trait RunFormat: Clone + Send + Sync + 'static {
 
     fn run_id(run: &Self::Run) -> u32;
 
-    fn sparse_index<'a>(run: &'a Self::Run) -> &'a [IndexEntry];
+    fn sparse_index<'a>(run: &'a Self::Run) -> &'a SparseIndex;
 
     fn start_key<'a>(run: &'a Self::Run) -> Option<(&'a [u8], u32, usize)>;
 
@@ -94,6 +96,64 @@ pub trait RunFormat: Clone + Send + Sync + 'static {
     /// (avg_key_bytes, avg_record_bytes, sample_count).
     fn sparse_index_bootstrap(_run: &Self::Run) -> Option<(f64, f64, usize)> {
         None
+    }
+
+    /// Set how many threads will read this run's sparse index before it can be released.
+    fn set_sparse_index_readers(_run: &Self::Run, _count: usize) {}
+
+    /// Decrement the sparse index reader count. The last thread to call this frees the memory.
+    fn release_sparse_index(_run: &Self::Run) {}
+
+    /// Decrement the sparse index reader count. The last thread to call this
+    /// drains the pages to the given pool instead of dropping them.
+    fn release_sparse_index_to_pool(_run: &Self::Run, _pool: &SparseIndexPagePool) {}
+
+    /// Perform a direct merge of runs into the output run, bypassing the
+    /// iterator-based path. Returns `true` if the merge was handled, `false`
+    /// to fall back to the iterator-based approach.
+    /// Implementations are responsible for releasing sparse indexes.
+    fn direct_merge(
+        _runs: &[MergeableRun<Self>],
+        _output_run: &mut Self::Run,
+        _lower_bound: Option<(&[u8], u32, usize)>,
+        _upper_bound: Option<(&[u8], u32, usize)>,
+        _io_tracker: Option<IoStatsTracker>,
+    ) -> bool
+    where
+        Self: Sized,
+    {
+        false
+    }
+
+    /// Create merge sources, release sparse indexes to pool, barrier-sync,
+    /// redistribute pages, then execute the merge. Returns `true` if handled.
+    fn create_merge_sources_and_execute(
+        _runs: &[MergeableRun<Self>],
+        _output_run: &mut Self::Run,
+        _lower_bound: Option<(&[u8], u32, usize)>,
+        _upper_bound: Option<(&[u8], u32, usize)>,
+        _io_tracker: Option<IoStatsTracker>,
+        _page_pool: &SparseIndexPagePool,
+        _barrier: &Barrier,
+        _thread_id: usize,
+        _merge_threads: usize,
+    ) -> bool
+    where
+        Self: Sized,
+    {
+        false
+    }
+
+    /// Seed the output run's sparse index with pre-allocated pages.
+    fn seed_sparse_index_buffer(
+        _run: &mut Self::Run,
+        _pages: Vec<crate::sort::core::sparse_index::SparseIndexPage>,
+    ) {
+    }
+
+    /// Max pages this run's sparse index should hold based on budget.
+    fn sparse_index_budget_pages(_run: &Self::Run) -> usize {
+        usize::MAX
     }
 
     /// Run replacement selection for this format
@@ -256,42 +316,30 @@ impl std::fmt::Display for IndexingInterval {
         }
     }
 }
-/// Sparse index entry inside a single run.
-///
-/// `file_offset` is relative to the start of that run's byte range.
-#[derive(Debug, Clone)]
-pub struct IndexEntry {
-    pub key: Vec<u8>,
-    pub file_offset: usize,
-}
-
 #[derive(Clone, Copy)]
 pub struct SparseIndexRef<'a> {
     pub run_id: u32,
-    pub entry: &'a IndexEntry,
+    pub key: &'a [u8],
+    pub file_offset: usize,
 }
 
 impl<'a> SparseIndexRef<'a> {
     pub fn key(&self) -> &'a [u8] {
-        self.entry.key.as_slice()
+        self.key
     }
 
     pub fn file_offset(&self) -> usize {
-        self.entry.file_offset
+        self.file_offset
     }
 
     pub fn as_key_run_offset(&self) -> (&'a [u8], u32, usize) {
-        (
-            self.entry.key.as_slice(),
-            self.run_id,
-            self.entry.file_offset,
-        )
+        (self.key, self.run_id, self.file_offset)
     }
 }
 
 struct SparseIndexSegment<'a> {
     run_id: u32,
-    entries: &'a [IndexEntry],
+    index: &'a SparseIndex,
     total_bytes: usize,
     base_bytes: usize,
 }
@@ -306,7 +354,7 @@ pub struct MultiSparseIndexes<'a> {
 impl<'a> MultiSparseIndexes<'a> {
     /// Creates a logical concatenation view of per-run sparse indexes.
     ///
-    /// No `IndexEntry` is copied. We only store segment metadata:
+    /// No entry data is copied. We only store segment metadata:
     ///
     /// ```text
     /// input segments
@@ -324,13 +372,13 @@ impl<'a> MultiSparseIndexes<'a> {
     /// `global_offset_at(i)` maps a logical index to cumulative bytes across
     /// segments using `base_bytes + entry.file_offset`.
     fn from_segments(mut segments: Vec<SparseIndexSegment<'a>>) -> Self {
-        segments.retain(|segment| !segment.entries.is_empty());
+        segments.retain(|segment| !segment.index.is_empty());
         let mut segment_ends = Vec::with_capacity(segments.len());
         let mut total_len = 0;
         let mut total_bytes = 0;
         for segment in &mut segments {
             segment.base_bytes = total_bytes;
-            total_len += segment.entries.len();
+            total_len += segment.index.len();
             segment_ends.push(total_len);
             total_bytes += segment.total_bytes;
         }
@@ -374,7 +422,8 @@ impl<'a> MultiSparseIndexes<'a> {
         let segment = &self.segments[segment_index];
         Some(SparseIndexRef {
             run_id: segment.run_id,
-            entry: &segment.entries[entry_index],
+            key: segment.index.key(entry_index),
+            file_offset: segment.index.file_offset(entry_index),
         })
     }
 
@@ -385,16 +434,17 @@ impl<'a> MultiSparseIndexes<'a> {
     pub fn global_offset_at(&self, index: usize) -> Option<usize> {
         let (segment_index, entry_index) = self.locate(index)?;
         let segment = &self.segments[segment_index];
-        Some(segment.base_bytes + segment.entries[entry_index].file_offset)
+        Some(segment.base_bytes + segment.index.file_offset(entry_index))
     }
 
     pub fn iter(&'a self) -> impl Iterator<Item = SparseIndexRef<'a>> + 'a {
         self.segments.iter().flat_map(|segment| {
             let run_id = segment.run_id;
-            segment
-                .entries
-                .iter()
-                .map(move |entry| SparseIndexRef { run_id, entry })
+            (0..segment.index.len()).map(move |i| SparseIndexRef {
+                run_id,
+                key: segment.index.key(i),
+                file_offset: segment.index.file_offset(i),
+            })
         })
     }
 
@@ -596,7 +646,7 @@ impl<F: RunFormat> MergeableRun<F> {
             MergeableRun::Single(run) => {
                 MultiSparseIndexes::from_segments(vec![SparseIndexSegment {
                     run_id: F::run_id(run),
-                    entries: F::sparse_index(run),
+                    index: F::sparse_index(run),
                     total_bytes: run.total_bytes(),
                     base_bytes: 0,
                 }])
@@ -606,7 +656,7 @@ impl<F: RunFormat> MergeableRun<F> {
                     .iter()
                     .map(|run| SparseIndexSegment {
                         run_id: F::run_id(run),
-                        entries: F::sparse_index(run),
+                        index: F::sparse_index(run),
                         total_bytes: run.total_bytes(),
                         base_bytes: 0,
                     })
@@ -640,6 +690,42 @@ impl<F: RunFormat> MergeableRun<F> {
             MergeableRun::Single(run) => vec![run],
             MergeableRun::RangePartitioned(runs) => runs,
             MergeableRun::StatsOnly { .. } => vec![],
+        }
+    }
+
+    pub fn set_sparse_index_readers(&self, count: usize) {
+        match self {
+            MergeableRun::Single(run) => F::set_sparse_index_readers(run, count),
+            MergeableRun::RangePartitioned(runs) => {
+                for run in runs {
+                    F::set_sparse_index_readers(run, count);
+                }
+            }
+            MergeableRun::StatsOnly { .. } => {}
+        }
+    }
+
+    pub fn release_sparse_index(&self) {
+        match self {
+            MergeableRun::Single(run) => F::release_sparse_index(run),
+            MergeableRun::RangePartitioned(runs) => {
+                for run in runs {
+                    F::release_sparse_index(run);
+                }
+            }
+            MergeableRun::StatsOnly { .. } => {}
+        }
+    }
+
+    pub fn release_sparse_index_to_pool(&self, pool: &SparseIndexPagePool) {
+        match self {
+            MergeableRun::Single(run) => F::release_sparse_index_to_pool(run, pool),
+            MergeableRun::RangePartitioned(runs) => {
+                for run in runs {
+                    F::release_sparse_index_to_pool(run, pool);
+                }
+            }
+            MergeableRun::StatsOnly { .. } => {}
         }
     }
 }
@@ -876,23 +962,42 @@ impl<F: RunFormat> SortHooks for FormatSortHooks<F> {
         dir: &Path,
         io_tracker: Arc<IoStatsTracker>,
         discard_output: bool,
+        page_pool: Arc<SparseIndexPagePool>,
+        barrier: Arc<Barrier>,
+        merge_threads: usize,
     ) -> Result<(Self::MergeableRun, u128), String> {
         let thread_start = Instant::now();
-        let iterators: Vec<_> = runs
-            .iter()
-            .map(|run| {
-                run.scan_range_with_io_tracker(
-                    lower_bound,
-                    upper_bound,
-                    Some((*io_tracker).clone()),
-                )
-            })
-            .collect();
-
-        let merged_iter = F::merge_iterators(iterators);
 
         if discard_output {
-            // Discard mode: iterate through all records but don't write
+            // Discard mode: use iterators, iterate through all records without writing
+            let iterators: Vec<_> = runs
+                .iter()
+                .map(|run| {
+                    run.scan_range_with_io_tracker(
+                        lower_bound,
+                        upper_bound,
+                        Some((*io_tracker).clone()),
+                    )
+                })
+                .collect();
+
+            // Release sparse index pages to pool
+            for run in runs.iter() {
+                run.release_sparse_index_to_pool(&page_pool);
+            }
+
+            // Wait for all threads to release, then discard pooled pages
+            barrier.wait();
+            if thread_id == 0 {
+                let total = page_pool.len();
+                println!(
+                    "Sparse index page pool: {} pages ({:.2} MB)",
+                    total,
+                    (total * SPARSE_INDEX_PAGE_SIZE) as f64 / (1024.0 * 1024.0),
+                );
+            }
+
+            let merged_iter = F::merge_iterators(iterators);
             let mut entries = 0usize;
             for record in merged_iter {
                 entries = entries.saturating_add(1);
@@ -900,46 +1005,105 @@ impl<F: RunFormat> SortHooks for FormatSortHooks<F> {
             }
 
             let thread_time_ms = thread_start.elapsed().as_millis();
-            Ok((
+            return Ok((
                 MergeableRun::StatsOnly { entries, bytes: 0 },
                 thread_time_ms,
-            ))
-        } else {
-            // Normal mode: write to file
-            let merge_bootstrap = combine_sparse_index_bootstrap(
-                runs.iter().filter_map(|run| run.sparse_index_bootstrap()),
+            ));
+        }
+
+        // Normal mode: write to file
+        let merge_bootstrap = combine_sparse_index_bootstrap(
+            runs.iter().filter_map(|run| run.sparse_index_bootstrap()),
+        );
+        let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap();
+        let ts = format!("{}{:09}", now.as_secs(), now.subsec_nanos());
+        let run_path = dir.join(format!("merge_output_{}_{}.dat", thread_id, ts));
+        let fd = Arc::new(
+            SharedFd::new_from_path(&run_path, true)
+                .map_err(|e| format!("Failed to open merge output file: {}", e))?,
+        );
+        let writer = AlignedWriter::from_fd_with_tracker(fd, Some((*io_tracker).clone()))
+            .map_err(|e| format!("Failed to create run writer: {}", e))?;
+        let mut output_run = F::create_merge_run_with_id(writer, run_indexing_interval, run_id)
+            .map_err(|e| format!("Failed to create merge output run: {}", e))?;
+        if let Some((avg_key_bytes, avg_record_bytes, sample_count)) = merge_bootstrap {
+            F::set_sparse_index_bootstrap(
+                &mut output_run,
+                avg_key_bytes,
+                avg_record_bytes,
+                sample_count,
             );
-            let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap();
-            let ts = format!("{}{:09}", now.as_secs(), now.subsec_nanos());
-            let run_path = dir.join(format!("merge_output_{}_{}.dat", thread_id, ts));
-            let fd = Arc::new(
-                SharedFd::new_from_path(&run_path, true)
-                    .map_err(|e| format!("Failed to open merge output file: {}", e))?,
-            );
-            let writer = AlignedWriter::from_fd_with_tracker(fd, Some((*io_tracker).clone()))
-                .map_err(|e| format!("Failed to create run writer: {}", e))?;
-            let mut output_run = F::create_merge_run_with_id(writer, run_indexing_interval, run_id)
-                .map_err(|e| format!("Failed to create merge output run: {}", e))?;
-            if let Some((avg_key_bytes, avg_record_bytes, sample_count)) = merge_bootstrap {
-                F::set_sparse_index_bootstrap(
-                    &mut output_run,
-                    avg_key_bytes,
-                    avg_record_bytes,
-                    sample_count,
+        }
+
+        // Step 1: Create merge sources (uses sparse index for seek)
+        // Step 2: Release sparse index pages to pool
+        // Step 3: Barrier - wait for all threads
+        // Step 4: Redistribute pages from pool to output run
+        // Step 5: Execute merge
+        if !F::create_merge_sources_and_execute(
+            &*runs,
+            &mut output_run,
+            lower_bound,
+            upper_bound,
+            Some((*io_tracker).clone()),
+            &page_pool,
+            &barrier,
+            thread_id,
+            merge_threads,
+        ) {
+            // Iterator-based fallback
+            let iterators: Vec<_> = runs
+                .iter()
+                .map(|run| {
+                    run.scan_range_with_io_tracker(
+                        lower_bound,
+                        upper_bound,
+                        Some((*io_tracker).clone()),
+                    )
+                })
+                .collect();
+
+            // Release sparse index pages to pool
+            for run in runs.iter() {
+                run.release_sparse_index_to_pool(&page_pool);
+            }
+
+            // Wait for all threads to release, then redistribute
+            barrier.wait();
+            let total = page_pool.len();
+            let budget_cap = F::sparse_index_budget_pages(&output_run);
+            if thread_id == 0 {
+                let taken = total.min(merge_threads * budget_cap);
+                let freed = total.saturating_sub(taken);
+                println!(
+                    "Sparse index page pool: {} pages ({:.2} MB), recycling {} pages ({:.2} MB), freeing {} pages ({:.2} MB)",
+                    total,
+                    (total * SPARSE_INDEX_PAGE_SIZE) as f64 / (1024.0 * 1024.0),
+                    taken,
+                    (taken * SPARSE_INDEX_PAGE_SIZE) as f64 / (1024.0 * 1024.0),
+                    freed,
+                    (freed * SPARSE_INDEX_PAGE_SIZE) as f64 / (1024.0 * 1024.0),
                 );
             }
-            let mut append_state = F::AppendState::default();
+            let per_thread = total / merge_threads;
+            let extra = total % merge_threads;
+            let fair_share = per_thread + if thread_id < extra { 1 } else { 0 };
+            let my_count = fair_share.min(budget_cap);
+            let my_pages = page_pool.take(my_count);
+            F::seed_sparse_index_buffer(&mut output_run, my_pages);
 
+            let merged_iter = F::merge_iterators(iterators);
+            let mut append_state = F::AppendState::default();
             for record in merged_iter {
                 F::append_record(&mut append_state, &mut output_run, record);
             }
-
-            let writer = F::finalize_run(&mut output_run);
-            drop(writer);
-
-            let thread_time_ms = thread_start.elapsed().as_millis();
-            Ok((MergeableRun::Single(output_run), thread_time_ms))
         }
+
+        let writer = F::finalize_run(&mut output_run);
+        drop(writer);
+
+        let thread_time_ms = thread_start.elapsed().as_millis();
+        Ok((MergeableRun::Single(output_run), thread_time_ms))
     }
 
     fn sparse_indexes<'a>(&self, run: &'a Self::MergeableRun) -> MultiSparseIndexes<'a> {
@@ -957,6 +1121,18 @@ impl<F: RunFormat> SortHooks for FormatSortHooks<F> {
         run_size: usize,
     ) -> crate::replacement_selection::ReplacementSelectionStats {
         F::run_replacement_selection(scanner, sink, run_size)
+    }
+
+    fn set_sparse_index_readers(&self, run: &Self::MergeableRun, count: usize) {
+        run.set_sparse_index_readers(count);
+    }
+
+    fn release_sparse_index(&self, run: &Self::MergeableRun) {
+        run.release_sparse_index();
+    }
+
+    fn release_sparse_index_to_pool(&self, run: &Self::MergeableRun, pool: &SparseIndexPagePool) {
+        run.release_sparse_index_to_pool(pool);
     }
 }
 

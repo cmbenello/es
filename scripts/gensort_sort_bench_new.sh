@@ -8,6 +8,31 @@ if [[ ${1-} == "" ]]; then
   exit 1
 fi
 
+# ---------------------------------------------------------
+# RCLONE CONFIG (upload logs to Google Drive after benchmark)
+# Set RCLONE_REMOTE to your rclone remote:path, e.g. "gdrive:bench_results"
+# Leave empty or unset to skip upload. Silently skipped if rclone not found.
+# ---------------------------------------------------------
+RCLONE_REMOTE="${RCLONE_REMOTE:-gdrive:bench_results/gensort}"
+
+upload_logs() {
+  if ! command -v rclone >/dev/null 2>&1; then
+    echo "rclone not found, skipping upload." >&2
+    return 0
+  fi
+  if [[ -z "${RCLONE_REMOTE:-}" ]]; then
+    echo "RCLONE_REMOTE not set, skipping upload." >&2
+    return 0
+  fi
+  local dest="${RCLONE_REMOTE}/$(basename "$OUT_DIR")"
+  echo "Uploading $OUT_DIR -> $dest ..."
+  if rclone copy "$OUT_DIR" "$dest" --progress; then
+    echo "Upload complete: $dest"
+  else
+    echo "Warning: rclone upload failed (exit $?)" >&2
+  fi
+}
+
 INPUT_DATA=$1
 if [[ ! -f "$INPUT_DATA" ]]; then
   echo "Input file not found: $INPUT_DATA" >&2
@@ -171,6 +196,7 @@ run_bench() {
   fi
 
   rm -rf "$temp_dir"
+  upload_logs
   clear_cache_if_available
 }
 
@@ -237,3 +263,5 @@ for rg in "${RUNGEN_GRID[@]}"; do
     cooldown
   done
 done
+
+echo "All benchmarks complete. Results in: $OUT_DIR"

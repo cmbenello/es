@@ -7,11 +7,13 @@ use crate::ovc::offset_value_coding_32::OVCU32;
 use crate::ovc::offset_value_coding_64::OVCFlag;
 use crate::sort::core::engine::RunSummary;
 use crate::sort::core::run_format::{
-    IndexEntry, IndexingInterval, KeyRunIdOffsetBound, RUN_ID_COUNTER, cmp_key_run_offset,
+    IndexingInterval, KeyRunIdOffsetBound, RUN_ID_COUNTER, cmp_key_run_offset,
 };
+use crate::sort::core::sparse_index::{SparseIndex, SparseIndexPagePool};
+use std::cell::UnsafeCell;
 use std::io::{Read, Write};
 use std::sync::Arc;
-use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 // File-based run implementation with direct I/O
 pub struct RunWithOVC {
@@ -21,20 +23,18 @@ pub struct RunWithOVC {
     total_entries: usize,
     start_bytes: usize,
     total_bytes: usize,
-    sparse_index: Vec<IndexEntry>,
-    indexing_interval: IndexingInterval,
-    next_index_at_entry: usize,
-    next_index_at_bytes: usize,
-    thread_index_budget_bytes: Option<usize>,
-    estimated_total_data_bytes: Option<usize>,
-    bootstrap_avg_key_bytes: f64,
-    bootstrap_avg_record_bytes: f64,
-    bootstrap_sample_count: usize,
-    observed_key_bytes_total: usize,
-    observed_record_bytes_total: usize,
-    observed_record_count: usize,
-    warned_dynamic_stride_fallback: bool,
+    sparse_index: UnsafeCell<SparseIndex>,
+    sparse_index_refcount: AtomicUsize,
 }
+
+// SAFETY: RunWithOVC is shared across threads via Arc during merge.
+// The sparse_index UnsafeCell is safe because:
+// - During write phase: single-threaded, only the owner mutates
+// - During merge: all threads read concurrently (no mutation),
+//   then each calls release_sparse_index(); the last thread (atomic
+//   decrement to 0) clears the index with no concurrent readers remaining.
+// - RunIteratorWithOVC does NOT hold a reference to the sparse index.
+unsafe impl Sync for RunWithOVC {}
 
 impl RunWithOVC {
     #[cfg(test)]
@@ -66,19 +66,8 @@ impl RunWithOVC {
             total_entries: 0,
             start_bytes,
             total_bytes: 0,
-            sparse_index: Vec::new(),
-            indexing_interval,
-            next_index_at_entry: 0,
-            next_index_at_bytes: 0,
-            thread_index_budget_bytes: indexing_interval.budget_bytes(),
-            estimated_total_data_bytes: indexing_interval.estimated_total_data_bytes(),
-            bootstrap_avg_key_bytes: 0.0,
-            bootstrap_avg_record_bytes: 0.0,
-            bootstrap_sample_count: 0,
-            observed_key_bytes_total: 0,
-            observed_record_bytes_total: 0,
-            observed_record_count: 0,
-            warned_dynamic_stride_fallback: false,
+            sparse_index: UnsafeCell::new(SparseIndex::new(indexing_interval)),
+            sparse_index_refcount: AtomicUsize::new(0),
         })
     }
 
@@ -103,56 +92,98 @@ impl RunWithOVC {
     }
 
     pub fn start_key(&self) -> Option<&[u8]> {
-        self.sparse_index.first().map(|entry| entry.key.as_slice())
+        // SAFETY: No concurrent mutation during reads.
+        let index = unsafe { &*self.sparse_index.get() };
+        index.first_key()
     }
 
-    pub fn sparse_index(&self) -> &Vec<IndexEntry> {
-        &self.sparse_index
+    pub fn sparse_index(&self) -> &SparseIndex {
+        // SAFETY: No concurrent mutation during reads.
+        unsafe { &*self.sparse_index.get() }
+    }
+
+    /// Set the number of threads that will read the sparse index.
+    /// Must be called before spawning threads.
+    pub fn set_sparse_index_readers(&self, count: usize) {
+        self.sparse_index_refcount.store(count, Ordering::Release);
+    }
+
+    /// Decrement the sparse index refcount. The thread that decrements to 0
+    /// clears the sparse index, freeing the memory.
+    pub fn release_sparse_index(&self) {
+        let prev = self.sparse_index_refcount.fetch_sub(1, Ordering::AcqRel);
+        if prev == 1 {
+            // Last reader: safe to clear since no other thread will access it.
+            // SAFETY: All concurrent readers have finished before decrementing.
+            let index = unsafe { &mut *self.sparse_index.get() };
+            index.clear();
+        }
+    }
+
+    /// Decrement the sparse index refcount. The last thread drains pages to the pool.
+    pub fn release_sparse_index_to_pool(&self, pool: &SparseIndexPagePool) {
+        let prev = self.sparse_index_refcount.fetch_sub(1, Ordering::AcqRel);
+        if prev == 1 {
+            let index = unsafe { &mut *self.sparse_index.get() };
+            pool.return_pages(index.take_buffer());
+        }
+    }
+
+    /// Get mutable access to the sparse index (for seeding buffer).
+    /// SAFETY: Caller must ensure no concurrent access.
+    pub fn sparse_index_mut(&self) -> &mut SparseIndex {
+        unsafe { &mut *self.sparse_index.get() }
     }
 
     fn find_start_position(
         &self,
         lower_inc: Option<&KeyRunIdOffsetBound>,
     ) -> Option<(usize, Vec<u8>)> {
-        if self.sparse_index.is_empty() {
+        // SAFETY: No concurrent mutation during reads.
+        let sparse_index = unsafe { &*self.sparse_index.get() };
+        if sparse_index.is_empty() {
             return None;
         }
-        let mut best_entry = &self.sparse_index[0];
+        let mut best_idx: usize = 0;
         if lower_inc.is_none() {
-            return Some((best_entry.file_offset, best_entry.key.clone()));
+            return Some((sparse_index.file_offset(0), sparse_index.key(0).to_vec()));
         }
 
         // Binary search to find the last entry with key < lower_inc
         let mut left = 0;
-        let mut right = self.sparse_index.len();
+        let mut right = sparse_index.len();
         let lower_inc = lower_inc.unwrap();
 
         while left < right {
             let mid = left + (right - left) / 2;
-            let mid_entry = &self.sparse_index[mid];
             if cmp_key_run_offset(
-                (&mid_entry.key, self.run_id, mid_entry.file_offset),
+                (
+                    sparse_index.key(mid),
+                    self.run_id,
+                    sparse_index.file_offset(mid),
+                ),
                 (&lower_inc.key, lower_inc.run_id, lower_inc.offset),
             ) == std::cmp::Ordering::Less
             {
-                best_entry = &self.sparse_index[mid];
+                best_idx = mid;
                 left = mid + 1;
             } else {
                 right = mid;
             }
         }
 
-        Some((best_entry.file_offset, best_entry.key.clone()))
+        Some((
+            sparse_index.file_offset(best_idx),
+            sparse_index.key(best_idx).to_vec(),
+        ))
     }
 }
 
 impl RunWithOVC {
     fn should_sample_index(&self) -> bool {
-        self.sparse_index.is_empty()
-            || match self.indexing_interval {
-                IndexingInterval::Records { .. } => self.total_entries >= self.next_index_at_entry,
-                IndexingInterval::Bytes { .. } => self.total_bytes >= self.next_index_at_bytes,
-            }
+        // SAFETY: Called only during single-threaded write phase.
+        let sparse_index = unsafe { &*self.sparse_index.get() };
+        sparse_index.should_sample(self.total_entries, self.total_bytes)
     }
 
     pub fn set_sparse_index_bootstrap(
@@ -161,137 +192,18 @@ impl RunWithOVC {
         avg_record_bytes: f64,
         sample_count: usize,
     ) {
-        if sample_count == 0 {
-            return;
-        }
-        self.bootstrap_avg_key_bytes = avg_key_bytes.max(1.0);
-        self.bootstrap_avg_record_bytes = avg_record_bytes.max(1.0);
-        self.bootstrap_sample_count = sample_count;
+        let sparse_index = self.sparse_index.get_mut();
+        sparse_index.set_bootstrap(avg_key_bytes, avg_record_bytes, sample_count);
     }
 
     pub fn sparse_index_bootstrap(&self) -> Option<(f64, f64, usize)> {
-        let total_count = self
-            .bootstrap_sample_count
-            .saturating_add(self.observed_record_count);
-        if total_count == 0 {
-            return None;
-        }
-        let total_weight = total_count as f64;
-        let key_sum = self.bootstrap_avg_key_bytes * (self.bootstrap_sample_count as f64)
-            + self.observed_key_bytes_total as f64;
-        let record_sum = self.bootstrap_avg_record_bytes * (self.bootstrap_sample_count as f64)
-            + self.observed_record_bytes_total as f64;
-        Some((
-            (key_sum / total_weight).max(1.0),
-            (record_sum / total_weight).max(1.0),
-            total_count,
-        ))
+        let sparse_index = unsafe { &*self.sparse_index.get() };
+        sparse_index.bootstrap()
     }
 
     fn observe_record(&mut self, key_len: usize, record_bytes: usize) {
-        self.observed_key_bytes_total = self.observed_key_bytes_total.saturating_add(key_len);
-        self.observed_record_bytes_total = self
-            .observed_record_bytes_total
-            .saturating_add(record_bytes);
-        self.observed_record_count = self.observed_record_count.saturating_add(1);
-    }
-
-    fn dynamic_stride(&self) -> Option<usize> {
-        let budget_bytes = self.thread_index_budget_bytes?;
-        let estimated_total_data_bytes = self.estimated_total_data_bytes?;
-        if budget_bytes == 0 || estimated_total_data_bytes == 0 {
-            return None;
-        }
-
-        let (avg_key_bytes, avg_record_bytes, _) =
-            self.sparse_index_bootstrap().unwrap_or((1.0, 1.0, 0));
-        let avg_index_entry_bytes =
-            (std::mem::size_of::<IndexEntry>() as f64 + avg_key_bytes).max(1.0);
-        let target_samples = ((budget_bytes as f64) / avg_index_entry_bytes).max(1.0);
-
-        let stride = match self.indexing_interval {
-            IndexingInterval::Records { .. } => {
-                let estimated_records = ((estimated_total_data_bytes as f64) / avg_record_bytes)
-                    .ceil()
-                    .max(1.0);
-                (estimated_records / target_samples).ceil() as usize
-            }
-            IndexingInterval::Bytes { .. } => {
-                ((estimated_total_data_bytes as f64) / target_samples).ceil() as usize
-            }
-        };
-
-        Some(stride.max(1))
-    }
-
-    fn dynamic_stride_unavailable_reason(&self) -> &'static str {
-        if self.thread_index_budget_bytes.is_none() {
-            return "thread index budget is unavailable";
-        }
-        if self.estimated_total_data_bytes.is_none() {
-            return "estimated total data bytes is unavailable";
-        }
-        if self.thread_index_budget_bytes == Some(0) {
-            return "thread index budget is zero";
-        }
-        if self.estimated_total_data_bytes == Some(0) {
-            return "estimated total data bytes is zero";
-        }
-        "dynamic stride is unavailable"
-    }
-
-    fn warn_dynamic_stride_fallback_once(&mut self, fallback_stride: usize) {
-        if self.warned_dynamic_stride_fallback {
-            return;
-        }
-        println!(
-            "WARNING: sparse index dynamic stride fallback is in use (run_id={}, reason={}, fallback_stride={})",
-            self.run_id,
-            self.dynamic_stride_unavailable_reason(),
-            fallback_stride
-        );
-        self.warned_dynamic_stride_fallback = true;
-    }
-
-    fn update_next_sample_point(
-        &mut self,
-        sampled_record_index: usize,
-        sampled_file_offset: usize,
-    ) {
-        let stride = match self.dynamic_stride() {
-            Some(stride) => stride,
-            None => {
-                let fallback_stride = self.indexing_interval.value().max(1);
-                self.warn_dynamic_stride_fallback_once(fallback_stride);
-                fallback_stride
-            }
-        };
-        match self.indexing_interval {
-            IndexingInterval::Records {
-                budget_bytes,
-                estimated_total_data_bytes,
-                ..
-            } => {
-                self.indexing_interval = IndexingInterval::Records {
-                    stride,
-                    budget_bytes,
-                    estimated_total_data_bytes,
-                };
-                self.next_index_at_entry = sampled_record_index.saturating_add(stride);
-            }
-            IndexingInterval::Bytes {
-                budget_bytes,
-                estimated_total_data_bytes,
-                ..
-            } => {
-                self.indexing_interval = IndexingInterval::Bytes {
-                    stride,
-                    budget_bytes,
-                    estimated_total_data_bytes,
-                };
-                self.next_index_at_bytes = sampled_file_offset.saturating_add(stride);
-            }
-        }
+        let sparse_index = self.sparse_index.get_mut();
+        sparse_index.observe_record(key_len, record_bytes);
     }
 
     fn record_sparse_index(
@@ -301,11 +213,14 @@ impl RunWithOVC {
         sampled_file_offset: usize,
         _record_bytes: usize,
     ) {
-        self.sparse_index.push(IndexEntry {
-            key: key.to_vec(),
-            file_offset: sampled_file_offset,
-        });
-        self.update_next_sample_point(sampled_record_index, sampled_file_offset);
+        // SAFETY: Called only during single-threaded write phase.
+        let sparse_index = self.sparse_index.get_mut();
+        sparse_index.record_sample(
+            key,
+            sampled_file_offset,
+            sampled_record_index,
+            sampled_file_offset,
+        );
     }
 
     pub fn append(&mut self, ovc: OVCU32, key: &[u8], value: &[u8]) {
@@ -361,6 +276,65 @@ impl RunWithOVC {
         if should_sample {
             self.record_sparse_index(key, record_index, record_offset, record_bytes);
         }
+    }
+
+    /// Write only the header (OVC + key_len + value_len) and key to the output.
+    /// The caller is responsible for writing the value bytes separately via `writer()`.
+    pub fn append_header_and_key(&mut self, ovc: OVCU32, key: &[u8], value_len: usize) {
+        if self.writer.is_none() {
+            panic!("RunWithOVC is not initialized with a writer");
+        }
+
+        let should_sample = self.should_sample_index();
+        let record_index = self.total_entries;
+        let record_offset = self.total_bytes;
+
+        let writer = self.writer.as_mut().unwrap();
+        let value_len_u32 = value_len as u32;
+
+        if ovc.flag() == OVCFlag::DuplicateValue {
+            writer.write_all(&ovc.to_le_bytes()).unwrap();
+            writer.write_all(&value_len_u32.to_le_bytes()).unwrap();
+            // No key bytes for duplicates; value written by caller
+            let record_bytes = 4 + 4 + value_len;
+            self.total_bytes += record_bytes;
+            self.total_entries += 1;
+            self.observe_record(key.len(), record_bytes);
+            if should_sample {
+                self.record_sparse_index(key, record_index, record_offset, record_bytes);
+            }
+            return;
+        }
+
+        let offset = match ovc.flag() {
+            OVCFlag::EarlyFence | OVCFlag::LateFence => {
+                panic!("EarlyFence and LateFence OVC flags are not supported in RunWithOVC");
+            }
+            OVCFlag::InitialValue => 0,
+            OVCFlag::NormalValue => ovc.offset(),
+            OVCFlag::DuplicateValue => unreachable!(),
+        };
+        let truncated_key = &key[offset..];
+        let truncated_key_len = truncated_key.len() as u32;
+        writer.write_all(&ovc.to_le_bytes()).unwrap();
+        writer.write_all(&truncated_key_len.to_le_bytes()).unwrap();
+        writer.write_all(&value_len_u32.to_le_bytes()).unwrap();
+        writer.write_all(truncated_key).unwrap();
+        // Value written by caller via writer()
+
+        let record_bytes = 4 + 8 + truncated_key.len() + value_len;
+        self.total_bytes += record_bytes;
+        self.total_entries += 1;
+        self.observe_record(key.len(), record_bytes);
+        if should_sample {
+            self.record_sparse_index(key, record_index, record_offset, record_bytes);
+        }
+    }
+
+    /// Get a mutable reference to the underlying writer.
+    /// Used for zero-copy value transfer from source reader.
+    pub fn writer(&mut self) -> &mut AlignedWriter {
+        self.writer.as_mut().expect("RunWithOVC has no writer")
     }
 
     pub fn scan_range(
@@ -446,9 +420,67 @@ impl RunWithOVC {
             done: false,
         }) as Box<dyn Iterator<Item = (OVCU32, Vec<u8>, Vec<u8>)> + Send>
     }
+
+    /// Create a MergeSource for zero-copy merge.
+    /// Returns None for empty runs.
+    pub fn scan_range_as_source(
+        &self,
+        lower_inc: Option<(&[u8], u32, usize)>,
+        upper_exc: Option<(&[u8], u32, usize)>,
+        io_tracker: Option<IoStatsTracker>,
+    ) -> Option<RunIteratorWithOVC> {
+        if self.total_entries == 0 {
+            return None;
+        }
+
+        let lower_inc_bound = lower_inc.map(KeyRunIdOffsetBound::from_components);
+        let upper_exc_bound = upper_exc.map(KeyRunIdOffsetBound::from_components);
+
+        let mut reader = if let Some(tracker) = io_tracker {
+            AlignedReader::from_fd_with_tracer(self.fd.clone(), Some(tracker)).unwrap()
+        } else {
+            AlignedReader::from_fd(self.fd.clone()).unwrap()
+        };
+
+        let (offset, start_key) = self.find_start_position(lower_inc_bound.as_ref()).unwrap();
+        let start_offset = self.start_bytes + offset;
+
+        if start_offset > 0 {
+            let aligned_offset = align_down(start_offset as u64, 4096) as usize;
+            let skip_bytes = start_offset - aligned_offset;
+            if aligned_offset > 0 {
+                reader.seek(aligned_offset as u64).unwrap();
+            }
+            Some(RunIteratorWithOVC {
+                reader,
+                run_id: self.run_id,
+                prev_key: start_key,
+                lower_inc: lower_inc_bound,
+                upper_exc: upper_exc_bound,
+                file_pos: aligned_offset,
+                run_len_bytes: self.total_bytes,
+                align_skip_bytes: skip_bytes,
+                run_start: self.start_bytes,
+                done: false,
+            })
+        } else {
+            Some(RunIteratorWithOVC {
+                reader,
+                run_id: self.run_id,
+                prev_key: start_key,
+                lower_inc: lower_inc_bound,
+                upper_exc: upper_exc_bound,
+                file_pos: self.start_bytes,
+                run_len_bytes: self.total_bytes,
+                align_skip_bytes: 0,
+                run_start: self.start_bytes,
+                done: false,
+            })
+        }
+    }
 }
 
-struct RunIteratorWithOVC {
+pub struct RunIteratorWithOVC {
     reader: AlignedReader,
     run_id: u32,
     prev_key: Vec<u8>,
@@ -618,6 +650,177 @@ impl Iterator for RunIteratorWithOVC {
     }
 }
 
+use crate::sort::ovc::merge::MergeSource;
+
+impl MergeSource for RunIteratorWithOVC {
+    fn next_key_into(&mut self, key: &mut Vec<u8>) -> Option<(OVCU32, usize)> {
+        use std::io::ErrorKind;
+
+        if self.done {
+            return None;
+        }
+
+        // Skip alignment bytes on first call
+        if self.align_skip_bytes > 0 {
+            let mut skip_buf = vec![0u8; self.align_skip_bytes];
+            self.reader
+                .read_exact(&mut skip_buf)
+                .expect("Failed to skip bytes after seek");
+            self.file_pos += self.align_skip_bytes;
+            self.align_skip_bytes = 0;
+        }
+
+        loop {
+            // Check if we've read all data for this run
+            if self.run_len_bytes > 0 && self.file_pos - self.run_start >= self.run_len_bytes {
+                self.done = true;
+                return None;
+            }
+
+            // Read OVC
+            let mut ovc_bytes = [0u8; 4];
+            match self.reader.read_exact(&mut ovc_bytes) {
+                Ok(_) => {}
+                Err(e) if e.kind() == ErrorKind::UnexpectedEof => {
+                    self.done = true;
+                    return None;
+                }
+                Err(e) => panic!("Failed to read OVC: {}", e),
+            }
+            let ovc = OVCU32::from_le_bytes(ovc_bytes);
+            let cur_offset = self.file_pos - self.run_start;
+
+            // Duplicate key: no key_len field
+            if ovc.flag() == OVCFlag::DuplicateValue {
+                let mut value_len_bytes = [0u8; 4];
+                self.reader
+                    .read_exact(&mut value_len_bytes)
+                    .expect("Failed to read value length");
+                let value_len = u32::from_le_bytes(value_len_bytes) as usize;
+
+                let key_ref = &self.prev_key;
+
+                // Range check
+                if let Some(lb) = &self.lower_inc {
+                    if lb.lt(key_ref, self.run_id, cur_offset) {
+                        // Skip value and continue
+                        let new_pos = self.reader.position().saturating_add(value_len as u64);
+                        self.reader.seek(new_pos).expect("Failed to skip value");
+                        self.file_pos += 4 + 4 + value_len;
+                        continue;
+                    }
+                }
+                if let Some(ub) = &self.upper_exc {
+                    if ub.ge(key_ref, self.run_id, cur_offset) {
+                        self.done = true;
+                        return None;
+                    }
+                }
+
+                // Copy prev_key into the provided buffer
+                key.resize(self.prev_key.len(), 0);
+                key.copy_from_slice(&self.prev_key);
+
+                // Header bytes consumed: ovc(4) + value_len(4) = 8
+                // Value bytes NOT consumed yet (reader is at value start)
+                // We track the header bytes; value bytes tracked in copy_value_to/skip_value
+                self.file_pos += 4 + 4;
+
+                return Some((ovc, value_len));
+            }
+
+            // Normal/initial key: read key_len + value_len + key
+            let mut key_len_bytes = [0u8; 4];
+            self.reader
+                .read_exact(&mut key_len_bytes)
+                .expect("Failed to read key length");
+            let truncated_key_len = u32::from_le_bytes(key_len_bytes) as usize;
+
+            let mut value_len_bytes = [0u8; 4];
+            self.reader
+                .read_exact(&mut value_len_bytes)
+                .expect("Failed to read value length");
+            let value_len = u32::from_le_bytes(value_len_bytes) as usize;
+
+            let offset = match ovc.flag() {
+                OVCFlag::EarlyFence | OVCFlag::LateFence => {
+                    panic!("EarlyFence and LateFence OVC flags are not supported");
+                }
+                OVCFlag::InitialValue => 0,
+                OVCFlag::NormalValue => ovc.offset(),
+                OVCFlag::DuplicateValue => unreachable!(),
+            };
+
+            // Reconstruct full key into the provided buffer
+            key.resize(offset + truncated_key_len, 0);
+            key[..offset].copy_from_slice(&self.prev_key[..offset]);
+
+            self.reader
+                .read_exact(&mut key[offset..])
+                .expect("Failed to read key");
+
+            // Update prev_key
+            self.prev_key.resize(key.len(), 0);
+            self.prev_key.copy_from_slice(key);
+
+            // Range check
+            if let Some(lb) = &self.lower_inc {
+                if lb.lt(key, self.run_id, cur_offset) {
+                    // Skip value and continue
+                    let new_pos = self.reader.position().saturating_add(value_len as u64);
+                    self.reader.seek(new_pos).expect("Failed to skip value");
+                    self.file_pos += 4 + 8 + truncated_key_len + value_len;
+                    continue;
+                }
+            }
+            if let Some(ub) = &self.upper_exc {
+                if ub.ge(key, self.run_id, cur_offset) {
+                    self.done = true;
+                    return None;
+                }
+            }
+
+            // Header bytes consumed: ovc(4) + key_len(4) + value_len(4) + key
+            // Value bytes NOT consumed yet
+            self.file_pos += 4 + 8 + truncated_key_len;
+
+            return Some((ovc, value_len));
+        }
+    }
+
+    fn copy_value_to(&mut self, writer: &mut dyn std::io::Write, len: usize) {
+        use std::io::BufRead;
+        if len == 0 {
+            return;
+        }
+        // Zero-copy transfer: pass slices from reader's internal 64KB buffer
+        // directly to writer, avoiding any intermediate heap/stack buffer.
+        let mut remaining = len;
+        while remaining > 0 {
+            let buf = self
+                .reader
+                .fill_buf()
+                .expect("Failed to fill reader buffer");
+            let available = buf.len().min(remaining);
+            writer
+                .write_all(&buf[..available])
+                .expect("Failed to write value bytes");
+            self.reader.consume(available);
+            remaining -= available;
+        }
+        self.file_pos += len;
+    }
+
+    fn skip_value(&mut self, len: usize) {
+        if len == 0 {
+            return;
+        }
+        let new_pos = self.reader.position().saturating_add(len as u64);
+        self.reader.seek(new_pos).expect("Failed to skip value");
+        self.file_pos += len;
+    }
+}
+
 impl RunSummary for RunWithOVC {
     fn total_entries(&self) -> usize {
         self.total_entries
@@ -660,7 +863,7 @@ mod tests {
 
         assert_eq!(run.total_entries, 0);
         assert_eq!(run.total_bytes, 0);
-        assert!(run.sparse_index.is_empty());
+        assert!(run.sparse_index().is_empty());
     }
 
     #[test]
@@ -763,9 +966,12 @@ mod tests {
         let fd = create_test_file("test_sparse_index.dat");
         let writer = AlignedWriter::from_fd(fd.clone()).unwrap();
 
-        let mut run = RunWithOVC::from_writer(writer).unwrap();
         let indexing_interval = 5;
-        run.indexing_interval = IndexingInterval::records(indexing_interval);
+        let mut run = RunWithOVC::from_writer_with_indexing_interval(
+            writer,
+            IndexingInterval::records(indexing_interval),
+        )
+        .unwrap();
 
         // Add more entries than reservoir size
         for i in 0..20 {
@@ -778,21 +984,21 @@ mod tests {
 
         // Sparse index should have entries based on sampling interval
         // With interval 5 and 20 entries (0-19), we sample at: 0, 5, 10, 15
+        let si = run.sparse_index();
         let expected_entries = (0..20).filter(|&i| i % indexing_interval == 0).count();
-        assert_eq!(run.sparse_index.len(), expected_entries);
+        assert_eq!(si.len(), expected_entries);
 
-        let first_entry = run.sparse_index.first().unwrap();
-        assert_eq!(first_entry.key, b"key_00");
+        assert_eq!(si.key(0), b"key_00");
 
-        for (i, entry) in run.sparse_index.iter().enumerate() {
+        for i in 0..si.len() {
             let expected_index = i * indexing_interval;
             let expected_key = format!("key_{:02}", expected_index);
-            assert_eq!(entry.key, expected_key.as_bytes());
+            assert_eq!(si.key(i), expected_key.as_bytes());
         }
 
         // Sparse index should be sorted by file offset
-        for i in 1..run.sparse_index.len() {
-            assert!(run.sparse_index[i].file_offset >= run.sparse_index[i - 1].file_offset);
+        for i in 1..si.len() {
+            assert!(si.file_offset(i) >= si.file_offset(i - 1));
         }
     }
 
@@ -816,13 +1022,14 @@ mod tests {
         let writer = run.finalize_write();
         drop(writer);
 
+        let si = run.sparse_index();
         let expected_entries = (total_entries + stride - 1) / stride;
-        assert_eq!(run.sparse_index.len(), expected_entries);
-        assert_eq!(run.sparse_index.first().unwrap().file_offset, 0);
-        for (i, entry) in run.sparse_index.iter().enumerate() {
+        assert_eq!(si.len(), expected_entries);
+        assert_eq!(si.file_offset(0), 0);
+        for i in 0..si.len() {
             let expected_index = i * stride;
             let expected_key = format!("{:04}", expected_index);
-            assert_eq!(entry.key, expected_key.as_bytes());
+            assert_eq!(si.key(i), expected_key.as_bytes());
         }
     }
 
@@ -845,11 +1052,8 @@ mod tests {
         let writer = run.finalize_write();
         drop(writer);
 
-        let offsets: Vec<usize> = run
-            .sparse_index
-            .iter()
-            .map(|entry| entry.file_offset)
-            .collect();
+        let si = run.sparse_index();
+        let offsets: Vec<usize> = (0..si.len()).map(|i| si.file_offset(i)).collect();
         assert_eq!(offsets[0], 0);
         assert!(offsets.len() > 2);
         for pair in offsets.windows(2) {
@@ -865,20 +1069,10 @@ mod tests {
         let mut run = RunWithOVC::from_writer(writer).unwrap();
 
         // Manually create sparse index for testing
-        run.sparse_index = vec![
-            IndexEntry {
-                key: b"b".to_vec(),
-                file_offset: 0,
-            },
-            IndexEntry {
-                key: b"c".to_vec(),
-                file_offset: 100,
-            },
-            IndexEntry {
-                key: b"e".to_vec(),
-                file_offset: 200,
-            },
-        ];
+        let si = run.sparse_index.get_mut();
+        si.push(b"b", 0);
+        si.push(b"c", 100);
+        si.push(b"e", 200);
 
         let b_a = KeyRunIdOffsetBound::from_components((b"a", 0, 0));
         let b_b = KeyRunIdOffsetBound::from_components((b"b", 0, 0));

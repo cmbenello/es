@@ -1,6 +1,6 @@
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 use std::sync::atomic::Ordering;
+use std::sync::{Arc, Barrier};
 use std::thread;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
@@ -13,6 +13,7 @@ use crate::sort::core::run_format::{
     IndexingInterval, KeyRunIdOffsetBound, MultiSparseIndexes, RUN_ID_COUNTER, SparseIndexRef,
     cmp_key_run_offset,
 };
+use crate::sort::core::sparse_index::SparseIndexPagePool;
 use crate::sort::run_sink::RunSink;
 use crate::{
     MergeStats, RunGenerationStats, RunInfo, SortInput, SortOutput, SortStats, TempDirInfo,
@@ -186,6 +187,9 @@ pub trait SortHooks: Clone + Send + Sync + 'static {
         dir: &Path,
         io_tracker: Arc<IoStatsTracker>,
         discard_output: bool,
+        page_pool: Arc<SparseIndexPagePool>,
+        barrier: Arc<Barrier>,
+        merge_threads: usize,
     ) -> Result<(Self::MergeableRun, u128), String>;
 
     fn sparse_indexes<'a>(&self, run: &'a Self::MergeableRun) -> MultiSparseIndexes<'a>;
@@ -199,6 +203,16 @@ pub trait SortHooks: Clone + Send + Sync + 'static {
         sink: &mut Self::Sink,
         run_gen_mem: usize,
     ) -> crate::replacement_selection::ReplacementSelectionStats;
+
+    /// Set how many threads will read this run's sparse index.
+    fn set_sparse_index_readers(&self, _run: &Self::MergeableRun, _count: usize) {}
+
+    /// Decrement the sparse index reader count; last thread frees the memory.
+    fn release_sparse_index(&self, _run: &Self::MergeableRun) {}
+
+    /// Decrement sparse index reader count; last thread drains pages to pool.
+    fn release_sparse_index_to_pool(&self, _run: &Self::MergeableRun, _pool: &SparseIndexPagePool) {
+    }
 }
 
 pub struct SorterCore<H: SortHooks> {
@@ -653,6 +667,16 @@ fn merge_once_with_hooks<H: SortHooks>(
         merge_threads
     );
 
+    // Set sparse index reader counts before sharing across threads.
+    // Each thread will release its count after computing partitions + creating iterators.
+    for run in &output_runs {
+        hooks.set_sparse_index_readers(run, merge_threads);
+    }
+
+    // Create page pool and barrier for sparse index memory recycling.
+    let page_pool = Arc::new(SparseIndexPagePool::new());
+    let barrier = Arc::new(Barrier::new(merge_threads));
+
     let runs_arc = Arc::new(output_runs);
     let mut merge_handles = vec![];
 
@@ -668,6 +692,8 @@ fn merge_once_with_hooks<H: SortHooks>(
         let io_tracker = Arc::clone(&thread_io_tracker);
         let hooks = hooks.clone();
         let run_id = run_id_base + thread_id as u32;
+        let page_pool = Arc::clone(&page_pool);
+        let barrier = Arc::clone(&barrier);
 
         let handle = thread::spawn(move || {
             let indexes: Vec<_> = runs.iter().map(|run| hooks.sparse_indexes(run)).collect();
@@ -750,6 +776,9 @@ fn merge_once_with_hooks<H: SortHooks>(
                     &dir,
                     io_tracker,
                     discard_output,
+                    page_pool,
+                    barrier,
+                    merge_threads,
                 )
                 .map(|(run, thread_time)| {
                     let io_stats = thread_io_tracker.get_detailed_stats();
