@@ -162,7 +162,7 @@ run_bench() {
     local bin_pid
     bin_pid=$(cat "$pid_file")
 
-    # Poll RSS every 5s; write "elapsed_ms rss_kb" to mem log
+    # Poll RSS every 1s; write "elapsed_ms rss_kb" to mem log
     (
       while kill -0 "$bin_pid" 2>/dev/null; do
         local rss elapsed_ms now_ms
@@ -170,7 +170,7 @@ run_bench() {
         now_ms=$(date +%s%3N)
         elapsed_ms=$(( now_ms - start_ms ))
         [[ -n "$rss" ]] && echo "$elapsed_ms $rss"
-        sleep 5
+        sleep 1
       done
     ) > "$mem_log" &
     local poll_pid=$!
@@ -201,11 +201,21 @@ run_bench() {
 }
 
 # ==============================================================================
+# EXPERIMENT 0: SINGLE RUN WITH MEMORY TRACKING (2GB RAM, 44 Threads)
+# ==============================================================================
+echo "=== EXP 0: MEMORY TRACKING (2GB RAM, 44 THREADS) ==="
+SAVED_BENCHMARK_RUNS=$BENCHMARK_RUNS
+BENCHMARK_RUNS=1
+run_bench "Exp0" "44" "44" "2" "" "true"
+BENCHMARK_RUNS=$SAVED_BENCHMARK_RUNS
+cooldown
+
+# ==============================================================================
 # EXPERIMENT 1: SCALABILITY TRAP (Fixed 10GB RAM)
 # ==============================================================================
 echo "=== EXP 1: SCALABILITY (10GB RAM) ==="
 for t in 4 8 16 24 32 40 44; do
-  run_bench "Exp1" "$t" "$t" "10" "--discard-final-output" "true"
+  run_bench "Exp1" "$t" "$t" "10" "--discard-final-output"
   cooldown
 done
 
@@ -213,27 +223,17 @@ done
 # EXPERIMENT 2: MEMORY CLIFF (Fixed 44 Threads)
 # ==============================================================================
 echo "=== EXP 2: MEMORY CLIFF (44 THREADS) ==="
-for m in 32 24 16 8 6 4 2 1; do
+for m in 32 24 16 8 6 4 2; do
   run_bench "Exp2" "44" "44" "$m"
   cooldown
 done
 
-
 # ==============================================================================
-# EXPERIMENT 3: OVC VS NO-OVC (44 Threads)
+# EXPERIMENT 3: OVC VS NO-OVC (2GB RAM)
 # ==============================================================================
-echo "=== EXP 3: NO-OVC (44 THREADS) ==="
-for m in 32 24 16 8 6 4 2 1; do
-  run_bench "Exp3" "44" "44" "$m" "--ovc=false"
-  cooldown
-done
-
-# ==============================================================================
-# EXPERIMENT 3.1: OVC VS NO-OVC (2GB RAM)
-# ==============================================================================
-echo "=== EXP 3.1: NO-OVC (Scalability, 2GB RAM) ==="
+echo "=== EXP 3: NO-OVC (Scalability, 2GB RAM) ==="
 for t in 4 8 16 24 32 40 44; do
-  run_bench "Exp3.1" "$t" "$t" "2" "--ovc=false"
+  run_bench "Exp3" "$t" "$t" "2" "--ovc=false"
   cooldown
 done
 
@@ -253,6 +253,8 @@ total_grid_configs=$((${#RUNGEN_GRID[@]} * ${#MERGE_GRID[@]}))
 
 echo "Grid dimensions: ${#RUNGEN_GRID[@]} × ${#MERGE_GRID[@]} = $total_grid_configs configs"
 
+SAVED_BENCHMARK_RUNS=$BENCHMARK_RUNS
+BENCHMARK_RUNS=1
 for rg in "${RUNGEN_GRID[@]}"; do
   for mg in "${MERGE_GRID[@]}"; do
     config_count=$((config_count + 1))
@@ -262,5 +264,6 @@ for rg in "${RUNGEN_GRID[@]}"; do
     cooldown
   done
 done
+BENCHMARK_RUNS=$SAVED_BENCHMARK_RUNS
 
 echo "All benchmarks complete. Results in: $OUT_DIR"
