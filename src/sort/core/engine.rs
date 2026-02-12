@@ -752,22 +752,22 @@ fn merge_once_with_hooks<H: SortHooks>(
                     .map(|b| (b.key.as_slice(), b.run_id, b.offset)),
             };
 
-            let format_bound = |bound: Option<(&[u8], u32, usize)>| -> String {
-                match bound {
-                    None => "None".to_string(),
-                    Some((key, run_id, offset)) => {
-                        let key_str = String::from_utf8_lossy(key);
-                        format!("(\"{}\", run={}, offset={})", key_str, run_id, offset)
-                    }
-                }
-            };
+            // let format_bound = |bound: Option<(&[u8], u32, usize)>| -> String {
+            //     match bound {
+            //         None => "None".to_string(),
+            //         Some((key, run_id, offset)) => {
+            //             let key_str = String::from_utf8_lossy(key);
+            //             format!("(\"{}\", run={}, offset={})", key_str, run_id, offset)
+            //         }
+            //     }
+            // };
 
-            println!(
-                "Thread {}: partitioning with lower {} and upper {}",
-                thread_id,
-                format_bound(lower_inc),
-                format_bound(upper_exc)
-            );
+            // println!(
+            //     "Thread {}: partitioning with lower {} and upper {}",
+            //     thread_id,
+            //     format_bound(lower_inc),
+            //     format_bound(upper_exc)
+            // );
 
             hooks
                 .merge_range(
