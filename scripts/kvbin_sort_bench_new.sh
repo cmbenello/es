@@ -84,9 +84,11 @@ run_bench() {
   local run_size_mb
   run_size_mb=$(echo "scale=2; ($MEM_GB * 1024) / $RUN_GEN_THREADS" | bc)
 
-  # FanIn <= (MemGB * 1024^2) / (MergeThreads * PageKB)
+  # 5% of memory reserved for sparse index; remaining 95% for I/O buffers.
+  # Each thread needs fanin input buffers + 1 output buffer.
+  # fanin = total * 0.95 / (threads * page_size) - 1
   local max_fanin
-  max_fanin=$(echo "($MEM_GB * 1024 * 1024) / ($MERGE_THREADS * $PAGE_SIZE_KB)" | bc)
+  max_fanin=$(echo "($MEM_GB * 1024 * 1024 * 95 / 100) / ($MERGE_THREADS * $PAGE_SIZE_KB) - 1" | bc)
 
   local name="${dataset}_${partition_type}_RunGen${RUN_GEN_THREADS}_Merge${MERGE_THREADS}_Mem${MEM_GB}GB"
   local temp_dir="${OUT_DIR}/${name}_tmp"
