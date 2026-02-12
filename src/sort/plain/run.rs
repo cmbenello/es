@@ -622,6 +622,15 @@ impl crate::sort::plain::merge::PlainMergeSource for RunIterator {
         }
         self.file_pos += len;
     }
+
+    fn skip_value(&mut self, len: usize) {
+        if len == 0 {
+            return;
+        }
+        let new_pos = self.reader.position().saturating_add(len as u64);
+        self.reader.seek(new_pos).expect("Failed to skip value");
+        self.file_pos += len;
+    }
 }
 
 #[cfg(test)]

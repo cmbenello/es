@@ -13,7 +13,7 @@ use crate::sort::core::run_format::{
     IndexingInterval, KeyRunIdOffsetBound, MultiSparseIndexes, RUN_ID_COUNTER, SparseIndexRef,
     cmp_key_run_offset,
 };
-use crate::sort::core::sparse_index::SparseIndexPagePool;
+use crate::sort::core::sparse_index::{SPARSE_INDEX_PAGE_SIZE, SparseIndexPagePool};
 use crate::sort::run_sink::RunSink;
 use crate::{
     MergeStats, RunGenerationStats, RunInfo, SortInput, SortOutput, SortStats, TempDirInfo,
@@ -652,9 +652,13 @@ fn merge_once_with_hooks<H: SortHooks>(
 
     let (sparse_entries, avg_sparse_entries_per_run) =
         sparse_index_entry_stats(hooks, &output_runs);
+    let (sparse_pages, sparse_memory_bytes) = sparse_index_memory_stats(hooks, &output_runs);
     println!(
-        "Merge input sparse index: {} entries | avg sparse entries/run: {:.2}",
-        sparse_entries, avg_sparse_entries_per_run
+        "Merge input sparse index: {} entries | avg sparse entries/run: {:.2} | {} pages ({:.2} MB)",
+        sparse_entries,
+        avg_sparse_entries_per_run,
+        sparse_pages,
+        sparse_memory_bytes as f64 / (1024.0 * 1024.0),
     );
     warn_if_sparse_index_too_sparse("merge input", avg_sparse_entries_per_run);
 
@@ -998,6 +1002,18 @@ fn merge_once_with_hooks<H: SortHooks>(
     };
 
     Ok((hooks.combine_runs(output_runs), merge_stats))
+}
+
+fn sparse_index_memory_stats<H: SortHooks>(hooks: &H, runs: &[H::MergeableRun]) -> (usize, usize) {
+    let mut total_pages = 0usize;
+    for run in runs {
+        let indexes = hooks.sparse_indexes(run);
+        total_pages = total_pages.saturating_add(indexes.page_count());
+    }
+    (
+        total_pages,
+        total_pages.saturating_mul(SPARSE_INDEX_PAGE_SIZE),
+    )
 }
 
 fn sparse_index_entry_stats<H: SortHooks>(hooks: &H, runs: &[H::MergeableRun]) -> (usize, f64) {

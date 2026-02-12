@@ -87,6 +87,9 @@ pub trait PlainMergeSource: Send {
 
     /// Copy `len` value bytes directly from this source's reader to `writer`.
     fn copy_value_to(&mut self, writer: &mut dyn std::io::Write, len: usize);
+
+    /// Skip `len` value bytes (advance past value without reading).
+    fn skip_value(&mut self, len: usize);
 }
 
 /// Key-only entry for the plain zero-copy merge tree.
@@ -162,6 +165,41 @@ impl<S: PlainMergeSource> ZeroCopyMergePlain<S> {
             sources,
             spare_key,
         }
+    }
+
+    /// Iterate through all records in merge order, discarding values.
+    /// Returns the total number of entries consumed.
+    pub fn discard(mut self) -> usize {
+        let mut entries = 0usize;
+        loop {
+            let Some((winner_entry, source_idx)) = self.tree.peek() else {
+                break;
+            };
+            let winner = match winner_entry {
+                Sentineled::Normal(entry) => entry,
+                _ => break,
+            };
+            let value_len = winner.value_len;
+
+            // Skip value bytes in the source
+            self.sources[source_idx].skip_value(value_len);
+            entries = entries.saturating_add(1);
+
+            // Advance: read next key from winner's source
+            if let Some(next_value_len) =
+                self.sources[source_idx].next_key_into(&mut self.spare_key)
+            {
+                let new_key =
+                    PlainMergeKey::new(std::mem::take(&mut self.spare_key), next_value_len);
+                let old_winner = self.tree.push(Sentineled::new(new_key));
+                self.spare_key = old_winner.inner().take_key();
+            } else {
+                if let Some(old) = self.tree.mark_current_exhausted() {
+                    self.spare_key = old.inner().take_key();
+                }
+            }
+        }
+        entries
     }
 
     /// Merge all records and write them to the output run.

@@ -1,4 +1,3 @@
-use std::hint::black_box;
 use std::path::Path;
 use std::sync::Arc;
 use std::sync::Barrier;
@@ -11,7 +10,7 @@ use crate::diskio::io_stats::IoStatsTracker;
 use crate::ovc::offset_value_coding_32::OVCU32;
 use crate::sort::core::engine::SortHooks;
 use crate::sort::core::engine::{RunSummary, Scanner};
-use crate::sort::core::sparse_index::{SPARSE_INDEX_PAGE_SIZE, SparseIndex, SparseIndexPagePool};
+use crate::sort::core::sparse_index::{SparseIndex, SparseIndexPagePool};
 use crate::sort::run_sink::RunSink;
 use crate::{SortOutput, SortStats};
 
@@ -108,41 +107,34 @@ pub trait RunFormat: Clone + Send + Sync + 'static {
     /// drains the pages to the given pool instead of dropping them.
     fn release_sparse_index_to_pool(_run: &Self::Run, _pool: &SparseIndexPagePool) {}
 
-    /// Perform a direct merge of runs into the output run, bypassing the
-    /// iterator-based path. Returns `true` if the merge was handled, `false`
-    /// to fall back to the iterator-based approach.
-    /// Implementations are responsible for releasing sparse indexes.
-    fn direct_merge(
-        _runs: &[MergeableRun<Self>],
-        _output_run: &mut Self::Run,
-        _lower_bound: Option<(&[u8], u32, usize)>,
-        _upper_bound: Option<(&[u8], u32, usize)>,
-        _io_tracker: Option<IoStatsTracker>,
-    ) -> bool
-    where
-        Self: Sized,
-    {
-        false
-    }
+    /// Create merge sources, release sparse indexes to pool, barrier-sync,
+    /// redistribute pages, then execute the merge.
+    fn create_merge_sources_and_execute(
+        runs: &[MergeableRun<Self>],
+        output_run: &mut Self::Run,
+        lower_bound: Option<(&[u8], u32, usize)>,
+        upper_bound: Option<(&[u8], u32, usize)>,
+        io_tracker: Option<IoStatsTracker>,
+        page_pool: &SparseIndexPagePool,
+        barrier: &Barrier,
+        thread_id: usize,
+        merge_threads: usize,
+    ) where
+        Self: Sized;
 
     /// Create merge sources, release sparse indexes to pool, barrier-sync,
-    /// redistribute pages, then execute the merge. Returns `true` if handled.
-    fn create_merge_sources_and_execute(
-        _runs: &[MergeableRun<Self>],
-        _output_run: &mut Self::Run,
-        _lower_bound: Option<(&[u8], u32, usize)>,
-        _upper_bound: Option<(&[u8], u32, usize)>,
-        _io_tracker: Option<IoStatsTracker>,
-        _page_pool: &SparseIndexPagePool,
-        _barrier: &Barrier,
-        _thread_id: usize,
-        _merge_threads: usize,
-    ) -> bool
+    /// then iterate through all records discarding values. Returns entry count.
+    fn create_merge_sources_and_discard(
+        runs: &[MergeableRun<Self>],
+        lower_bound: Option<(&[u8], u32, usize)>,
+        upper_bound: Option<(&[u8], u32, usize)>,
+        io_tracker: Option<IoStatsTracker>,
+        page_pool: &SparseIndexPagePool,
+        barrier: &Barrier,
+        thread_id: usize,
+    ) -> usize
     where
-        Self: Sized,
-    {
-        false
-    }
+        Self: Sized;
 
     /// Seed the output run's sparse index with pre-allocated pages.
     fn seed_sparse_index_buffer(
@@ -429,6 +421,11 @@ impl<'a> MultiSparseIndexes<'a> {
 
     pub fn total_bytes(&self) -> usize {
         self.total_bytes
+    }
+
+    /// Total number of pages held by all underlying sparse indexes.
+    pub fn page_count(&self) -> usize {
+        self.segments.iter().map(|s| s.index.page_count()).sum()
     }
 
     pub fn global_offset_at(&self, index: usize) -> Option<usize> {
@@ -969,40 +966,15 @@ impl<F: RunFormat> SortHooks for FormatSortHooks<F> {
         let thread_start = Instant::now();
 
         if discard_output {
-            // Discard mode: use iterators, iterate through all records without writing
-            let iterators: Vec<_> = runs
-                .iter()
-                .map(|run| {
-                    run.scan_range_with_io_tracker(
-                        lower_bound,
-                        upper_bound,
-                        Some((*io_tracker).clone()),
-                    )
-                })
-                .collect();
-
-            // Release sparse index pages to pool
-            for run in runs.iter() {
-                run.release_sparse_index_to_pool(&page_pool);
-            }
-
-            // Wait for all threads to release, then discard pooled pages
-            barrier.wait();
-            if thread_id == 0 {
-                let total = page_pool.len();
-                println!(
-                    "Sparse index page pool: {} pages ({:.2} MB)",
-                    total,
-                    (total * SPARSE_INDEX_PAGE_SIZE) as f64 / (1024.0 * 1024.0),
-                );
-            }
-
-            let merged_iter = F::merge_iterators(iterators);
-            let mut entries = 0usize;
-            for record in merged_iter {
-                entries = entries.saturating_add(1);
-                black_box(record);
-            }
+            let entries = F::create_merge_sources_and_discard(
+                &*runs,
+                lower_bound,
+                upper_bound,
+                Some((*io_tracker).clone()),
+                &page_pool,
+                &barrier,
+                thread_id,
+            );
 
             let thread_time_ms = thread_start.elapsed().as_millis();
             return Ok((
@@ -1035,12 +1007,7 @@ impl<F: RunFormat> SortHooks for FormatSortHooks<F> {
             );
         }
 
-        // Step 1: Create merge sources (uses sparse index for seek)
-        // Step 2: Release sparse index pages to pool
-        // Step 3: Barrier - wait for all threads
-        // Step 4: Redistribute pages from pool to output run
-        // Step 5: Execute merge
-        if !F::create_merge_sources_and_execute(
+        F::create_merge_sources_and_execute(
             &*runs,
             &mut output_run,
             lower_bound,
@@ -1050,54 +1017,7 @@ impl<F: RunFormat> SortHooks for FormatSortHooks<F> {
             &barrier,
             thread_id,
             merge_threads,
-        ) {
-            // Iterator-based fallback
-            let iterators: Vec<_> = runs
-                .iter()
-                .map(|run| {
-                    run.scan_range_with_io_tracker(
-                        lower_bound,
-                        upper_bound,
-                        Some((*io_tracker).clone()),
-                    )
-                })
-                .collect();
-
-            // Release sparse index pages to pool
-            for run in runs.iter() {
-                run.release_sparse_index_to_pool(&page_pool);
-            }
-
-            // Wait for all threads to release, then redistribute
-            barrier.wait();
-            let total = page_pool.len();
-            let budget_cap = F::sparse_index_budget_pages(&output_run);
-            if thread_id == 0 {
-                let taken = total.min(merge_threads * budget_cap);
-                let freed = total.saturating_sub(taken);
-                println!(
-                    "Sparse index page pool: {} pages ({:.2} MB), recycling {} pages ({:.2} MB), freeing {} pages ({:.2} MB)",
-                    total,
-                    (total * SPARSE_INDEX_PAGE_SIZE) as f64 / (1024.0 * 1024.0),
-                    taken,
-                    (taken * SPARSE_INDEX_PAGE_SIZE) as f64 / (1024.0 * 1024.0),
-                    freed,
-                    (freed * SPARSE_INDEX_PAGE_SIZE) as f64 / (1024.0 * 1024.0),
-                );
-            }
-            let per_thread = total / merge_threads;
-            let extra = total % merge_threads;
-            let fair_share = per_thread + if thread_id < extra { 1 } else { 0 };
-            let my_count = fair_share.min(budget_cap);
-            let my_pages = page_pool.take(my_count);
-            F::seed_sparse_index_buffer(&mut output_run, my_pages);
-
-            let merged_iter = F::merge_iterators(iterators);
-            let mut append_state = F::AppendState::default();
-            for record in merged_iter {
-                F::append_record(&mut append_state, &mut output_run, record);
-            }
-        }
+        );
 
         let writer = F::finalize_run(&mut output_run);
         drop(writer);

@@ -43,8 +43,8 @@ fn test_very_large_dataset() {
 
 #[test]
 fn test_pathological_key_distribution() {
-    let mut sorter = ExternalSorter::new(4, 1024 * 1024, 4, 10000, test_dir());
-    sorter.set_partition_type(es::sort::engine::PartitionType::CountBalanced);
+    let mut sorter = ExternalSorter::new(4, 64 * 1024, 4, 10000, test_dir());
+    sorter.set_partition_type(es::sort::engine::PartitionType::SizeBalanced);
 
     let mut data = Vec::new();
 
@@ -381,59 +381,4 @@ fn test_stress_file_handles() {
     for handle in handles {
         handle.join().unwrap();
     }
-}
-
-#[test]
-fn reproduce_size_partition_tail_imbalance() {
-    // Reproduce skewed partitions even with unique keys by combining:
-    // - low-cardinality prefix (lexicographic skew toward the tail)
-    // - large keys/values (sparser index under a small budget)
-    // This mirrors lineitem-style heavy tails where key-range partitioning skews.
-    let run_gen_mem = 10 * 1024 * 1024; // 1 MiB to force many runs
-    let mut sorter =
-        ExternalSorter::new_with_indexing_interval(4, run_gen_mem, 4, 10_000, 1000, test_dir());
-    sorter.set_partition_type(es::sort::engine::PartitionType::CountBalanced);
-    // sorter.set_discard_final_output(true);
-
-    let total = 5_000_000usize;
-    let heavy = (total as f64 * 0.95) as usize;
-    let mut data = Vec::with_capacity(total);
-
-    let long_suffix = "X".repeat(512);
-    for i in 0..heavy {
-        let key = format!("Z{:08}{}", i, long_suffix);
-        let value = vec![b'v'; 256];
-        data.push((key.into_bytes(), value));
-    }
-
-    for i in 0..(total - heavy) {
-        let key = format!("A{:08}", i);
-        let value = vec![b'v'; 16];
-        data.push((key.into_bytes(), value));
-    }
-
-    // Shuffle to avoid any accidental ordering advantages
-    use rand::seq::SliceRandom;
-    let mut rng = rand::rng();
-    data.shuffle(&mut rng);
-
-    let input = InMemInput { data };
-    let output = sorter.sort(Box::new(input)).unwrap();
-    let stats = output.stats();
-    let merge = stats
-        .per_merge_stats
-        .first()
-        .expect("expected at least one merge pass");
-
-    let total_entries: u64 = merge.merge_entry_num.iter().sum();
-    let avg_entries = total_entries as f64 / merge.merge_entry_num.len() as f64;
-    let max_entries = *merge.merge_entry_num.iter().max().unwrap_or(&0) as f64;
-    let imbalance = if avg_entries > 0.0 {
-        max_entries / avg_entries
-    } else {
-        0.0
-    };
-
-    println!("Partition entry imbalance (max/avg): {:.2}x", imbalance);
-    println!("{}", stats);
 }

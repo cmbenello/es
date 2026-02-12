@@ -170,15 +170,125 @@ impl RunFormat for OvcRunFormat {
         run.sparse_index().budget_pages()
     }
 
-    fn direct_merge(
-        _runs: &[GenericMergeableRun<Self>],
-        _output_run: &mut Self::Run,
-        _lower_bound: Option<(&[u8], u32, usize)>,
-        _upper_bound: Option<(&[u8], u32, usize)>,
-        _io_tracker: Option<IoStatsTracker>,
-    ) -> bool {
-        // No longer used; create_merge_sources_and_execute is used instead.
-        false
+    fn create_merge_sources_and_discard(
+        runs: &[GenericMergeableRun<Self>],
+        lower_bound: Option<(&[u8], u32, usize)>,
+        upper_bound: Option<(&[u8], u32, usize)>,
+        io_tracker: Option<IoStatsTracker>,
+        page_pool: &SparseIndexPagePool,
+        barrier: &Barrier,
+        thread_id: usize,
+    ) -> usize {
+        // Step 1: Create merge sources (reads sparse index for seek)
+        let mut sources = Vec::new();
+
+        for run in runs {
+            match run {
+                GenericMergeableRun::Single(r) => {
+                    if let Some(src) =
+                        r.scan_range_as_source(lower_bound, upper_bound, io_tracker.clone())
+                    {
+                        sources.push(src);
+                    }
+                }
+                GenericMergeableRun::RangePartitioned(sub_runs) => {
+                    let non_empty: Vec<&RunWithOVC> = sub_runs
+                        .iter()
+                        .filter(|r| r.start_key().is_some())
+                        .collect();
+
+                    if non_empty.is_empty() {
+                        continue;
+                    }
+
+                    let start_partition = if lower_bound.is_none() {
+                        0
+                    } else {
+                        let lb = lower_bound.unwrap();
+                        let mut ok: isize = -1;
+                        let mut ng: isize = non_empty.len() as isize;
+                        while (ng - ok).abs() > 1 {
+                            let mid = (ok + ng) / 2;
+                            let r = non_empty[mid as usize];
+                            let sk = (r.start_key().unwrap(), r.run_id(), 0usize);
+                            if cmp_key_run_offset(sk, lb) == std::cmp::Ordering::Less {
+                                ok = mid;
+                            } else {
+                                ng = mid;
+                            }
+                        }
+                        if ok == -1 { 0 } else { ok as usize }
+                    };
+
+                    let end_partition = if upper_bound.is_none() {
+                        non_empty.len()
+                    } else {
+                        let ub = upper_bound.unwrap();
+                        let mut ok: isize = non_empty.len() as isize;
+                        let mut ng: isize = -1;
+                        while (ng - ok).abs() > 1 {
+                            let mid = (ok + ng) / 2;
+                            let r = non_empty[mid as usize];
+                            let sk = (r.start_key().unwrap(), r.run_id(), 0usize);
+                            if matches!(
+                                cmp_key_run_offset(ub, sk),
+                                std::cmp::Ordering::Less | std::cmp::Ordering::Equal
+                            ) {
+                                ok = mid;
+                            } else {
+                                ng = mid;
+                            }
+                        }
+                        ok as usize
+                    };
+
+                    for sub_run in &non_empty[start_partition..end_partition] {
+                        if let Some(src) = sub_run.scan_range_as_source(
+                            lower_bound,
+                            upper_bound,
+                            io_tracker.clone(),
+                        ) {
+                            sources.push(src);
+                        }
+                    }
+                }
+                GenericMergeableRun::StatsOnly { .. } => {}
+            }
+        }
+
+        // Step 2: Release sparse index pages to pool
+        for run in runs {
+            run.release_sparse_index_to_pool(page_pool);
+        }
+
+        // Step 3: Barrier - wait for all threads to release
+        barrier.wait();
+
+        // Step 4: Discard pooled pages (print stats on thread 0)
+        if thread_id == 0 {
+            let total = page_pool.len();
+            println!(
+                "Sparse index page pool: {} pages ({:.2} MB)",
+                total,
+                (total * SPARSE_INDEX_PAGE_SIZE) as f64 / (1024.0 * 1024.0),
+            );
+        }
+
+        // Step 5: Execute discard merge
+        match sources.len() {
+            0 => 0,
+            1 => {
+                let mut source = sources.into_iter().next().unwrap();
+                let mut key = Vec::new();
+                let mut entries = 0usize;
+                while let Some((_ovc, value_len)) = source.next_key_into(&mut key) {
+                    source.skip_value(value_len);
+                    entries = entries.saturating_add(1);
+                }
+                entries
+            }
+            _ => ZeroCopyMergeWithOVC::new(sources).discard(),
+        }
     }
 
     fn create_merge_sources_and_execute(
@@ -191,7 +301,7 @@ impl RunFormat for OvcRunFormat {
         barrier: &Barrier,
         thread_id: usize,
         merge_threads: usize,
-    ) -> bool {
+    ) {
         // Step 1: Create merge sources (reads sparse index for seek)
         let mut sources = Vec::new();
 
@@ -316,8 +426,6 @@ impl RunFormat for OvcRunFormat {
                 ZeroCopyMergeWithOVC::new(sources).merge_into(output_run);
             }
         }
-
-        true
     }
 }
 

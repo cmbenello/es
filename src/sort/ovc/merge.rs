@@ -108,6 +108,54 @@ impl<S: MergeSource> ZeroCopyMergeWithOVC<S> {
         }
     }
 
+    /// Iterate through all records in merge order, discarding values.
+    /// Returns the total number of entries consumed.
+    pub fn discard(mut self) -> usize {
+        let mut entries = 0usize;
+        loop {
+            let Some((_, source_idx)) = self.tree.peek() else {
+                break;
+            };
+            let value_len = self.tree.peek().unwrap().0.value_len;
+
+            // Skip value bytes in the source
+            self.sources[source_idx].skip_value(value_len);
+            entries = entries.saturating_add(1);
+
+            // Advance: read next key from winner's source, handling duplicates
+            loop {
+                let Some((next_ovc, next_value_len)) =
+                    self.sources[source_idx].next_key_into(&mut self.spare_key)
+                else {
+                    // Source exhausted
+                    if let Some(old) = self.tree.mark_current_exhausted() {
+                        self.spare_key = old.take_key();
+                    }
+                    break;
+                };
+
+                if next_ovc.is_duplicate_value() {
+                    // Duplicate: skip its value too, count it
+                    let _swapped_ovc = self.tree.replace_top_ovc(next_ovc);
+                    self.sources[source_idx].skip_value(next_value_len);
+                    entries = entries.saturating_add(1);
+                    // Continue loop to check for more consecutive duplicates
+                } else {
+                    // Non-duplicate: push new key to tree, recycle old winner's key
+                    let new_key = OVCKey32::new(
+                        next_ovc,
+                        std::mem::take(&mut self.spare_key),
+                        next_value_len,
+                    );
+                    let old_winner = self.tree.push(new_key);
+                    self.spare_key = old_winner.take_key();
+                    break;
+                }
+            }
+        }
+        entries
+    }
+
     /// Merge all records and write them to the output run.
     ///
     /// For each record: writes OVC+key header from the tree, then copies value
