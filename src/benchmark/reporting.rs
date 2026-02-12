@@ -143,8 +143,8 @@ fn print_merge_operations_table(result: &BenchmarkResult, max_merges: usize) {
 
     println!("\n{}", "=".repeat(160));
     println!(
-        "Merge Operations Summary (showing last {} of {} merge passes)",
-        merges_to_show, max_merges
+        "Merge Operations Summary — {} (showing last {} of {} merge passes)",
+        result.config.config_name, merges_to_show, max_merges
     );
     println!("{}", "=".repeat(160));
 
@@ -165,7 +165,7 @@ fn print_merge_operations_table(result: &BenchmarkResult, max_merges: usize) {
 
     // Print each benchmark run on one line
     for (run_idx, sort_stats) in result.stats.iter().enumerate() {
-        let name = format!("{}[{}]", result.config.config_name, run_idx + 1);
+        let name = format!("Run {}", run_idx + 1);
         let mut line = format!("{:<20}", name);
 
         for mi in start_merge..max_merges {
@@ -211,8 +211,7 @@ fn print_merge_operations_table(result: &BenchmarkResult, max_merges: usize) {
 
     // Print aggregate statistics
     println!("{}", "-".repeat(160));
-    let aggregate_name = format!("{}[avg]", result.config.config_name);
-    let mut agg_line = format!("{:<20}", aggregate_name);
+    let mut agg_line = format!("{:<20}", "avg");
 
     for mi in start_merge..max_merges {
         let mut part_avgs: Vec<u64> = Vec::new();
@@ -282,7 +281,7 @@ fn print_merge_operations_table(result: &BenchmarkResult, max_merges: usize) {
 /// Print detailed I/O statistics table
 fn print_detailed_io_statistics_table(result: &BenchmarkResult, max_merges: usize) {
     println!("\n{}", "=".repeat(160));
-    println!("Detailed I/O Statistics");
+    println!("Detailed I/O Statistics — {}", result.config.config_name);
     println!("{}", "=".repeat(160));
 
     // Build header dynamically based on number of merges
@@ -315,7 +314,7 @@ fn print_detailed_io_statistics_table(result: &BenchmarkResult, max_merges: usiz
             .map(|io| io.write_bytes as f64 / (1024.0 * 1024.0))
             .unwrap_or(0.0);
 
-        let name = format!("{}[{}]", result.config.config_name, run_idx + 1);
+        let name = format!("Run {}", run_idx + 1);
         let mut io_line = format!("{:<20} {:<12.1} {:<12.1}", name, rg_read_mb, rg_write_mb);
 
         for mi in 0..max_merges {
@@ -346,8 +345,6 @@ fn print_detailed_io_statistics_table(result: &BenchmarkResult, max_merges: usiz
 
     // Print aggregate statistics
     println!("{}", "-".repeat(160));
-    let aggregate_name = format!("{}[avg]", result.config.config_name);
-
     let num_runs = result.stats.len() as f64;
     let avg_rg_read_mb = result
         .stats
@@ -376,7 +373,7 @@ fn print_detailed_io_statistics_table(result: &BenchmarkResult, max_merges: usiz
 
     let mut agg_io_line = format!(
         "{:<20} {:<12.1} {:<12.1}",
-        aggregate_name, avg_rg_read_mb, avg_rg_write_mb
+        "avg", avg_rg_read_mb, avg_rg_write_mb
     );
 
     for mi in 0..max_merges {
@@ -426,7 +423,10 @@ fn print_detailed_io_statistics_table(result: &BenchmarkResult, max_merges: usiz
 /// Print run generation time breakdown table (total, load, sort, store)
 fn print_run_gen_breakdown_table(result: &BenchmarkResult) {
     println!("\n{}", "=".repeat(100));
-    println!("Run Generation Time Breakdown");
+    println!(
+        "Run Generation Time Breakdown — {}",
+        result.config.config_name
+    );
     println!("{}", "=".repeat(100));
 
     // Header
@@ -438,7 +438,7 @@ fn print_run_gen_breakdown_table(result: &BenchmarkResult) {
 
     // Per-run lines
     for (run_idx, s) in result.stats.iter().enumerate() {
-        let name = format!("{}[{}]", result.config.config_name, run_idx + 1);
+        let name = format!("Run {}", run_idx + 1);
         let total_s = s.run_gen_stats.time_ms as f64 / 1000.0;
         let load_s = s.run_gen_stats.load_time_ms as f64 / 1000.0;
         let sort_s = s.run_gen_stats.sort_time_ms as f64 / 1000.0;
@@ -478,17 +478,16 @@ fn print_run_gen_breakdown_table(result: &BenchmarkResult) {
         .sum::<f64>()
         / runs;
 
-    let agg_name = format!("{}[avg]", result.config.config_name);
     println!(
         "{:<20} {:<12.2} {:<12.2} {:<12.2} {:<12.2}",
-        agg_name, avg_total_s, avg_load_s, avg_sort_s, avg_store_s
+        "avg", avg_total_s, avg_load_s, avg_sort_s, avg_store_s
     );
     println!("{}", "=".repeat(100));
 }
 
 pub fn print_benchmark_summary(result: &BenchmarkResult) {
     println!("\n{}", "=".repeat(160));
-    println!("Benchmark Results Summary");
+    println!("Benchmark Results Summary — {}", result.config.config_name);
     println!("{}", "=".repeat(160));
     println!(
         "{:<20} {:<10} {:<10} {:<10} {:<10} {:<10} {:<12} {:<10} {:<12} {:<16} {:<10} {:<10}",
@@ -564,7 +563,7 @@ pub fn print_benchmark_summary(result: &BenchmarkResult) {
             0.0
         };
 
-        let name = format!("{}[{}]", cfg.config_name, run_idx + 1);
+        let name = format!("Run {}", run_idx + 1);
 
         println!(
             "{:<20} {:<10.1} {:<10} {:<10} {:<10} {:<12.2} {:<10.2} {:<10.2} {:<12} {:<16.2} {:<10.1} {:<10.1}",
@@ -585,7 +584,7 @@ pub fn print_benchmark_summary(result: &BenchmarkResult) {
 
     // Print aggregate line
     let (
-        name,
+        _name,
         run_size_mb,
         gen_thr,
         merge_thr,
@@ -599,10 +598,9 @@ pub fn print_benchmark_summary(result: &BenchmarkResult) {
         read_mb,
         write_mb,
     ) = summarize(result);
-    let aggregate_name = format!("{}[avg]", name);
     println!(
         "{:<20} {:<10.1} {:<10} {:<10} {:<10} {:<12.2} {:<10.2} {:<10.2} {:<12} {:<16.2} {:<10.1} {:<10.1}",
-        aggregate_name,
+        "avg",
         run_size_mb,
         rg_runs,
         gen_thr,
