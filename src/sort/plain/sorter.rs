@@ -7,9 +7,7 @@ use crate::sort::core::run_format::{
     FormatSortHooks, IndexingInterval, MergeableRun as GenericMergeableRun, RunFormat,
     RunsOutput as GenericRunsOutput, cmp_key_run_offset,
 };
-use crate::sort::core::sparse_index::{
-    SPARSE_INDEX_PAGE_SIZE, SparseIndex, SparseIndexPage, SparseIndexPagePool,
-};
+use crate::sort::core::sparse_index::{SparseIndex, SparseIndexPage, SparseIndexPagePool};
 use crate::sort::plain::merge::{MergeIterator, PlainMergeSource, ZeroCopyMergePlain};
 use crate::sort::plain::run::Run;
 
@@ -150,7 +148,7 @@ impl RunFormat for PlainRunFormat {
         io_tracker: Option<IoStatsTracker>,
         page_pool: &SparseIndexPagePool,
         barrier: &Barrier,
-        thread_id: usize,
+        _thread_id: usize,
     ) -> usize {
         // Step 1: Create merge sources (reads sparse index for seek)
         let mut sources = Vec::new();
@@ -237,17 +235,7 @@ impl RunFormat for PlainRunFormat {
         // Step 3: Barrier - wait for all threads to release
         barrier.wait();
 
-        // Step 4: Discard pooled pages (print stats on thread 0)
-        if thread_id == 0 {
-            let total = page_pool.len();
-            println!(
-                "Sparse index page pool: {} pages ({:.2} MB)",
-                total,
-                (total * SPARSE_INDEX_PAGE_SIZE) as f64 / (1024.0 * 1024.0),
-            );
-        }
-
-        // Step 5: Execute discard merge
+        // Step 4: Execute discard merge
         match sources.len() {
             0 => 0,
             1 => {
@@ -363,19 +351,6 @@ impl RunFormat for PlainRunFormat {
         // Step 4: Redistribute pages from pool to output run
         let total = page_pool.len();
         let budget_cap = output_run.sparse_index_mut().budget_pages();
-        if thread_id == 0 {
-            let taken = total.min(merge_threads * budget_cap);
-            let freed = total.saturating_sub(taken);
-            println!(
-                "Sparse index page pool: {} pages ({:.2} MB), recycling {} pages ({:.2} MB), freeing {} pages ({:.2} MB)",
-                total,
-                (total * SPARSE_INDEX_PAGE_SIZE) as f64 / (1024.0 * 1024.0),
-                taken,
-                (taken * SPARSE_INDEX_PAGE_SIZE) as f64 / (1024.0 * 1024.0),
-                freed,
-                (freed * SPARSE_INDEX_PAGE_SIZE) as f64 / (1024.0 * 1024.0),
-            );
-        }
         let per_thread = total / merge_threads;
         let extra = total % merge_threads;
         let fair_share = per_thread + if thread_id < extra { 1 } else { 0 };
