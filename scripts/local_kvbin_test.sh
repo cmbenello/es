@@ -1,69 +1,27 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# KVBin server benchmark: 3 datasets (freq_key, heavy_key, heavy_range) ×
-# 3 partition types (key-only, count-balanced, size-balanced).
+# Local KVBin sort test: generate 50 GiB freq_key / heavy_key / heavy_range
+# datasets, then benchmark all 3 partition types (key-only, count-balanced,
+# size-balanced).  Designed for a local machine with ~16 cores and ~60 GiB RAM.
 #
-# Ported from local_kvbin_test.sh with 44 threads, 2 GiB memory, and the
-# server harness (rclone upload, cache clearing) from lineitem/gensort scripts.
-#
-# Usage: ./kvbin_sort_bench_new.sh <datasets_dir> [output_dir]
-#
-# Expects these files in <datasets_dir>:
-#   freq_key.kvbin        freq_key.kvbin.idx
-#   heavy_key.kvbin       heavy_key.kvbin.idx
-#   heavy_range.kvbin     heavy_range.kvbin.idx
+# Usage: ./local_kvbin_test.sh [datasets_dir] [output_dir]
 
-if [[ ${1-} == "" ]]; then
-  echo "Usage: $0 <datasets_dir> [output_dir]" >&2
-  exit 1
-fi
-
-DATASETS_DIR=$1
-if [[ ! -d "$DATASETS_DIR" ]]; then
-  echo "Datasets dir not found: $DATASETS_DIR" >&2
-  exit 1
-fi
-
-# ---------------------------------------------------------
-# RCLONE CONFIG (upload logs to Google Drive after benchmark)
-# Set RCLONE_REMOTE to your rclone remote:path, e.g. "gdrive:bench_results"
-# Leave empty or unset to skip upload. Silently skipped if rclone not found.
-# ---------------------------------------------------------
-RCLONE_REMOTE="${RCLONE_REMOTE:-gdrive:bench_results/kvbin}"
-
-upload_logs() {
-  if ! command -v rclone >/dev/null 2>&1; then
-    echo "rclone not found, skipping upload." >&2
-    return 0
-  fi
-  if [[ -z "${RCLONE_REMOTE:-}" ]]; then
-    echo "RCLONE_REMOTE not set, skipping upload." >&2
-    return 0
-  fi
-  local dest="${RCLONE_REMOTE}/$(basename "$OUT_DIR")"
-  echo "Uploading $OUT_DIR -> $dest ..."
-  if rclone copy "$OUT_DIR" "$dest" --progress; then
-    echo "Upload complete: $dest"
-  else
-    echo "Warning: rclone upload failed (exit $?)" >&2
-  fi
-}
-
+DATASETS_DIR=${1:-"datasets"}
 TS=$(date +"%Y-%m-%d_%H-%M-%S")
-OUT_DIR=${2:-"logs/kvbin_bench_${TS}"}
-mkdir -p "$OUT_DIR"
+OUT_DIR=${2:-"logs/local_kvbin_test_${TS}"}
+mkdir -p "$DATASETS_DIR" "$OUT_DIR"
 
 # ---------------------------------------------------------
 # CONFIGURATION
 # ---------------------------------------------------------
-THREADS=44
+THREADS=14
 MEM_GB=2
 PAGE_SIZE_KB=64
 WARMUP_RUNS=0
 BENCHMARK_RUNS=1
-CLI_COOLDOWN_SECONDS=30
-SLEEP_BETWEEN_CONFIGS=30
+CLI_COOLDOWN_SECONDS=5
+SLEEP_BETWEEN_CONFIGS=5
 
 # 50 GiB row counts (derived from per-record sizes)
 #   freq_key:    528 B/row  → 50×1024³ / 528  ≈ 101_680_097
@@ -84,28 +42,12 @@ cargo build --release \
   --example gen_freq_key_kvbin \
   --example gen_heavy_key_kvbin \
   --example gen_heavy_range_kvbin \
-  --example kvbin_benchmark_cli >/dev/null
+  --example kvbin_benchmark_cli
 
 GEN_FREQ=./target/release/examples/gen_freq_key_kvbin
 GEN_HEAVY_KEY=./target/release/examples/gen_heavy_key_kvbin
 GEN_HEAVY_RANGE=./target/release/examples/gen_heavy_range_kvbin
-BINARY=./target/release/examples/kvbin_benchmark_cli
-
-cooldown() {
-  sleep "$SLEEP_BETWEEN_CONFIGS"
-}
-
-clear_cache_if_available() {
-  if [[ -x /usr/local/sbin/clearcache3.sh ]]; then
-    if [[ $(id -u) -eq 0 ]]; then
-      /usr/local/sbin/clearcache3.sh || echo "Warning: clearcache3.sh failed" >&2
-    elif command -v sudo >/dev/null 2>&1; then
-      sudo /usr/local/sbin/clearcache3.sh || echo "Warning: clearcache3.sh failed (sudo)" >&2
-    else
-      echo "Warning: clearcache3.sh found but sudo not available" >&2
-    fi
-  fi
-}
+BENCH_BIN=./target/release/examples/kvbin_benchmark_cli
 
 # ---------------------------------------------------------
 # GENERATE DATASETS (skip if already present)
@@ -144,6 +86,13 @@ generate_if_missing() {
   ls -lh "$kvbin" "$idx"
 }
 
+for d in "${DATASETS[@]}"; do
+  generate_if_missing "$d"
+done
+
+# ---------------------------------------------------------
+# BENCHMARK
+# ---------------------------------------------------------
 run_bench() {
   local dataset="$1"
   local partition_type="$2"
@@ -177,7 +126,7 @@ run_bench() {
   local log_file="${OUT_DIR}/${name}.log"
 
   local status="OK"
-  if "$BINARY" \
+  if "$BENCH_BIN" \
     -n "$name" \
     -i "$kvbin" \
     --index "$idx" \
@@ -199,26 +148,19 @@ run_bench() {
   echo -e "${dataset}\t${partition_type}\t${status}\t${log_file}" | tee -a "$RESULTS_FILE"
 
   rm -rf "$temp_dir"
-  upload_logs
-  clear_cache_if_available
 }
-
-# Generate datasets if missing
-for d in "${DATASETS[@]}"; do
-  generate_if_missing "$d"
-done
 
 RESULTS_FILE="${OUT_DIR}/summary.tsv"
 echo -e "dataset\tpartition\tstatus\tlog" > "$RESULTS_FILE"
 
 echo ""
-echo "=== KVBin Bench (Mem ${MEM_GB} GiB, Threads ${THREADS}) ==="
+echo "=== KVBin Local Test (Mem ${MEM_GB} GiB, Threads ${THREADS}) ==="
 echo ""
 
 for dataset in "${DATASETS[@]}"; do
   for partition in "${PARTITIONS[@]}"; do
     run_bench "$dataset" "$partition"
-    cooldown
+    sleep "$SLEEP_BETWEEN_CONFIGS"
   done
 done
 

@@ -38,6 +38,25 @@ allows O(1) random seeks without scanning the whole dataset.
 │  …                │         …
 ```
 
+### How the generators create the index
+
+Each generator uses a dedicated **writer thread** that receives `Block` structs (each ~4 MiB
+of serialised records) from the worker threads over a bounded channel.  For every block the
+writer receives it:
+
+1. Appends the current cumulative byte offset (`bytes_written`) to the `.idx` file as a
+   little-endian `u64`.
+2. Writes the block's raw bytes to the `.kvbin` file.
+3. Advances `bytes_written` by the block's length.
+
+Because each worker flushes its buffer whenever it reaches the `INDEX_STRIDE_BYTES` threshold
+(4 MiB), every index entry corresponds to roughly one 4 MiB block.  The index is written
+incrementally — no second pass over the data is needed.
+
+> **Note:** Block boundaries do not necessarily align with record boundaries; a single record
+> is never split across blocks, but the last record in a block may push the block slightly
+> past the 4 MiB target.  The index stores exact byte offsets, so readers can seek precisely.
+
 ---
 
 ## `gen_freq_key_kvbin` — frequency skew only (no size skew)
