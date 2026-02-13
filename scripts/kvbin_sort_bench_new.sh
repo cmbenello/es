@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# KVBin server benchmark: 3 datasets (freq_key, heavy_key, heavy_range) ×
+# KVBin server benchmark: 2 datasets (freq_key, heavy_key) ×
 # 3 partition types (key-only, count-balanced, size-balanced).
 #
 # Ported from local_kvbin_test.sh with 44 threads, 2 GiB memory, and the
@@ -12,7 +12,6 @@ set -euo pipefail
 # Expects these files in <datasets_dir>:
 #   freq_key.kvbin        freq_key.kvbin.idx
 #   heavy_key.kvbin       heavy_key.kvbin.idx
-#   heavy_range.kvbin     heavy_range.kvbin.idx
 
 if [[ ${1-} == "" ]]; then
   echo "Usage: $0 <datasets_dir> [output_dir]" >&2
@@ -57,7 +56,7 @@ mkdir -p "$OUT_DIR"
 # ---------------------------------------------------------
 # CONFIGURATION
 # ---------------------------------------------------------
-THREADS=44
+THREADS=16
 MEM_GB=2
 PAGE_SIZE_KB=64
 WARMUP_RUNS=0
@@ -65,15 +64,13 @@ BENCHMARK_RUNS=1
 CLI_COOLDOWN_SECONDS=30
 SLEEP_BETWEEN_CONFIGS=30
 
-# 50 GiB row counts (derived from per-record sizes)
-#   freq_key:    528 B/row  → 50×1024³ / 528  ≈ 101_680_097
-#   heavy_key:   avg 16460 B/row → 50×1024³ / 16460 ≈ 3_260_878
-#   heavy_range: avg 6672 B/row  → 50×1024³ / 6672  ≈ 8_046_626
-FREQ_KEY_ROWS=101680097
-HEAVY_KEY_ROWS=3260878
-HEAVY_RANGE_ROWS=8046626
+# 200 GiB row counts (derived from per-record sizes)
+#   freq_key:    528 B/row  → 200×1024³ / 528  ≈ 406_720_388
+#   heavy_key:   avg 16460 B/row → 200×1024³ / 16460 ≈ 13_043_512
+FREQ_KEY_ROWS=406720388
+HEAVY_KEY_ROWS=13043512
 
-DATASETS=("freq_key" "heavy_key" "heavy_range")
+DATASETS=("freq_key" "heavy_key")
 PARTITIONS=("key-only" "count-balanced" "size-balanced")
 
 # ---------------------------------------------------------
@@ -83,12 +80,10 @@ echo "Building generators + benchmark CLI (release)..."
 cargo build --release \
   --example gen_freq_key_kvbin \
   --example gen_heavy_key_kvbin \
-  --example gen_heavy_range_kvbin \
   --example kvbin_benchmark_cli >/dev/null
 
 GEN_FREQ=./target/release/examples/gen_freq_key_kvbin
 GEN_HEAVY_KEY=./target/release/examples/gen_heavy_key_kvbin
-GEN_HEAVY_RANGE=./target/release/examples/gen_heavy_range_kvbin
 BINARY=./target/release/examples/kvbin_benchmark_cli
 
 cooldown() {
@@ -126,7 +121,6 @@ generate_if_missing() {
   case "$name" in
     freq_key)    rows=$FREQ_KEY_ROWS;    rec_desc="528 B/row (fixed)" ;;
     heavy_key)   rows=$HEAVY_KEY_ROWS;   rec_desc="~16,460 B/row (variable)" ;;
-    heavy_range) rows=$HEAVY_RANGE_ROWS; rec_desc="~6,672 B/row (variable)" ;;
     *)
       echo "Unknown dataset: $name" >&2
       exit 1
@@ -136,7 +130,7 @@ generate_if_missing() {
   echo ""
   echo "================================================================"
   echo "  Generating: $name"
-  echo "  Target size:  ~50 GiB"
+  echo "  Target size:  ~200 GiB"
   echo "  Rows:         $(printf "%'d" "$rows")"
   echo "  Record size:  $rec_desc"
   echo "  Output:       $kvbin"
@@ -152,9 +146,6 @@ generate_if_missing() {
       ;;
     heavy_key)
       "$GEN_HEAVY_KEY" --out "$kvbin" --idx "$idx" --rows "$rows"
-      ;;
-    heavy_range)
-      "$GEN_HEAVY_RANGE" --out "$kvbin" --idx "$idx" --rows "$rows"
       ;;
   esac
 
