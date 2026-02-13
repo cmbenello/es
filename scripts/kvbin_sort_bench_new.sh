@@ -116,32 +116,58 @@ generate_if_missing() {
   local idx="${DATASETS_DIR}/${name}.kvbin.idx"
 
   if [[ -f "$kvbin" && -f "$idx" ]]; then
-    echo "Dataset $name already exists, skipping generation."
+    local size
+    size=$(du -sh "$kvbin" 2>/dev/null | cut -f1)
+    echo "✓ Dataset $name already exists ($size), skipping generation."
     return 0
   fi
 
-  echo "================================================================"
-  echo "Generating: $name"
-  echo "================================================================"
-
+  local rows rec_desc
   case "$name" in
-    freq_key)
-      "$GEN_FREQ" --out "$kvbin" --idx "$idx" --rows "$FREQ_KEY_ROWS"
-      ;;
-    heavy_key)
-      "$GEN_HEAVY_KEY" --out "$kvbin" --idx "$idx" --rows "$HEAVY_KEY_ROWS"
-      ;;
-    heavy_range)
-      "$GEN_HEAVY_RANGE" --out "$kvbin" --idx "$idx" --rows "$HEAVY_RANGE_ROWS"
-      ;;
+    freq_key)    rows=$FREQ_KEY_ROWS;    rec_desc="528 B/row (fixed)" ;;
+    heavy_key)   rows=$HEAVY_KEY_ROWS;   rec_desc="~16,460 B/row (variable)" ;;
+    heavy_range) rows=$HEAVY_RANGE_ROWS; rec_desc="~6,672 B/row (variable)" ;;
     *)
       echo "Unknown dataset: $name" >&2
       exit 1
       ;;
   esac
 
-  echo "Done generating $name."
+  echo ""
+  echo "================================================================"
+  echo "  Generating: $name"
+  echo "  Target size:  ~50 GiB"
+  echo "  Rows:         $(printf "%'d" "$rows")"
+  echo "  Record size:  $rec_desc"
+  echo "  Output:       $kvbin"
+  echo "  Index:        $idx"
+  echo "================================================================"
+
+  local start_ts
+  start_ts=$(date +%s)
+
+  case "$name" in
+    freq_key)
+      "$GEN_FREQ" --out "$kvbin" --idx "$idx" --rows "$rows"
+      ;;
+    heavy_key)
+      "$GEN_HEAVY_KEY" --out "$kvbin" --idx "$idx" --rows "$rows"
+      ;;
+    heavy_range)
+      "$GEN_HEAVY_RANGE" --out "$kvbin" --idx "$idx" --rows "$rows"
+      ;;
+  esac
+
+  local end_ts elapsed_s
+  end_ts=$(date +%s)
+  elapsed_s=$(( end_ts - start_ts ))
+  local mins=$(( elapsed_s / 60 ))
+  local secs=$(( elapsed_s % 60 ))
+
+  echo ""
+  echo "✓ Done generating $name in ${mins}m ${secs}s"
   ls -lh "$kvbin" "$idx"
+  echo ""
 }
 
 run_bench() {
