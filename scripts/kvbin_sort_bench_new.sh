@@ -66,9 +66,9 @@ SLEEP_BETWEEN_CONFIGS=30
 
 # 200 GiB row counts (derived from per-record sizes)
 #   freq_key:    528 B/row  → 200×1024³ / 528  ≈ 406_720_388
-#   heavy_key:   avg 16460 B/row → 200×1024³ / 16460 ≈ 13_043_512
+#   heavy_key:   avg 3408 B/row (10% dup) → 200×1024³ / 3408 ≈ 63_013_489
 FREQ_KEY_ROWS=406720388
-HEAVY_KEY_ROWS=13043512
+HEAVY_KEY_ROWS=63013489
 
 DATASETS=("freq_key" "heavy_key")
 PARTITIONS=("key-only" "count-balanced" "size-balanced")
@@ -120,7 +120,7 @@ generate_if_missing() {
   local rows rec_desc
   case "$name" in
     freq_key)    rows=$FREQ_KEY_ROWS;    rec_desc="528 B/row (fixed)" ;;
-    heavy_key)   rows=$HEAVY_KEY_ROWS;   rec_desc="~16,460 B/row (variable)" ;;
+    heavy_key)   rows=$HEAVY_KEY_ROWS;   rec_desc="~3,408 B/row (variable)" ;;
     *)
       echo "Unknown dataset: $name" >&2
       exit 1

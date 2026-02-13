@@ -2,7 +2,7 @@
 ///
 /// # Dataset characteristics
 ///
-/// A configurable fraction of rows (`--dup-frac`, default 50 %) all share the same key
+/// A configurable fraction of rows (`--dup-frac`, default 10 %) all share the same key
 /// (`--heavy-key`, default 0) and carry a large payload (`--heavy-payload`, default 32 KiB).
 /// Every other row gets a uniform-random `u64` key (guaranteed ≠ heavy-key) with a small
 /// payload (`--other-payload`, default 128 B).
@@ -15,10 +15,10 @@
 ///
 /// Contrast with `freq_key` (uniform sizes, dup skew only) and `heavy_range` (size skew only).
 ///
-/// Default parameters target ~200 GiB of raw data with ~13 M rows:
+/// Default parameters target ~200 GiB of raw data with ~63 M rows:
 /// ```text
-/// avg_record ≈ 0.5×(4+8+4+32768) + 0.5×(4+8+4+128) = 16 460 B
-/// 200 GiB / 16 460 B ≈ 13 043 510 rows
+/// avg_record ≈ 0.1×(4+8+4+32768) + 0.9×(4+8+4+128) = 3 408 B
+/// 200 GiB / 3 408 B ≈ 63 013 489 rows
 /// ```
 ///
 /// # KVBin record format
@@ -59,12 +59,12 @@ struct Args {
     idx: PathBuf,
 
     /// Total rows to generate.
-    /// Default targets ~200 GiB: avg_record ≈ 0.5×(4+8+4+32768) + 0.5×(4+8+4+128) = 16 460 B
-    #[arg(long, default_value_t = 13_043_510)]
+    /// Default targets ~200 GiB: avg_record ≈ 0.1×(4+8+4+32768) + 0.9×(4+8+4+128) = 3 408 B
+    #[arg(long, default_value_t = 63_013_489)]
     rows: u64,
 
     /// Fraction of rows with the heavy-hitter key
-    #[arg(long, default_value_t = 0.50)]
+    #[arg(long, default_value_t = 0.10)]
     dup_frac: f64,
 
     /// Heavy-hitter key value

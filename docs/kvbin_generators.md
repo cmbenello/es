@@ -7,7 +7,7 @@ output given the same `--seed`.
 | Binary | Dataset name | Dup skew | Size skew | Isolates |
 |---|---|---|---|---|
 | `gen_freq_key_kvbin` | `freq_key` | Yes (50 % → one key) | No (uniform 512 B) | duplicate splitting only |
-| `gen_heavy_key_kvbin` | `heavy_key` | Yes (50 % → one key) | Yes (32 KiB vs 128 B) | dup + size skew combined |
+| `gen_heavy_key_kvbin` | `heavy_key` | Yes (10 % → one key) | Yes (32 KiB vs 128 B) | dup + size skew combined |
 | `gen_heavy_range_kvbin` | `heavy_range` | No (rare dups) | Yes (32 KiB vs 128 B) | size skew only |
 
 ---
@@ -134,23 +134,23 @@ Use this dataset to show Byte-Balanced's robustness when neither simpler policy 
 
 | Row category | Key | Value size |
 |---|---|---|
-| Heavy-hitter (`dup_frac` of rows, default **50 %**) | `heavy_key` (default `0`) | `heavy_payload` (default **32 KiB**) |
+| Heavy-hitter (`dup_frac` of rows, default **10 %**) | `heavy_key` (default `0`) | `heavy_payload` (default **32 KiB**) |
 | Normal (remaining rows) | Uniform random `u64` ≠ `heavy_key` | `other_payload` (default **128 B**) |
 
 ### Policy predictions
 
 | Policy | Outcome | Reason |
 |---|---|---|
-| Key-Only | **FAIL** | Cannot split `heavy_key`; one partition absorbs 50 % of rows ≈ 99.6 % of bytes |
+| Key-Only | **FAIL** | Cannot split `heavy_key`; one partition absorbs 10 % of rows ≈ 96.2 % of bytes |
 | Count-Balanced | **FAIL** | Splits within `heavy_key` ✓ but equal row count still means 256× byte imbalance between heavy and normal partitions |
 | Byte-Balanced | **WORKS** | Splits within `heavy_key` via virtual order and weights boundaries by record size |
 
 ### Default dataset (~200 GiB)
 
 ```
-avg_record = 0.5 × (4 + 8 + 4 + 32 768) + 0.5 × (4 + 8 + 4 + 128)
-           = 16 460 B
-rows       = 200 × 2^30 / 16 460 ≈ 13 043 510
+avg_record = 0.1 × (4 + 8 + 4 + 32 768) + 0.9 × (4 + 8 + 4 + 128)
+           = 3 408 B
+rows       = 200 × 2^30 / 3 408 ≈ 63 013 489
 ```
 
 ### CLI reference
@@ -159,8 +159,8 @@ rows       = 200 × 2^30 / 16 460 ≈ 13 043 510
 cargo run --release --example gen_heavy_key_kvbin -- \
   --out   datasets/heavy_key.kvbin       \
   --idx   datasets/heavy_key.kvbin.idx   \
-  --rows  13043510                     \
-  --dup-frac      0.50                 \
+  --rows  63013489                     \
+  --dup-frac      0.10                 \
   --heavy-key     0                    \
   --heavy-payload 32768                \
   --other-payload 128                  \
@@ -172,8 +172,8 @@ cargo run --release --example gen_heavy_key_kvbin -- \
 |---|---|---|
 | `--out` | *(required)* | Output `.kvbin` file path |
 | `--idx` | *(required)* | Output `.idx` file path |
-| `--rows` | `13 043 510` | Total records to write |
-| `--dup-frac` | `0.50` | Fraction of rows that get `heavy_key` |
+| `--rows` | `63 013 489` | Total records to write |
+| `--dup-frac` | `0.10` | Fraction of rows that get `heavy_key` |
 | `--heavy-key` | `0` | The duplicated key value |
 | `--heavy-payload` | `32768` | Value size (bytes) for heavy-hitter rows |
 | `--other-payload` | `128` | Value size (bytes) for normal rows |
@@ -275,7 +275,7 @@ that `Vec::resize` would cause at 32 KiB per hot record.
 
 | Property | `freq_key` | `heavy_key` | `heavy_range` |
 |---|---|---|---|
-| Key duplicates | Extreme (50 % → one key) | Extreme (50 % → one key) | Negligible (uniform in 65 k range) |
+| Key duplicates | Extreme (50 % → one key) | Extreme (10 % → one key) | Negligible (uniform in 65 k range) |
 | Size skew | None (uniform 512 B) | Yes (32 KiB vs 128 B) | Yes (32 KiB vs 128 B) |
 | Key-Only | FAIL (dup) | FAIL (dup + size) | FAIL (size) |
 | Count-Balanced | **WORKS** | FAIL (size) | FAIL (size) |

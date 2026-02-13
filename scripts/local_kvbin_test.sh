@@ -25,10 +25,10 @@ SLEEP_BETWEEN_CONFIGS=5
 
 # 50 GiB row counts (derived from per-record sizes)
 #   freq_key:    528 B/row  → 50×1024³ / 528  ≈ 101_680_097
-#   heavy_key:   avg 16460 B/row → 50×1024³ / 16460 ≈ 3_260_878
+#   heavy_key:   avg 3408 B/row (10% dup) → 50×1024³ / 3408  ≈ 15_753_372
 #   heavy_range: avg 6672 B/row  → 50×1024³ / 6672  ≈ 8_046_626
 FREQ_KEY_ROWS=101680097
-HEAVY_KEY_ROWS=3260878
+HEAVY_KEY_ROWS=15753372
 HEAVY_RANGE_ROWS=8046626
 
 DATASETS=("freq_key" "heavy_key" "heavy_range")
