@@ -138,19 +138,16 @@ fn summarize(
 
 /// Print merge operations summary table
 fn print_merge_operations_table(result: &BenchmarkResult, max_merges: usize) {
-    let merges_to_show = max_merges.min(5);
-    let start_merge = max_merges.saturating_sub(merges_to_show);
-
     println!("\n{}", "=".repeat(160));
     println!(
-        "Merge Operations Summary — {} (showing last {} of {} merge passes)",
-        result.config.config_name, merges_to_show, max_merges
+        "Merge Operations Summary — {} ({} merge passes)",
+        result.config.config_name, max_merges
     );
     println!("{}", "=".repeat(160));
 
     // Build header dynamically based on number of merges to show
     let mut header = format!("{:<20}", "Config");
-    for mi in (start_merge..max_merges).map(|i| i + 1) {
+    for mi in (0..max_merges).map(|i| i + 1) {
         header.push_str(&format!(
             " {:<10} {:<10} {:<10} {:<12} {:<12}",
             format!("M{}PAvg", mi),
@@ -168,7 +165,7 @@ fn print_merge_operations_table(result: &BenchmarkResult, max_merges: usize) {
         let name = format!("Run {}", run_idx + 1);
         let mut line = format!("{:<20}", name);
 
-        for mi in start_merge..max_merges {
+        for mi in 0..max_merges {
             if mi < sort_stats.per_merge_stats.len() {
                 let m = &sort_stats.per_merge_stats[mi];
                 let total_entries: u64 = m.merge_entry_num.iter().sum();
@@ -213,7 +210,7 @@ fn print_merge_operations_table(result: &BenchmarkResult, max_merges: usize) {
     println!("{}", "-".repeat(160));
     let mut agg_line = format!("{:<20}", "avg");
 
-    for mi in start_merge..max_merges {
+    for mi in 0..max_merges {
         let mut part_avgs: Vec<u64> = Vec::new();
         let mut part_maxs: Vec<u64> = Vec::new();
         let mut imbalances: Vec<f64> = Vec::new();
