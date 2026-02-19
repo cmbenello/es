@@ -34,6 +34,7 @@ upload_logs() {
 }
 
 INPUT_CSV=$1
+DATASET_NAME_SAFE=$(basename "$INPUT_CSV" | tr -cs 'a-zA-Z0-9_-' '_')
 
 TS=$(date +"%Y-%m-%d_%H-%M-%S")
 OUT_DIR=${2:-"logs/lineitem_bench_${TS}"}
@@ -47,6 +48,8 @@ WARMUP_RUNS=0
 BENCHMARK_RUNS=3
 CLI_COOLDOWN_SECONDS=30
 SLEEP_BETWEEN_CONFIGS_SECONDS=30
+# cgroup memory enforcement: "on" (apply limits, warn on failure), "strict" (abort on failure), "off" (disabled)
+CGROUP_MODE="${CGROUP_MODE:-on}"
 
 echo "Building lineitem_benchmark_cli example (release)..."
 cargo build --release --example lineitem_benchmark_cli >/dev/null
@@ -68,6 +71,72 @@ clear_cache_if_available() {
   fi
 }
 
+cgroup_memory_limit_bytes() {
+  local spec="$1"
+  if [[ "$spec" =~ ^([0-9]+(\.[0-9]+)?)[[:space:]]*(GiB|GB|G)$ ]]; then
+    local num="${BASH_REMATCH[1]}"
+    printf '%d\n' "$(echo "scale=0; $num * 1073741824 / 1" | bc)"
+  elif [[ "$spec" =~ ^([0-9]+(\.[0-9]+)?)[[:space:]]*(MiB|MB|M)$ ]]; then
+    local num="${BASH_REMATCH[1]}"
+    printf '%d\n' "$(echo "scale=0; $num * 1048576 / 1" | bc)"
+  else
+    echo "[cgroup] Cannot parse memory spec: '$spec'" >&2
+    return 1
+  fi
+}
+
+run_with_cgroup_limits() {
+  local memory_limit="$1"
+  local scope_name="$2"
+  shift 2
+
+  if [[ "$CGROUP_MODE" == "off" ]]; then
+    "$@"
+    return $?
+  fi
+
+  local limit_bytes
+  if ! limit_bytes=$(cgroup_memory_limit_bytes "$memory_limit"); then
+    echo "[cgroup] Warning: could not parse memory limit '$memory_limit'; running without cgroup." >&2
+    if [[ "$CGROUP_MODE" == "strict" ]]; then
+      return 1
+    fi
+    "$@"
+    return $?
+  fi
+
+  if [[ "$(uname -s)" != "Linux" ]] || ! command -v systemd-run >/dev/null 2>&1; then
+    echo "[cgroup] Warning: systemd-run unavailable; running without cgroup enforcement." >&2
+    if [[ "$CGROUP_MODE" == "strict" ]]; then
+      return 1
+    fi
+    "$@"
+    return $?
+  fi
+
+  local unit_name="es-duck-${scope_name}-${DATASET_NAME_SAFE}-$$-$(date +%s)"
+  echo "[cgroup] Applying limits for ${scope_name}: memory.high=${limit_bytes}, memory.max=${limit_bytes}, memory.swap.max=0"
+
+  if systemd-run --user --scope --quiet --collect \
+      --unit "${unit_name}" \
+      --property "MemoryAccounting=yes" \
+      --property "MemoryHigh=${limit_bytes}" \
+      --property "MemoryMax=${limit_bytes}" \
+      --property "MemorySwapMax=0" \
+      -- "$@"; then
+    return 0
+  fi
+
+  local status=$?
+  echo "[cgroup] Warning: failed to apply cgroup limits (exit ${status})." >&2
+  if [[ "$CGROUP_MODE" == "strict" ]]; then
+    return "$status"
+  fi
+
+  echo "[cgroup] Retrying command without cgroup enforcement."
+  "$@"
+}
+
 run_bench() {
   local exp_prefix="$1"
   local run_gen_threads="$2"
@@ -75,6 +144,7 @@ run_bench() {
   local mem_gb="$4"
   local extra_flags="${5-}"
   local track_mem="${6-false}"
+  local cgroup_limit="${7-}"
 
   local discard_output="false"
   local ovc="true"
@@ -179,20 +249,28 @@ run_bench() {
     wait "$poll_pid" 2>/dev/null || true
   else
     # Uses default key columns (8,9,13,14,15) and value columns (0,3) from lineitem_benchmark_cli.
-    "$BINARY" \
-      -n "$name" \
-      -i "$INPUT_CSV" \
-      --run-gen-threads "$run_gen_threads" \
-      --merge-threads "$merge_threads" \
-      --run-size-mb "$run_size_mb" \
-      --merge-fanin "$max_fanin" \
-      --warmup-runs "$WARMUP_RUNS" \
-      --benchmark-runs "$BENCHMARK_RUNS" \
-      --cooldown-seconds "$CLI_COOLDOWN_SECONDS" \
-      --partition-type "$partition_type" \
-      --imbalance-factor "$imbalance_factor" \
-      --dir "$temp_dir" \
-      $extra_flags 2>&1 | tee -a "$log_file"
+    local bin_cmd=("$BINARY"
+      -n "$name"
+      -i "$INPUT_CSV"
+      --run-gen-threads "$run_gen_threads"
+      --merge-threads "$merge_threads"
+      --run-size-mb "$run_size_mb"
+      --merge-fanin "$max_fanin"
+      --warmup-runs "$WARMUP_RUNS"
+      --benchmark-runs "$BENCHMARK_RUNS"
+      --cooldown-seconds "$CLI_COOLDOWN_SECONDS"
+      --partition-type "$partition_type"
+      --imbalance-factor "$imbalance_factor"
+      --dir "$temp_dir"
+    )
+    # shellcheck disable=SC2206
+    [[ -n "$extra_flags" ]] && bin_cmd+=($extra_flags)
+
+    if [[ -n "$cgroup_limit" ]]; then
+      run_with_cgroup_limits "$cgroup_limit" "$name" "${bin_cmd[@]}" 2>&1 | tee -a "$log_file"
+    else
+      "${bin_cmd[@]}" 2>&1 | tee -a "$log_file"
+    fi
   fi
 
   rm -rf "$temp_dir"
@@ -211,11 +289,11 @@ BENCHMARK_RUNS=$SAVED_BENCHMARK_RUNS
 cooldown
 
 # ==============================================================================
-# EXPERIMENT 1: SCALABILITY TRAP (Fixed 10GB RAM)
+# EXPERIMENT 1: SCALABILITY TRAP (Fixed 10GB RAM, cgroup 12GiB = 120%)
 # ==============================================================================
-echo "=== EXP 1: SCALABILITY (10GB RAM) ==="
+echo "=== EXP 1: SCALABILITY (10GB RAM, cgroup 12GiB) ==="
 for t in 4 8 16 24 32 40 44; do
-  run_bench "Exp1" "$t" "$t" "10" "--discard-final-output"
+  run_bench "Exp1" "$t" "$t" "10" "--discard-final-output" "false" "12GiB"
   cooldown
 done
 
