@@ -128,13 +128,8 @@ run_with_cgroup_limits() {
   fi
 
   local status=$?
-  echo "[cgroup] Warning: failed to apply cgroup limits (exit ${status})." >&2
-  if [[ "$CGROUP_MODE" == "strict" ]]; then
-    return "$status"
-  fi
-
-  echo "[cgroup] Retrying command without cgroup enforcement."
-  "$@"
+  echo "[cgroup] Run exited with status ${status} under cgroup limits (may be OOM kill or binary failure)." >&2
+  return "$status"
 }
 
 run_bench() {
@@ -289,11 +284,11 @@ BENCHMARK_RUNS=$SAVED_BENCHMARK_RUNS
 cooldown
 
 # ==============================================================================
-# EXPERIMENT 1: SCALABILITY TRAP (Fixed 10GB RAM, cgroup 12GiB = 120%)
+# EXPERIMENT 1: SCALABILITY TRAP (Fixed 5GB RAM, cgroup 10GiB = 200%)
 # ==============================================================================
-echo "=== EXP 1: SCALABILITY (10GB RAM, cgroup 12GiB) ==="
+echo "=== EXP 1: SCALABILITY (5GB RAM, cgroup 10GiB) ==="
 for t in 4 8 16 24 32 40 44; do
-  run_bench "Exp1" "$t" "$t" "10" "--discard-final-output" "false" "12GiB"
+  run_bench "Exp1" "$t" "$t" "5" "--discard-final-output" "false" "10GiB"
   cooldown
 done
 
