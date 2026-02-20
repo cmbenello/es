@@ -284,11 +284,12 @@ BENCHMARK_RUNS=$SAVED_BENCHMARK_RUNS
 cooldown
 
 # ==============================================================================
-# EXPERIMENT 1: SCALABILITY TRAP (Fixed 5GB RAM, cgroup 10GiB = 200%)
+# EXPERIMENT 1: CGROUP MEMORY SWEEP (Fixed 16 Threads, Memory = 80% of cgroup)
 # ==============================================================================
-echo "=== EXP 1: SCALABILITY (5GB RAM, cgroup 10GiB) ==="
-for t in 4 8 16 24 32 40 44; do
-  run_bench "Exp1" "$t" "$t" "5" "--discard-final-output" "false" "10GiB"
+echo "=== EXP 1: CGROUP MEMORY SWEEP (16 THREADS, Memory = 80% of cgroup) ==="
+for cgroup in 48 32 24 16 8 4; do
+  mem=$(echo "scale=1; $cgroup * 0.8" | bc)
+  run_bench "Exp1" "16" "16" "$mem" "--discard-final-output" "false" "${cgroup}GiB"
   cooldown
 done
 
