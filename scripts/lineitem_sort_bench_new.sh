@@ -284,11 +284,11 @@ BENCHMARK_RUNS=$SAVED_BENCHMARK_RUNS
 cooldown
 
 # ==============================================================================
-# EXPERIMENT 1: CGROUP MEMORY SWEEP (Fixed 16 Threads, Memory = 80% of cgroup)
+# EXPERIMENT 1: CGROUP MEMORY SWEEP (Fixed 16 Threads, Memory = 60% of cgroup)
 # ==============================================================================
-echo "=== EXP 1: CGROUP MEMORY SWEEP (16 THREADS, Memory = 80% of cgroup) ==="
-for cgroup in 48 32 24 16 8 4; do
-  mem=$(echo "scale=1; $cgroup * 0.8" | bc)
+echo "=== EXP 1: CGROUP MEMORY SWEEP (16 THREADS, Memory = 60% of cgroup) ==="
+for cgroup in 48 32 24 16 8 4 2; do
+  mem=$(echo "scale=1; $cgroup * 0.6" | bc)
   run_bench "Exp1" "16" "16" "$mem" "--discard-final-output" "false" "${cgroup}GiB"
   cooldown
 done
