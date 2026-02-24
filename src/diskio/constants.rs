@@ -61,8 +61,19 @@ pub fn offset_within_block(offset: u64, alignment: u64) -> usize {
 
 #[inline]
 pub fn open_file_with_direct_io(path: &Path) -> std::io::Result<File> {
-    // If mac OS, do not use direct I/O
-    #[cfg(target_os = "macos")]
+    // When buffered_io feature is enabled, skip direct I/O entirely.
+    #[cfg(feature = "buffered_io")]
+    {
+        use std::fs::OpenOptions;
+        return OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .open(path);
+    }
+
+    // If mac OS, do not use direct I/O (F_NOCACHE is the macOS equivalent).
+    #[cfg(all(not(feature = "buffered_io"), target_os = "macos"))]
     {
         use std::{fs::OpenOptions, os::fd::AsRawFd};
 
@@ -80,9 +91,10 @@ pub fn open_file_with_direct_io(path: &Path) -> std::io::Result<File> {
             return Err(std::io::Error::last_os_error());
         }
 
-        Ok(file)
+        return Ok(file);
     }
-    #[cfg(not(target_os = "macos"))]
+
+    #[cfg(all(not(feature = "buffered_io"), not(target_os = "macos")))]
     {
         use std::fs::OpenOptions;
         use std::os::unix::fs::OpenOptionsExt;

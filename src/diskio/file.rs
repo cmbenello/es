@@ -3,7 +3,9 @@ use std::os::unix::io::RawFd;
 use std::path::{Path, PathBuf};
 use std::{io, os::fd::IntoRawFd};
 
-use crate::diskio::constants::{DIRECT_IO_ALIGNMENT, open_file_with_direct_io};
+#[cfg(not(feature = "buffered_io"))]
+use crate::diskio::constants::DIRECT_IO_ALIGNMENT;
+use crate::diskio::constants::open_file_with_direct_io;
 
 pub struct SharedFd {
     fd: RawFd,
@@ -120,29 +122,33 @@ pub fn pread_fd(fd: RawFd, buf: &mut [u8], offset: u64) -> io::Result<usize> {
 /// This function writes data to a file at a specific offset without changing
 /// the file position. It's thread-safe and doesn't require synchronization.
 pub fn pwrite_fd(fd: RawFd, buf: &[u8], offset: u64) -> io::Result<usize> {
-    // Ensure buffer is aligned
-    let buf_addr = buf.as_ptr() as usize;
-    if buf_addr % DIRECT_IO_ALIGNMENT != 0 {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "Buffer is not properly aligned for Direct I/O",
-        ));
-    }
+    // Alignment checks are only required for direct I/O.
+    #[cfg(not(feature = "buffered_io"))]
+    {
+        // Ensure buffer is aligned
+        let buf_addr = buf.as_ptr() as usize;
+        if buf_addr % DIRECT_IO_ALIGNMENT != 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "Buffer is not properly aligned for Direct I/O",
+            ));
+        }
 
-    // Ensure offset is aligned
-    if offset % DIRECT_IO_ALIGNMENT as u64 != 0 {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "Offset is not properly aligned for Direct I/O",
-        ));
-    }
+        // Ensure offset is aligned
+        if offset % DIRECT_IO_ALIGNMENT as u64 != 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "Offset is not properly aligned for Direct I/O",
+            ));
+        }
 
-    // Ensure length is aligned
-    if buf.len() % DIRECT_IO_ALIGNMENT != 0 {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "Buffer length is not properly aligned for Direct I/O",
-        ));
+        // Ensure length is aligned
+        if buf.len() % DIRECT_IO_ALIGNMENT != 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "Buffer length is not properly aligned for Direct I/O",
+            ));
+        }
     }
 
     let result = unsafe {

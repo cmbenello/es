@@ -55,9 +55,19 @@ SLEEP_BETWEEN_CONFIGS_SECONDS=30
 # cgroup memory enforcement: "on" (apply limits, warn on failure), "strict" (abort on failure), "off" (disabled)
 CGROUP_MODE="${CGROUP_MODE:-on}"
 
-echo "Building gen_sort_cli example (release)..."
+echo "Building gen_sort_cli example (release, direct I/O)..."
 cargo build --release --example gen_sort_cli >/dev/null
 BINARY=./target/release/examples/gen_sort_cli
+BINARY_DIO=./target/release/examples/gen_sort_cli_dio
+cp "$BINARY" "$BINARY_DIO"
+
+echo "Building gen_sort_cli example (release, buffered I/O)..."
+cargo build --release --features buffered_io --example gen_sort_cli >/dev/null
+BINARY_BIO=./target/release/examples/gen_sort_cli_bio
+cp "$BINARY" "$BINARY_BIO"
+
+# Restore BINARY to the direct I/O build for all standard experiments
+BINARY="$BINARY_DIO"
 
 cooldown() {
   sleep "$SLEEP_BETWEEN_CONFIGS_SECONDS"
@@ -295,6 +305,18 @@ for cgroup in 48 32 24 16 8 4 2; do
   run_bench "Exp1" "16" "16" "$mem" "--discard-final-output" "false" "${cgroup}GiB"
   cooldown
 done
+
+# ==============================================================================
+# EXPERIMENT 1 (BUFFERED I/O): CGROUP MEMORY SWEEP (Fixed 16 Threads, Memory = 60% of cgroup)
+# ==============================================================================
+echo "=== EXP 1 (BUFFERED I/O): CGROUP MEMORY SWEEP (16 THREADS, Memory = 60% of cgroup) ==="
+BINARY="$BINARY_BIO"
+for cgroup in 48 32 24 16 8 4 2; do
+  mem=$(echo "scale=1; $cgroup * 0.6" | bc)
+  run_bench "Exp1BIO" "16" "16" "$mem" "--discard-final-output" "false" "${cgroup}GiB"
+  cooldown
+done
+BINARY="$BINARY_DIO"
 
 # ==============================================================================
 # EXPERIMENT 2: MEMORY CLIFF (Fixed 44 Threads)

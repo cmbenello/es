@@ -15,6 +15,11 @@ hex = "0.4.3"
 chrono = "0.4.41"
 clap = { version = "4.5.2", features = ["derive"] }
 
+[features]
+# Use buffered I/O instead of direct I/O for AlignedReader/AlignedWriter.
+# Enable with: cargo build --features buffered_io
+buffered_io = []
+
 [dev-dependencies]
 tempfile = "3.2"
 
@@ -24,3 +29,8 @@ lto = "fat"            # Link-time optimization: "fat" (best), "thin" (faster bu
 codegen-units = 1      # Fewer units = better optimization (but slower compile)
 panic = "abort"        # Removes unwinding code, smaller binary, faster
 strip = true           # Strip symbols to reduce binary size
+# # Includes debug symbols in the release build. 
+# # 'true' (or 2) provides full info; '1' (line tables only) is often enough for heaptrack.
+# debug = true
+# # Optional: Prevents the compiler from stripping symbols to keep the binary small.
+# strip = "none"
