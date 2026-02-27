@@ -39,7 +39,7 @@ BINARY=./target/release/examples/gen_sort_cli
 echo "================================================================"
 echo "Total Memory:   ${MEM_MB} MiB"
 echo "Threads:        $THREADS"
-echo "Run Size:       ${rg_buf_mb} MiB"
+echo "RG Buffer:      ${rg_buf_mb} MiB"
 echo "Fan-In:         $FANIN"
 echo "Log:            $LOG_FILE"
 echo "================================================================"

@@ -109,7 +109,7 @@ struct Args {
     #[arg(long, required_unless_present_any = ["estimate_size", "use_planner", "print_plan"])]
     merge_threads: Option<usize>,
 
-    /// Run size for run generation (MB)
+    /// RG buffer for run generation (MB)
     #[arg(long, required_unless_present_any = ["estimate_size", "use_planner", "print_plan"])]
     rg_buf_mb: Option<f64>,
 

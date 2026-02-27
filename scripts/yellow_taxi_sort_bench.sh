@@ -54,7 +54,7 @@ run_case() {
   done
 
   # Derived memory figures for context (MiB)
-  echo "[$name]: Run Size: ${rg_buf_mb} MB, Run Gen Threads: ${RUN_GEN_THREADS}, Merge Threads: ${MERGE_THREADS}, OVC: ${ovc_label}" | tee -a "${OUT_DIR}/${name}.log"
+  echo "[$name]: RG Buffer: ${rg_buf_mb} MB, Run Gen Threads: ${RUN_GEN_THREADS}, Merge Threads: ${MERGE_THREADS}, OVC: ${ovc_label}" | tee -a "${OUT_DIR}/${name}.log"
 
   # Note: --headers flag assumes the input CSV has a header row.
   # Key columns default to "2,3"; value column default to "0".

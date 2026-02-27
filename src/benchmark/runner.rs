@@ -33,7 +33,7 @@ impl BenchmarkRunner {
 
         println!("Running benchmark for config: {}", self.config.config_name);
         println!(
-            "Parameters: Run Gen Threads: {}, Use OVC: {}, Run Size: {:.2} MB, Run Gen Memory: {:.1} MB, Merge Threads: {}, Merge Fanin: {}, Merge Memory: {:.1} MB, Imbalance Factor: {:.1}, Partition: {:?}",
+            "Parameters: Run Gen Threads: {}, Use OVC: {}, RG Buffer: {:.2} MB, Run Gen Memory: {:.1} MB, Merge Threads: {}, Merge Fanin: {}, Merge Memory: {:.1} MB, Imbalance Factor: {:.1}, Partition: {:?}",
             self.config.run_gen_threads,
             self.config.use_ovc,
             self.config.rg_buf_mb,
@@ -68,7 +68,7 @@ impl BenchmarkRunner {
         println!("Estimated data size: {:.2} MB", dataset_mb);
         println!("Run generation threads: {}", self.config.run_gen_threads);
         println!("Use OVC: {}", self.config.use_ovc);
-        println!("Run size (MB): {:.2}", self.config.rg_buf_mb);
+        println!("RG buffer (MB): {:.2}", self.config.rg_buf_mb);
         println!(
             "Run generation memory (MB): {:.1}",
             self.config.run_gen_memory_mb

@@ -489,7 +489,7 @@ pub fn print_benchmark_summary(result: &BenchmarkResult) {
     println!(
         "{:<20} {:<10} {:<10} {:<10} {:<10} {:<10} {:<12} {:<10} {:<12} {:<16} {:<10} {:<10}",
         "Config",
-        "Run Size",
+        "RG Buf",
         "RG Runs",
         "Gen Thr",
         "Merge Thr",

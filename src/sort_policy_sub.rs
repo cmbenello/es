@@ -73,7 +73,7 @@ impl std::fmt::Display for PlannerResult {
         };
         write!(
             f,
-            "[Planner/{regime}] T_gen={rg}, T_merge={rm}, run_size={rs:.1} MB, \
+            "[Planner/{regime}] T_gen={rg}, T_merge={rm}, rg_buf={rs:.1} MB, \
              fanin={fi}, runs={nr}, run_gen_mem={rgm:.1} MB, merge_mem={mm:.1} MB, \
              single_step={ss}",
             regime = regime,
