@@ -16,7 +16,7 @@ Given:
 - `P`: page size in MB (`page_size_kb / 1024`)
 - `rho`: usable-memory ratio (fixed at `0.8` in planner)
 - `sparse_index_fraction`: reserved memory fraction for sparse index
-- `min_rg_buf_mb`: minimum per-thread run-generation buffer target (default `10 MB`)
+- `min_rg_buf_mb`: minimum per-thread run-generation buffer target (default `40 MB`)
 
 Derived:
 
@@ -114,16 +114,16 @@ Step-by-step:
    - `T_gen = T_merge = 16`
    - `max_fanin_in_budget = floor(22413.16 / (16 * 0.0625)) - 1 = 22412`
    - `rg_buf_min = D / max_fanin_in_budget = 8.9086 MB` (under `E = 1`)
-   - `rg_buf_target = max(min_rg_buf_mb, rg_buf_min) = max(10.0, 8.9086) = 10.0 MB`
-   - `rg_buf_mb = min(rg_buf_target, M_eff / T_gen) = min(10.0, 1400.82) = 10.0 MB`
+   - `rg_buf_target = max(min_rg_buf_mb, rg_buf_min) = max(40.0, 8.9086) = 40.0 MB`
+   - `rg_buf_mb = min(rg_buf_target, M_eff / T_gen) = min(40.0, 1400.82) = 40.0 MB`
 4. Estimated runs and single-step flag:
-   - `num_runs = ceil(D / rg_buf_mb) = ceil(199659.46 / 10.0) = 19966`
+   - `num_runs = ceil(D / rg_buf_mb) = ceil(199659.46 / 40.0) = 4992`
    - `merge_fanin = 22412`
-   - `is_single_step = (19966 <= 22412) = true`
+   - `is_single_step = (4992 <= 22412) = true`
 
 Rounded planner-style values for this example:
 
-- `T_gen=16, T_merge=16, rg_buf=10.0 MB, fanin=22412, runs=19966, run_gen_mem=160.0 MB, merge_mem=22412.0 MB, single_step=true`
+- `T_gen=16, T_merge=16, rg_buf=40.0 MB, fanin=22412, runs=4992, run_gen_mem=640.0 MB, merge_mem=22412.0 MB, single_step=true`
 
 Observed value from one real benchmark run with the same input/budget:
 
@@ -153,16 +153,16 @@ Step-by-step:
    - `T_gen = T_merge = 16`
    - `max_fanin_in_budget = floor(22413.16 / (16 * 0.0625)) - 1 = 22412`
    - `rg_buf_min = D / max_fanin_in_budget = 9.1380 MB` (under `E = 1`)
-   - `rg_buf_target = max(min_rg_buf_mb, rg_buf_min) = max(10.0, 9.1380) = 10.0 MB`
-   - `rg_buf_mb = min(rg_buf_target, M_eff / T_gen) = min(10.0, 1400.82) = 10.0 MB`
+   - `rg_buf_target = max(min_rg_buf_mb, rg_buf_min) = max(40.0, 9.1380) = 40.0 MB`
+   - `rg_buf_mb = min(rg_buf_target, M_eff / T_gen) = min(40.0, 1400.82) = 40.0 MB`
 4. Estimated runs and single-step flag:
-   - `num_runs = ceil(D / rg_buf_mb) = ceil(204800 / 10.0) = 20480`
+   - `num_runs = ceil(D / rg_buf_mb) = ceil(204800 / 40.0) = 5120`
    - `merge_fanin = 22412`
-   - `is_single_step = (20480 <= 22412) = true`
+   - `is_single_step = (5120 <= 22412) = true`
 
 Rounded planner-style values for this example:
 
-- `T_gen=16, T_merge=16, rg_buf=10.0 MB, fanin=22412, runs=20480, run_gen_mem=160.0 MB, merge_mem=22412.0 MB, single_step=true`
+- `T_gen=16, T_merge=16, rg_buf=40.0 MB, fanin=22412, runs=5120, run_gen_mem=640.0 MB, merge_mem=22412.0 MB, single_step=true`
 
 Observed value from an actual GenSort benchmark log we have (same dataset/budget
 family, but different older planner setting: `rg_buf=0.46 MB`):
@@ -171,7 +171,7 @@ family, but different older planner setting: `rg_buf=0.46 MB`):
 
 Note:
 
-- The exact worked-config (`rg_buf=10.0 MB`) actual run count is not recorded in
+- The exact worked-config (`rg_buf=40.0 MB`) actual run count is not recorded in
   this document yet; add it after running that exact configuration.
 
 ## Important Semantics

@@ -40,7 +40,7 @@ pub struct PlannerConfig {
     /// Minimum per-thread run-generation buffer target (MB).
     /// Planner will reduce run-generation threads to honor this floor when
     /// possible (best-effort under extremely small memory budgets).
-    /// (default: 10.0)
+    /// (default: 40.0)
     pub min_rg_buf_mb: f64,
 }
 
@@ -52,7 +52,7 @@ impl Default for PlannerConfig {
             max_threads: 1,
             page_size_kb: 64.0,
             sparse_index_fraction: 0.05,
-            min_rg_buf_mb: 10.0,
+            min_rg_buf_mb: 40.0,
         }
     }
 }
@@ -339,7 +339,7 @@ mod tests {
             memory_mb: 200.0,
             max_threads: 16,
             page_size_kb: 64.0,
-            min_rg_buf_mb: 10.0,
+            min_rg_buf_mb: 40.0,
             ..PlannerConfig::default()
         };
         let plan = plan_resource_efficient(&cfg);
