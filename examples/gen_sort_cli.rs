@@ -86,7 +86,7 @@ struct SortArgs {
     #[arg(long, required_unless_present_any = ["estimate_size", "use_planner", "print_plan"])]
     run_size_mb: Option<f64>,
 
-    /// Merge fan-in (per-thread)
+    /// Merge fan-in (global per merge operation)
     #[arg(long, required_unless_present_any = ["estimate_size", "use_planner", "print_plan"])]
     merge_fanin: Option<usize>,
 

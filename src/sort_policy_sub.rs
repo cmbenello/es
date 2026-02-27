@@ -4,9 +4,10 @@
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum PlannerRegime {
-    /// T_max² ≤ 2·ρ²·M_eff²/(D·P) — symmetric T_max is single-step feasible.
+    /// Analytical thread-bound side: T_max² ≤ 2·ρ²·M_eff²/(D·P).
+    /// K=1 is still checked against the merge engine's global fan-in budget.
     ThreadBound,
-    /// T_max² > 2·ρ²·M_eff²/(D·P) — must reduce merge parallelism.
+    /// Analytical memory-bound side: T_max² > 2·ρ²·M_eff²/(D·P).
     MemoryBound,
 }
 
@@ -55,7 +56,7 @@ pub struct PlannerResult {
     pub merge_threads: usize,
     /// Per-thread run-generation memory target (= run size) in MB
     pub run_size_mb: f64,
-    /// Per-thread merge fan-in (set for K=1 single step when feasible)
+    /// Global merge fan-in for each merge operation
     pub merge_fanin: usize,
     pub regime: PlannerRegime,
     pub num_runs: usize,
@@ -93,7 +94,8 @@ impl std::fmt::Display for PlannerResult {
 /// `(D, M, T_max, P, ρ)` following the two-regime policy:
 ///
 /// * **Thread-bound** (`T_max² ≤ 2ρ²·M_eff²/(D·P)`): symmetric `T_gen = T_merge
-///   = T_max`; choose the *smallest* run size (working-set) that keeps K=1.
+///   = T_max`; choose the *smallest* run size (working-set) that keeps K=1
+///   under the global fan-in budget.
 /// * **Memory-bound** (`T_max² > 2ρ²·M_eff²/(D·P)`): preserve `T_gen = T_max`;
 ///   reduce `T_merge` until the hyperbola constraint is satisfied (with safety
 ///   slack); choose `run_size = M_eff/T_gen`.
@@ -107,6 +109,10 @@ impl std::fmt::Display for PlannerResult {
 /// In both regimes the merge fan-in is set to achieve a single merge step
 /// (K=1) when the budget allows; otherwise the maximum budget-limited fan-in
 /// is used and the engine performs multi-step merging automatically.
+///
+/// Note: `merge_fanin` is **global** fan-in per merge operation (the merge
+/// engine receives one `fanin` value and merges up to that many runs in one
+/// operation), not per-thread fan-in.
 pub fn plan_resource_efficient(config: &PlannerConfig) -> PlannerResult {
     let d = config.dataset_mb;
     let m = config.memory_mb;
@@ -130,6 +136,12 @@ pub fn plan_resource_efficient(config: &PlannerConfig) -> PlannerResult {
         PlannerRegime::ThreadBound
     };
 
+    let max_fanin_in_budget_for = |t_merge: usize| -> usize {
+        ((m_eff / (t_merge as f64 * p)).floor() as usize)
+            .saturating_sub(1) // reserve 1 output buffer per thread
+            .max(2)
+    };
+
     // -----------------------------------------------------------------------
     // Phase 1: derive T_gen, T_merge, run_size_mb
     //
@@ -146,7 +158,7 @@ pub fn plan_resource_efficient(config: &PlannerConfig) -> PlannerResult {
     //
     // Thread-bound regime (T_max² ≤ threshold):
     //   T_gen = T_merge = T_max                     (symmetric; full parallelism)
-    //   run_size_min = D·P / M_eff                  (theoretical K=1 floor)
+    //   run_size_min = D / max_fanin_in_budget      (K=1 floor under global fan-in)
     //   run_size = min(run_size_min × (1 + slack),  ← [slack] nudge above floor
     //                  (M_eff / T_gen) × (1 − slack)) ← [slack] cap below per-thread budget
     // -----------------------------------------------------------------------
@@ -162,7 +174,8 @@ pub fn plan_resource_efficient(config: &PlannerConfig) -> PlannerResult {
         PlannerRegime::ThreadBound => {
             let t_gen = t_max;
             let t_merge = t_max;
-            let run_size_min = d * p / m_eff; // theoretical K=1 floor
+            let max_fanin_in_budget = max_fanin_in_budget_for(t_merge as usize);
+            let run_size_min = d / max_fanin_in_budget as f64; // global-fanin K=1 floor
             let run_size = (run_size_min * (1.0 + slack)) // [slack] sits above floor
                 .min((m_eff / t_gen) * (1.0 - slack)); // [slack] capped below per-thread budget
             (t_gen, t_merge, run_size)
@@ -176,7 +189,7 @@ pub fn plan_resource_efficient(config: &PlannerConfig) -> PlannerResult {
     // Phase 2: derive merge_fanin
     //
     //   num_runs           = ceil(D / run_size_mb)
-    //   fanin_single_step  = ceil(num_runs / T_merge)   target for K=1 merge
+    //   fanin_single_step  = num_runs              target for K=1 merge
     //
     //   max_fanin_in_budget = floor(M_eff / (T_merge·P)) − 1
     //     - M_eff: sparse index fraction already excluded (see above)
@@ -190,12 +203,10 @@ pub fn plan_resource_efficient(config: &PlannerConfig) -> PlannerResult {
     //     Otherwise cap at max_fanin_in_budget; engine does multi-step merging automatically.
     // -----------------------------------------------------------------------
     let num_runs = ((d / run_size_mb).ceil() as usize).max(1);
-    let fanin_for_single_step = num_runs.div_ceil(t_merge).max(2);
-    let max_fanin_in_budget = ((m_eff / (t_merge as f64 * p)).floor() as usize)
-        .saturating_sub(1) // reserve 1 output buffer per thread
-        .max(2);
+    let fanin_for_single_step = num_runs.max(2);
+    let max_fanin_in_budget = max_fanin_in_budget_for(t_merge);
     let merge_fanin = fanin_for_single_step.min(max_fanin_in_budget);
-    let is_single_step = merge_fanin >= fanin_for_single_step;
+    let is_single_step = num_runs <= merge_fanin;
 
     let run_gen_memory_mb = t_gen as f64 * run_size_mb;
     let merge_memory_mb = t_merge as f64 * merge_fanin as f64 * p;
@@ -210,5 +221,49 @@ pub fn plan_resource_efficient(config: &PlannerConfig) -> PlannerResult {
         run_gen_memory_mb,
         merge_memory_mb,
         is_single_step,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn thread_bound_uses_global_fanin_for_single_step() {
+        let plan = plan_resource_efficient(&PlannerConfig {
+            dataset_mb: 204_800.0, // 200 GiB
+            memory_mb: 28_800.0,   // 28.8 GiB budget
+            max_threads: 16,
+            page_size_kb: 64.0,
+            ..PlannerConfig::default()
+        });
+
+        assert_eq!(plan.regime, PlannerRegime::ThreadBound);
+        assert!(plan.is_single_step);
+        assert!(plan.num_runs <= plan.merge_fanin);
+        assert!(plan.run_size_mb > 1.0);
+    }
+
+    #[test]
+    fn single_step_flag_matches_global_fanin_condition() {
+        let thread_bound = PlannerConfig {
+            dataset_mb: 204_800.0,
+            memory_mb: 28_800.0,
+            max_threads: 16,
+            page_size_kb: 64.0,
+            ..PlannerConfig::default()
+        };
+        let memory_bound = PlannerConfig {
+            dataset_mb: 204_800.0,
+            memory_mb: 256.0,
+            max_threads: 16,
+            page_size_kb: 64.0,
+            ..PlannerConfig::default()
+        };
+
+        for cfg in [thread_bound, memory_bound] {
+            let plan = plan_resource_efficient(&cfg);
+            assert_eq!(plan.is_single_step, plan.num_runs <= plan.merge_fanin);
+        }
     }
 }
