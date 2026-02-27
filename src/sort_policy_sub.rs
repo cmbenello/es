@@ -5,11 +5,11 @@
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum PlannerRegime {
     /// Analytical thread-bound side:
-    /// T_max² ≤ (RS expansion)·M_eff²/(D·P).
+    /// T_max² ≤ (RS expansion)·M_run_gen·M_merge/(D·P).
     /// K=1 is still checked against the merge engine's global fan-in budget.
     ThreadBound,
     /// Analytical memory-bound side:
-    /// T_max² > (RS expansion)·M_eff²/(D·P).
+    /// T_max² > (RS expansion)·M_run_gen·M_merge/(D·P).
     MemoryBound,
 }
 
@@ -30,11 +30,11 @@ pub struct PlannerConfig {
     pub max_threads: usize,
     /// I/O page / buffer size in KB (P, default: 64)
     pub page_size_kb: f64,
-    /// Fraction of M permanently occupied by the sparse index.
-    /// Subtracted after rho scaling:
-    /// M_eff = (rho × M) × (1 − sparse_index_fraction).
-    /// M_eff is the effective memory budget used for BOTH run-generation
-    /// buffers and merge I/O buffers — it is not a safety margin.
+    /// Fraction of memory reserved for sparse-index overhead on the merge side.
+    /// Applied after rho scaling to merge-effective memory only:
+    /// M_merge = (rho × M) × (1 − sparse_index_fraction).
+    /// Run generation uses M_run_gen = rho × M, because the runtime already
+    /// applies its own 0.95 run-generation budget split.
     /// (default: 0.05)
     pub sparse_index_fraction: f64,
     /// Minimum per-thread run-generation buffer target (MB).
@@ -100,19 +100,20 @@ impl std::fmt::Display for PlannerResult {
 /// Derive resource-efficient sort parameters from the given budget tuple
 /// `(D, M, T_max, P)` following the two-regime policy:
 ///
-/// * **Thread-bound** (`T_max² ≤ E·M_eff²/(D·P)`, `E` = RS expansion):
+/// * **Thread-bound** (`T_max² ≤ E·M_run_gen·M_merge/(D·P)`, `E` = RS expansion):
 ///   symmetric `T_gen = T_merge
 ///   = T_max`; choose the *smallest* run size (working-set) that keeps K=1
 ///   under the global fan-in budget.
-/// * **Memory-bound** (`T_max² > E·M_eff²/(D·P)`): start from `T_gen = T_max`,
+/// * **Memory-bound** (`T_max² > E·M_run_gen·M_merge/(D·P)`): start from `T_gen = T_max`,
 ///   then reduce `T_gen` if needed to satisfy `min_rg_buf_mb`; reduce
 ///   `T_merge` until the hyperbola constraint is satisfied.
 ///
-/// **M_eff**: planner first applies a fixed usable-memory
-/// ratio `rho=0.8`, then subtracts `sparse_index_fraction`:
-/// `M_eff = (rho × M) × (1 − sparse_index_fraction)`.
-/// This is the effective
-/// memory available for both run-generation buffers and merge I/O buffers.
+/// Effective-memory split:
+/// * `M_run_gen = rho × M`
+/// * `M_merge   = (rho × M) × (1 − sparse_index_fraction)`
+///
+/// This keeps merge-side sparse-index reservation in planning while avoiding
+/// double-reserving on run generation (runtime already applies a 0.95 split).
 ///
 /// In both regimes the merge fan-in is set to the maximum value allowed by
 /// the selected `T_merge` and the memory budget. Estimated run count is used
@@ -131,15 +132,19 @@ pub fn plan_resource_efficient(config: &PlannerConfig) -> PlannerResult {
     let sparse_reserve = config.sparse_index_fraction;
     let min_rg_buf_mb = config.min_rg_buf_mb.max(0.0);
 
-    // Effective memory:
-    //   M_eff = (rho × M) × (1 - sparse_index_fraction)
-    // We first apply fixed usable-memory ratio rho, then subtract sparse-index
-    // reserve used across both run generation and merge phases.
-    let m_eff = (m * PLANNER_RHO) * (1.0 - sparse_reserve);
+    // Effective-memory split:
+    //   M_run_gen = rho × M
+    //   M_merge   = (rho × M) × (1 - sparse_index_fraction)
+    // Runtime already applies a run-generation 0.95 split, so planner keeps
+    // the sparse-index reserve only on the merge side.
+    let m_base = m * PLANNER_RHO;
+    let m_run_gen = m_base;
+    let m_merge = m_base * (1.0 - sparse_reserve);
 
     // Feasibility threshold:
-    //   T_max² ≤ E·M_eff²/(D·P), where E is RS run-expansion assumption.
-    let threshold = RS_EXPANSION_E * m_eff * m_eff / (d * p);
+    //   T_max² ≤ E·M_run_gen·M_merge/(D·P),
+    // where E is RS run-expansion assumption.
+    let threshold = RS_EXPANSION_E * m_run_gen * m_merge / (d * p);
     let regime = if t_max * t_max > threshold {
         PlannerRegime::MemoryBound
     } else {
@@ -147,7 +152,7 @@ pub fn plan_resource_efficient(config: &PlannerConfig) -> PlannerResult {
     };
 
     let max_fanin_in_budget_for = |t_merge: usize| -> usize {
-        ((m_eff / (t_merge as f64 * p)).floor() as usize)
+        ((m_merge / (t_merge as f64 * p)).floor() as usize)
             .saturating_sub(1) // reserve 1 output buffer per thread
             .max(2)
     };
@@ -155,21 +160,21 @@ pub fn plan_resource_efficient(config: &PlannerConfig) -> PlannerResult {
         if min_rg <= 0.0 {
             return config.max_threads.max(1);
         }
-        // Per-thread cap is M_eff/T_gen in both regimes.
-        let cap = (m_eff / min_rg).floor() as usize;
+        // Per-thread cap for run generation is M_run_gen/T_gen.
+        let cap = (m_run_gen / min_rg).floor() as usize;
         cap.clamp(1, config.max_threads.max(1))
     };
 
     // -----------------------------------------------------------------------
     // Phase 1: derive T_gen, T_merge, rg_buf_mb
     //
-    // All memory calculations use M_eff (sparse index already excluded).
+    // Run-generation caps use M_run_gen, merge caps use M_merge.
     // Memory-bound regime (T_max² > threshold):
     //   Start from T_gen = T_max, but if that would make rg_buf_mb too small,
     //   reduce T_gen so rg_buf_mb reaches at least min_rg_buf_mb.
     //   T_merge = floor(threshold / T_gen)
     //   rg_buf_mb = max(min_rg_buf_mb, smallest feasible under T_gen)
-    //              then capped by (M_eff / T_gen)
+    //              then capped by (M_run_gen / T_gen)
     //
     // Thread-bound regime (T_max² ≤ threshold):
     //   Start from T_gen = T_merge = T_max (symmetric), but if needed reduce
@@ -184,13 +189,13 @@ pub fn plan_resource_efficient(config: &PlannerConfig) -> PlannerResult {
     //     rg_buf_mb ≥ D / max_fanin_in_budget = rg_buf_min
     //
     //   rg_buf_target = max(min_rg_buf_mb, rg_buf_min)
-    //   rg_buf_mb     = min(rg_buf_target, (M_eff / T_gen))
+    //   rg_buf_mb     = min(rg_buf_target, (M_run_gen / T_gen))
     // -----------------------------------------------------------------------
     let (t_gen_f, t_merge_f, rg_buf_mb) = match regime {
         PlannerRegime::MemoryBound => {
             let t_gen = t_max.min(max_tgen_for_min_rg(min_rg_buf_mb) as f64);
             let t_merge = (threshold / t_gen).floor().clamp(1.0, t_max);
-            let run_size_cap = m_eff / t_gen;
+            let run_size_cap = m_run_gen / t_gen;
             // t_gen is already reduced (best-effort) to honor min_rg_buf_mb.
             // If memory is too small even at T_gen=1, this falls back to cap.
             let run_size = run_size_cap;
@@ -204,7 +209,7 @@ pub fn plan_resource_efficient(config: &PlannerConfig) -> PlannerResult {
             // rg_buf_min_worst_case = D / max_fanin_in_budget
             let rg_buf_min_worst_case = d / (RS_EXPANSION_E * max_fanin_in_budget as f64);
             let run_size_target = rg_buf_min_worst_case.max(min_rg_buf_mb);
-            let run_size = run_size_target.min(m_eff / t_gen); // capped below per-thread budget
+            let run_size = run_size_target.min(m_run_gen / t_gen); // capped by run-gen per-thread budget
             (t_gen, t_merge, run_size)
         }
     };
@@ -218,12 +223,12 @@ pub fn plan_resource_efficient(config: &PlannerConfig) -> PlannerResult {
     //   num_runs           = ceil(D / rg_buf_mb)
     //   required_fanin_K1  = num_runs
     //
-    //   max_fanin_in_budget = floor(M_eff / (T_merge·P)) − 1
-    //     - M_eff: sparse index fraction already excluded (see above)
+    //   max_fanin_in_budget = floor(M_merge / (T_merge·P)) − 1
+    //     - M_merge: sparse index fraction already excluded (merge side)
     //     - ÷ (T_merge·P): total I/O pages available, split across merge threads
     //     - − 1: each thread needs 1 output buffer beyond its fanin input buffers,
-    //            so (fanin + 1)·T_merge·P ≤ M_eff  ⟹  fanin ≤ floor(M_eff/(T_merge·P)) − 1
-    //   M_eff is the hard physical limit for I/O buffers.
+    //            so (fanin + 1)·T_merge·P ≤ M_merge  ⟹  fanin ≤ floor(M_merge/(T_merge·P)) − 1
+    //   M_merge is the hard physical limit for merge I/O buffers.
     //
     //   merge_fanin = max_fanin_in_budget
     //     Keep fan-in at the maximum budget-limited value for the chosen
@@ -309,12 +314,35 @@ mod tests {
         let plan = plan_resource_efficient(&cfg);
 
         let p = cfg.page_size_kb / 1024.0;
-        let m_eff = (cfg.memory_mb * PLANNER_RHO) * (1.0 - cfg.sparse_index_fraction);
-        let expected_max_fanin = ((m_eff / (plan.merge_threads as f64 * p)).floor() as usize)
+        let m_merge = (cfg.memory_mb * PLANNER_RHO) * (1.0 - cfg.sparse_index_fraction);
+        let expected_max_fanin = ((m_merge / (plan.merge_threads as f64 * p)).floor() as usize)
             .saturating_sub(1)
             .max(2);
 
         assert_eq!(plan.merge_fanin, expected_max_fanin);
+    }
+
+    #[test]
+    fn run_generation_cap_is_not_reduced_by_sparse_fraction() {
+        let cfg_low_sparse = PlannerConfig {
+            dataset_mb: 204_800.0,
+            memory_mb: 200.0,
+            max_threads: 16,
+            page_size_kb: 64.0,
+            sparse_index_fraction: 0.0,
+            min_rg_buf_mb: 0.0,
+            ..PlannerConfig::default()
+        };
+        let cfg_high_sparse = PlannerConfig {
+            sparse_index_fraction: 0.5,
+            ..cfg_low_sparse.clone()
+        };
+
+        let plan_low = plan_resource_efficient(&cfg_low_sparse);
+        let plan_high = plan_resource_efficient(&cfg_high_sparse);
+
+        // Run-gen budget cap should depend on rho*M, not sparse_index_fraction.
+        assert_eq!(plan_low.rg_buf_mb, plan_high.rg_buf_mb);
     }
 
     #[test]

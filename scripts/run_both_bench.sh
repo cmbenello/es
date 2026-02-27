@@ -65,12 +65,28 @@ if ! glob_exists "${LINEITEM_SRC_GLOB}"; then
   exit 1
 fi
 
-if glob_exists "${LINEITEM_DST_GLOB}"; then
+# Copy by basename to avoid false "already present" when destination is partial.
+mapfile -t lineitem_src_files < <(compgen -G "${LINEITEM_SRC_GLOB}" || true)
+if [[ ${#lineitem_src_files[@]} -eq 0 ]]; then
+  echo "ERROR: No lineitem kvbin source files found after expansion: ${LINEITEM_SRC_GLOB}" >&2
+  exit 1
+fi
+
+missing_count=0
+for src in "${lineitem_src_files[@]}"; do
+  base=$(basename "$src")
+  if [[ ! -e "${DATASETS_DIR}/${base}" ]]; then
+    missing_count=$((missing_count + 1))
+  fi
+done
+
+if [[ $missing_count -eq 0 ]]; then
   echo "[skip] lineitem kvbin files already present locally, reusing."
 else
-  echo "[copy] Copying lineitem kvbin files from tank..."
-  # shellcheck disable=SC2086
-  cp ${LINEITEM_SRC_GLOB} "${DATASETS_DIR}/"
+  echo "[copy] Copying ${missing_count} missing lineitem kvbin file(s) from tank..."
+  for src in "${lineitem_src_files[@]}"; do
+    cp "$src" "${DATASETS_DIR}/"
+  done
   echo "[copy] Done."
 fi
 
