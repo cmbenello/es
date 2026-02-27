@@ -4,9 +4,9 @@
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum PlannerRegime {
-    /// T_max² ≤ 2·ρ²·M²/(D·P) — symmetric T_max is single-step feasible.
+    /// T_max² ≤ 2·ρ²·M_eff²/(D·P) — symmetric T_max is single-step feasible.
     ThreadBound,
-    /// T_max² > 2·ρ²·M²/(D·P) — must reduce merge parallelism.
+    /// T_max² > 2·ρ²·M_eff²/(D·P) — must reduce merge parallelism.
     MemoryBound,
 }
 
@@ -22,8 +22,17 @@ pub struct PlannerConfig {
     pub page_size_kb: f64,
     /// Merge-partition imbalance factor ρ (default: 1.0)
     pub imbalance_factor: f64,
-    /// Fractional safety slack applied to all resource targets (default: 0.05)
+    /// Safety margin for the K=1 single-step merge constraint.
+    /// Applied to run_size and T_merge targets so they sit safely below their
+    /// theoretical limits (avoids operating right on the feasibility boundary).
+    /// (default: 0.05)
     pub safety_slack: f64,
+    /// Fraction of M permanently occupied by the sparse index.
+    /// Subtracted upfront: M_eff = M × (1 − sparse_index_fraction).
+    /// M_eff is the effective memory budget used for BOTH run-generation
+    /// buffers and merge I/O buffers — it is not a safety margin.
+    /// (default: 0.05)
+    pub sparse_index_fraction: f64,
 }
 
 impl Default for PlannerConfig {
@@ -35,6 +44,7 @@ impl Default for PlannerConfig {
             page_size_kb: 64.0,
             imbalance_factor: 1.0,
             safety_slack: 0.05,
+            sparse_index_fraction: 0.05,
         }
     }
 }
@@ -82,15 +92,21 @@ impl std::fmt::Display for PlannerResult {
 /// Derive resource-efficient sort parameters from the given budget tuple
 /// `(D, M, T_max, P, ρ)` following the two-regime policy:
 ///
-/// * **Thread-bound** (`T_max² ≤ 2ρ²M²/(D·P)`): symmetric `T_gen = T_merge
+/// * **Thread-bound** (`T_max² ≤ 2ρ²·M_eff²/(D·P)`): symmetric `T_gen = T_merge
 ///   = T_max`; choose the *smallest* run size (working-set) that keeps K=1.
-/// * **Memory-bound** (`T_max² > 2ρ²M²/(D·P)`): preserve `T_gen = T_max`;
+/// * **Memory-bound** (`T_max² > 2ρ²·M_eff²/(D·P)`): preserve `T_gen = T_max`;
 ///   reduce `T_merge` until the hyperbola constraint is satisfied (with safety
-///   slack); choose `run_size = M/T_gen`.
+///   slack); choose `run_size = M_eff/T_gen`.
+///
+/// **M_eff vs safety_slack**: `sparse_index_fraction` is subtracted from M
+/// upfront to get M_eff = M × (1 − sparse_index_fraction), the effective
+/// memory available for both run-generation buffers and merge I/O buffers.
+/// `safety_slack` is an independent margin applied on top of M_eff to keep
+/// run_size and T_merge safely below the K=1 single-step merge boundary.
 ///
 /// In both regimes the merge fan-in is set to achieve a single merge step
-/// (K=1) when the memory budget allows; otherwise the maximum budget-limited
-/// fan-in is used and the engine will perform multi-step merging automatically.
+/// (K=1) when the budget allows; otherwise the maximum budget-limited fan-in
+/// is used and the engine performs multi-step merging automatically.
 pub fn plan_resource_efficient(config: &PlannerConfig) -> PlannerResult {
     let d = config.dataset_mb;
     let m = config.memory_mb;
@@ -98,36 +114,57 @@ pub fn plan_resource_efficient(config: &PlannerConfig) -> PlannerResult {
     let p = config.page_size_kb / 1024.0; // KB → MB
     let rho = config.imbalance_factor;
     let slack = config.safety_slack;
+    let sparse_reserve = config.sparse_index_fraction;
 
-    // Feasibility threshold: T_max² ≤ 2ρ²M²/(D·P)
-    let threshold = 2.0 * rho * rho * m * m / (d * p);
+    // Effective memory after reserving the sparse-index fraction.
+    // The sparse index permanently occupies sparse_index_fraction of M during
+    // BOTH run generation and merging, so we subtract it once here and use
+    // m_eff for all subsequent budget calculations.
+    let m_eff = m * (1.0 - sparse_reserve);
+
+    // Feasibility threshold: T_max² ≤ 2ρ²·M_eff²/(D·P)
+    let threshold = 2.0 * rho * rho * m_eff * m_eff / (d * p);
     let regime = if t_max * t_max > threshold {
         PlannerRegime::MemoryBound
     } else {
         PlannerRegime::ThreadBound
     };
 
+    // -----------------------------------------------------------------------
+    // Phase 1: derive T_gen, T_merge, run_size_mb
+    //
+    // All memory calculations use M_eff (sparse index already excluded).
+    // safety_slack is an additional margin on top of M_eff to keep run_size
+    // and T_merge away from the K=1 single-step merge boundary.
+    //
+    // Memory-bound regime (T_max² > threshold):
+    //   T_gen  = T_max                              (no reduction — generation is cheap)
+    //   T_merge = floor((threshold / T_gen) × (1 − slack))
+    //             ^^^ [slack] keeps T_gen·T_merge safely below the K=1 hyperbola
+    //   run_size = (M_eff / T_gen) × (1 − slack)
+    //              ^^^ [slack] each thread fills ~95% of its effective memory share
+    //
+    // Thread-bound regime (T_max² ≤ threshold):
+    //   T_gen = T_merge = T_max                     (symmetric; full parallelism)
+    //   run_size_min = D·P / M_eff                  (theoretical K=1 floor)
+    //   run_size = min(run_size_min × (1 + slack),  ← [slack] nudge above floor
+    //                  (M_eff / T_gen) × (1 − slack)) ← [slack] cap below per-thread budget
+    // -----------------------------------------------------------------------
     let (t_gen_f, t_merge_f, run_size_mb) = match regime {
         PlannerRegime::MemoryBound => {
-            // Preserve T_gen = T_max; reduce T_merge until
-            // T_gen · T_merge ≤ threshold (with slack).
             let t_gen = t_max;
-            let t_merge = ((threshold / t_gen) * (1.0 - slack))
+            let t_merge = ((threshold / t_gen) * (1.0 - slack)) // [slack] stays below hyperbola
                 .floor()
                 .clamp(1.0, t_max);
-            // run_size = M / T_gen (use full budget per run-gen thread, less slack)
-            let run_size = (m / t_gen) * (1.0 - slack);
+            let run_size = (m_eff / t_gen) * (1.0 - slack); // [slack] stays below per-thread budget
             (t_gen, t_merge, run_size)
         }
         PlannerRegime::ThreadBound => {
-            // Symmetric: T_gen = T_merge = T_max.
-            // Minimum run size for K=1: D·P/M  (from merge_memory ≤ M).
-            // Add slack so the estimate sits above the theoretical floor.
             let t_gen = t_max;
             let t_merge = t_max;
-            let run_size_min = d * p / m;
-            // Cap at M/T_gen so run-gen memory stays within budget.
-            let run_size = (run_size_min * (1.0 + slack)).min((m / t_gen) * (1.0 - slack));
+            let run_size_min = d * p / m_eff; // theoretical K=1 floor
+            let run_size = (run_size_min * (1.0 + slack)) // [slack] sits above floor
+                .min((m_eff / t_gen) * (1.0 - slack)); // [slack] capped below per-thread budget
             (t_gen, t_merge, run_size)
         }
     };
@@ -135,11 +172,28 @@ pub fn plan_resource_efficient(config: &PlannerConfig) -> PlannerResult {
     let t_gen = t_gen_f.round() as usize;
     let t_merge = t_merge_f.round() as usize;
 
-    // Number of runs and per-thread merge fan-in for K=1.
+    // -----------------------------------------------------------------------
+    // Phase 2: derive merge_fanin
+    //
+    //   num_runs           = ceil(D / run_size_mb)
+    //   fanin_single_step  = ceil(num_runs / T_merge)   target for K=1 merge
+    //
+    //   max_fanin_in_budget = floor(M_eff / (T_merge·P)) − 1
+    //     - M_eff: sparse index fraction already excluded (see above)
+    //     - ÷ (T_merge·P): total I/O pages available, split across merge threads
+    //     - − 1: each thread needs 1 output buffer beyond its fanin input buffers,
+    //            so (fanin + 1)·T_merge·P ≤ M_eff  ⟹  fanin ≤ floor(M_eff/(T_merge·P)) − 1
+    //   No slack here — M_eff is already the hard physical limit for I/O buffers.
+    //
+    //   merge_fanin = min(fanin_single_step, max_fanin_in_budget)
+    //     If budget allows K=1, use exactly fanin_single_step.
+    //     Otherwise cap at max_fanin_in_budget; engine does multi-step merging automatically.
+    // -----------------------------------------------------------------------
     let num_runs = ((d / run_size_mb).ceil() as usize).max(1);
     let fanin_for_single_step = num_runs.div_ceil(t_merge).max(2);
-    // Maximum fan-in that fits in the memory budget.
-    let max_fanin_in_budget = ((m / (t_merge as f64 * p)).floor() as usize).max(2);
+    let max_fanin_in_budget = ((m_eff / (t_merge as f64 * p)).floor() as usize)
+        .saturating_sub(1) // reserve 1 output buffer per thread
+        .max(2);
     let merge_fanin = fanin_for_single_step.min(max_fanin_in_budget);
     let is_single_step = merge_fanin >= fanin_for_single_step;
 
