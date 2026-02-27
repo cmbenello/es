@@ -423,6 +423,7 @@ pub mod rand;
 pub mod replacement_selection;
 pub mod sketch;
 pub mod sort;
+pub mod sort_policy_sub;
 pub mod sort_stats;
 
 use std::path::{Path, PathBuf};

@@ -154,6 +154,8 @@ run_bench() {
   local extra_flags="${5-}"
   local track_mem="${6-false}"
   local cgroup_limit="${7-}"
+  local use_planner="${8-false}"
+  local print_only="${9-false}"
 
   local discard_output="false"
   local ovc="true"
@@ -175,25 +177,54 @@ run_bench() {
     imbalance_factor="${BASH_REMATCH[1]}"
   fi
 
-  # run_size_mb = (MemGB * 1024) / RunGenThreads
-  local run_size_mb=$(echo "scale=2; ($mem_gb * 1024) / $run_gen_threads" | bc)
+  local name
+  local mode_args=()
+  local temp_dir
 
-  # 5% of memory reserved for sparse index; remaining 95% for I/O buffers.
-  # Each thread needs fanin input buffers + 1 output buffer.
-  # fanin = total * 0.95 / (threads * page_size) - 1
-  local max_fanin=$(echo "($mem_gb * 1024 * 1024 * 95 / 100) / ($merge_threads * $PAGE_SIZE_KB) - 1" | bc)
+  if [[ "$use_planner" == "true" ]]; then
+    local max_threads="$run_gen_threads"
+    local mem_mb
+    mem_mb=$(echo "scale=0; $mem_gb * 1024 / 1" | bc)
 
-  local name="${exp_prefix}_RunGen${run_gen_threads}_Merge${merge_threads}_Mem${mem_gb}GB"
-  local temp_dir="${OUT_DIR}/${name}_tmp"
-  mkdir -p "$temp_dir"
+    if [[ "$print_only" == "true" ]]; then
+      echo "--- PLAN: max_threads=${max_threads}  mem=${mem_gb} GB (${mem_mb} MB) ---"
+      "$BINARY" -i "$INPUT_DATA" --print-plan --memory-mb "$mem_mb" --max-threads "$max_threads"
+      return 0
+    fi
 
-  echo "----------------------------------------------------------------"
-  echo "BENCHMARK: $name"
-  echo "  Mem Constraint:  ${mem_gb} GB"
-  echo "  Run Gen Threads: $run_gen_threads"
-  echo "  Merge Threads:   $merge_threads"
-  echo "  Buffer/Thread:   $run_size_mb MB"
-  echo "  Max Fan-In:      $max_fanin"
+    name="${exp_prefix}_Planner_Thr${max_threads}_Mem${mem_gb}GB"
+    mode_args=(--use-planner --memory-mb "$mem_mb" --max-threads "$max_threads")
+    temp_dir="${OUT_DIR}/${name}_tmp"
+    mkdir -p "$temp_dir"
+
+    echo "----------------------------------------------------------------"
+    echo "BENCHMARK (PLANNER): $name"
+    echo "  Mem Budget:      ${mem_gb} GB (${mem_mb} MB)"
+    echo "  Max Threads:     $max_threads"
+  else
+    # run_size_mb = (MemGB * 1024) / RunGenThreads
+    local run_size_mb
+    run_size_mb=$(echo "scale=2; ($mem_gb * 1024) / $run_gen_threads" | bc)
+    # 5% of memory reserved for sparse index; remaining 95% for I/O buffers.
+    # Each thread needs fanin input buffers + 1 output buffer.
+    # fanin = total * 0.95 / (threads * page_size) - 1
+    local max_fanin
+    max_fanin=$(echo "($mem_gb * 1024 * 1024 * 95 / 100) / ($merge_threads * $PAGE_SIZE_KB) - 1" | bc)
+    name="${exp_prefix}_RunGen${run_gen_threads}_Merge${merge_threads}_Mem${mem_gb}GB"
+    mode_args=(--run-gen-threads "$run_gen_threads" --merge-threads "$merge_threads"
+               --run-size-mb "$run_size_mb" --merge-fanin "$max_fanin")
+    temp_dir="${OUT_DIR}/${name}_tmp"
+    mkdir -p "$temp_dir"
+
+    echo "----------------------------------------------------------------"
+    echo "BENCHMARK: $name"
+    echo "  Mem Constraint:  ${mem_gb} GB"
+    echo "  Run Gen Threads: $run_gen_threads"
+    echo "  Merge Threads:   $merge_threads"
+    echo "  Buffer/Thread:   $run_size_mb MB"
+    echo "  Max Fan-In:      $max_fanin"
+  fi
+
   echo "  Discard Output:  $discard_output"
   echo "  OVC:             $ovc"
   echo "  Partition Type:  $partition_type"
@@ -209,6 +240,20 @@ run_bench() {
 
   local log_file="${OUT_DIR}/${name}.log"
 
+  local bin_cmd=("$BINARY"
+    -n "$name"
+    -i "$INPUT_DATA"
+    "${mode_args[@]}"
+    --warmup-runs "$WARMUP_RUNS"
+    --benchmark-runs "$BENCHMARK_RUNS"
+    --cooldown-seconds "$CLI_COOLDOWN_SECONDS"
+    --partition-type "$partition_type"
+    --imbalance-factor "$imbalance_factor"
+    --dir "$temp_dir"
+  )
+  # shellcheck disable=SC2206
+  [[ -n "$extra_flags" ]] && bin_cmd+=($extra_flags)
+
   if [[ "$track_mem" == "true" ]]; then
     local mem_log="${OUT_DIR}/${name}_mem.log"
     local pid_file="${temp_dir}/bin.pid"
@@ -219,20 +264,7 @@ run_bench() {
     # while keeping stdout piped through tee.
     (
       echo $BASHPID > "$pid_file"
-      exec "$BINARY" \
-        -n "$name" \
-        -i "$INPUT_DATA" \
-        --run-gen-threads "$run_gen_threads" \
-        --merge-threads "$merge_threads" \
-        --run-size-mb "$run_size_mb" \
-        --merge-fanin "$max_fanin" \
-        --warmup-runs "$WARMUP_RUNS" \
-        --benchmark-runs "$BENCHMARK_RUNS" \
-        --cooldown-seconds "$CLI_COOLDOWN_SECONDS" \
-        --partition-type "$partition_type" \
-        --imbalance-factor "$imbalance_factor" \
-        --dir "$temp_dir" \
-        $extra_flags
+      exec "${bin_cmd[@]}"
     ) 2>&1 | tee -a "$log_file" &
     local pipe_bg=$!
 
@@ -256,23 +288,6 @@ run_bench() {
     wait "$pipe_bg"
     wait "$poll_pid" 2>/dev/null || true
   else
-    local bin_cmd=("$BINARY"
-      -n "$name"
-      -i "$INPUT_DATA"
-      --run-gen-threads "$run_gen_threads"
-      --merge-threads "$merge_threads"
-      --run-size-mb "$run_size_mb"
-      --merge-fanin "$max_fanin"
-      --warmup-runs "$WARMUP_RUNS"
-      --benchmark-runs "$BENCHMARK_RUNS"
-      --cooldown-seconds "$CLI_COOLDOWN_SECONDS"
-      --partition-type "$partition_type"
-      --imbalance-factor "$imbalance_factor"
-      --dir "$temp_dir"
-    )
-    # shellcheck disable=SC2206
-    [[ -n "$extra_flags" ]] && bin_cmd+=($extra_flags)
-
     if [[ -n "$cgroup_limit" ]]; then
       run_with_cgroup_limits "$cgroup_limit" "$name" "${bin_cmd[@]}" 2>&1 | tee -a "$log_file"
     else
@@ -284,7 +299,6 @@ run_bench() {
   upload_logs
   clear_cache_if_available
 }
-
 
 # ==============================================================================
 # EXPERIMENT 0: SINGLE RUN WITH MEMORY TRACKING (2GB RAM, 44 Threads)
@@ -303,6 +317,18 @@ echo "=== EXP 1: CGROUP MEMORY SWEEP (16 THREADS, Memory = 60% of cgroup) ==="
 for cgroup in 48 32 24 16 8 4 2; do
   mem=$(echo "scale=1; $cgroup * 0.6" | bc)
   run_bench "Exp1" "16" "16" "$mem" "--discard-final-output" "false" "${cgroup}GiB"
+  cooldown
+done
+
+# ==============================================================================
+# EXPERIMENT 1 (PLANNER): CGROUP MEMORY SWEEP — planner-chosen config
+# Same cgroup sweep as Exp1, but T_gen/T_merge/run_size/fanin are derived
+# automatically by the resource-efficient planner (--use-planner).
+# ==============================================================================
+echo "=== EXP 1 (PLANNER): CGROUP MEMORY SWEEP (16 THREADS, Memory = 60% of cgroup) ==="
+for cgroup in 48 32 24 16 8 4 2; do
+  mem=$(echo "scale=1; $cgroup * 0.6" | bc)
+  run_bench "Exp1P" "16" "" "$mem" "--discard-final-output" "false" "${cgroup}GiB" "true"
   cooldown
 done
 
