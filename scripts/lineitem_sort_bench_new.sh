@@ -330,6 +330,19 @@ for cgroup in 48 32 24 16 8 4 2; do
 done
 
 # ==============================================================================
+# EXPERIMENT 1 (PLANNER + BUFFERED I/O): CGROUP MEMORY SWEEP
+# Same cgroup sweep as Exp1P, but using the buffered-I/O binary.
+# ==============================================================================
+echo "=== EXP 1 (PLANNER + BUFFERED I/O): CGROUP MEMORY SWEEP (16 THREADS, Memory = 60% of cgroup) ==="
+BINARY="$BINARY_BIO"
+for cgroup in 48 32 24 16 8 4 2; do
+  mem=$(echo "scale=1; $cgroup * 0.6" | bc)
+  run_bench "Exp1PBIO" "16" "" "$mem" "--discard-final-output" "false" "${cgroup}GiB" "true"
+  cooldown
+done
+BINARY="$BINARY_DIO"
+
+# ==============================================================================
 # EXPERIMENT 1 (BUFFERED I/O): CGROUP MEMORY SWEEP (Fixed 16 Threads, Memory = 60% of cgroup)
 # ==============================================================================
 echo "=== EXP 1 (BUFFERED I/O): CGROUP MEMORY SWEEP (16 THREADS, Memory = 60% of cgroup) ==="
