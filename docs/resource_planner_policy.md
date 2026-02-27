@@ -15,7 +15,6 @@ Given:
 - `T_max`: max threads (`max_threads`)
 - `P`: page size in MB (`page_size_kb / 1024`)
 - `rho`: usable-memory ratio (fixed at `0.8` in planner)
-- `slack`: safety slack (`safety_slack`)
 - `sparse_index_fraction`: reserved memory fraction for sparse index
 - `min_rg_buf_mb`: minimum per-thread run-generation buffer target (default `10 MB`)
 
@@ -27,7 +26,7 @@ Derived:
 
 Compute:
 
-- `E = replacement-selection run-expansion assumption` (planner uses worst-case `E = 1`)
+- `E = replacement-selection run-expansion assumption` (planner uses `E = 1`)
 - `threshold = E * M_eff^2 / (D * P)`
 
 Regime:
@@ -42,23 +41,23 @@ Use this compact version when planning:
 1. `T_merge = T_max`
 2. `max_fanin_in_budget = floor(M_eff / (T_merge * P)) - 1`
 3. `rg_buf_min = D / max_fanin_in_budget`  
-   This is a **worst-case** K=1 bound (assumes no replacement-selection expansion).
-4. `rg_buf_target = max(min_rg_buf_mb, rg_buf_min * (1 + slack))`
-5. If `rg_buf_target > (M_eff / T_gen) * (1 - slack)`, reduce `T_gen` until it fits.
+   This is the K=1 bound under `E = 1`.
+4. `rg_buf_target = max(min_rg_buf_mb, rg_buf_min)`
+5. If `rg_buf_target > (M_eff / T_gen)`, reduce `T_gen` until it fits.
 6. Keep `merge_fanin = max_fanin_in_budget`.
 
-This is conservative by design, so estimated runs are an upper-bound style estimate.
+This keeps estimates simple and consistent with `E = 1`.
 
 ## Step 2: Choose `T_gen`, `T_merge`, and `rg_buf_mb`
 
 ### Memory-bound
 
 - Start from `T_gen = T_max`
-- If `(M_eff / T_gen) * (1 - slack) < min_rg_buf_mb`, shrink `T_gen` to:
-  - `T_gen = floor((M_eff * (1 - slack)) / min_rg_buf_mb)` (clamped to `[1, T_max]`)
-- `T_merge = floor((threshold / T_gen) * (1 - slack))`
+- If `(M_eff / T_gen) < min_rg_buf_mb`, shrink `T_gen` to:
+  - `T_gen = floor(M_eff / min_rg_buf_mb)` (clamped to `[1, T_max]`)
+- `T_merge = floor(threshold / T_gen)`
 - Clamp `T_merge` to `[1, T_max]`
-- `rg_buf_mb = (M_eff / T_gen) * (1 - slack)`
+- `rg_buf_mb = M_eff / T_gen`
 
 ### Thread-bound
 
@@ -66,17 +65,17 @@ This is conservative by design, so estimated runs are an upper-bound style estim
 - If needed, shrink `T_gen` with the same floor rule as above so
   `rg_buf_mb` can reach at least `min_rg_buf_mb`
 - `max_fanin_in_budget = floor(M_eff / (T_merge * P)) - 1` (minimum 2)
-- Conservative estimate: `num_runs ≈ D / rg_buf_mb` (worst-case, no run expansion)
+- Estimated runs use `num_runs ≈ D / rg_buf_mb` under `E = 1`.
 - K=1 requirement: `num_runs <= merge_fanin`
 - Budget cap: `merge_fanin <= max_fanin_in_budget`
 - Sufficient K=1 condition under budget:
   - `D / rg_buf_mb <= max_fanin_in_budget`
   - `rg_buf_mb >= D / max_fanin_in_budget`
 - Define:
-  - `rg_buf_min = D / max_fanin_in_budget` (**worst-case K=1 lower bound**)
+  - `rg_buf_min = D / max_fanin_in_budget` (K=1 lower bound under `E = 1`)
 - Final choice:
-  - `rg_buf_target = max(min_rg_buf_mb, rg_buf_min * (1 + slack))`
-  - `rg_buf_mb = min(rg_buf_target, (M_eff / T_gen) * (1 - slack))`
+  - `rg_buf_target = max(min_rg_buf_mb, rg_buf_min)`
+  - `rg_buf_mb = min(rg_buf_target, M_eff / T_gen)`
 
 ## Step 3: Choose `merge_fanin` and `single_step`
 
@@ -101,7 +100,6 @@ Inputs from a real run setup:
 - `P = 64 KiB = 0.0625 MB`
 - `rho = 0.8` (fixed in planner)
 - `sparse_index_fraction = 0.05`
-- `slack = 0.05`
 
 Step-by-step:
 
@@ -115,9 +113,9 @@ Step-by-step:
 3. Thread-bound settings:
    - `T_gen = T_merge = 16`
    - `max_fanin_in_budget = floor(22413.16 / (16 * 0.0625)) - 1 = 22412`
-   - `rg_buf_min = D / max_fanin_in_budget = 8.9086 MB` (worst-case)
-   - `rg_buf_target = max(min_rg_buf_mb, rg_buf_min * 1.05) = max(10.0, 9.3540) = 10.0 MB`
-   - `rg_buf_mb = min(rg_buf_target, (M_eff / T_gen) * 0.95) = min(10.0, 1330.78) = 10.0 MB`
+   - `rg_buf_min = D / max_fanin_in_budget = 8.9086 MB` (under `E = 1`)
+   - `rg_buf_target = max(min_rg_buf_mb, rg_buf_min) = max(10.0, 8.9086) = 10.0 MB`
+   - `rg_buf_mb = min(rg_buf_target, M_eff / T_gen) = min(10.0, 1400.82) = 10.0 MB`
 4. Estimated runs and single-step flag:
    - `num_runs = ceil(D / rg_buf_mb) = ceil(199659.46 / 10.0) = 19966`
    - `merge_fanin = 22412`
@@ -141,7 +139,6 @@ Inputs:
 - `P = 64 KiB = 0.0625 MB`
 - `rho = 0.8` (fixed in planner)
 - `sparse_index_fraction = 0.05`
-- `slack = 0.05`
 
 Step-by-step:
 
@@ -155,9 +152,9 @@ Step-by-step:
 3. Thread-bound settings:
    - `T_gen = T_merge = 16`
    - `max_fanin_in_budget = floor(22413.16 / (16 * 0.0625)) - 1 = 22412`
-   - `rg_buf_min = D / max_fanin_in_budget = 9.1380 MB` (worst-case)
-   - `rg_buf_target = max(min_rg_buf_mb, rg_buf_min * 1.05) = max(10.0, 9.5949) = 10.0 MB`
-   - `rg_buf_mb = min(rg_buf_target, (M_eff / T_gen) * 0.95) = min(10.0, 1330.78) = 10.0 MB`
+   - `rg_buf_min = D / max_fanin_in_budget = 9.1380 MB` (under `E = 1`)
+   - `rg_buf_target = max(min_rg_buf_mb, rg_buf_min) = max(10.0, 9.1380) = 10.0 MB`
+   - `rg_buf_mb = min(rg_buf_target, M_eff / T_gen) = min(10.0, 1400.82) = 10.0 MB`
 4. Estimated runs and single-step flag:
    - `num_runs = ceil(D / rg_buf_mb) = ceil(204800 / 10.0) = 20480`
    - `merge_fanin = 22412`
@@ -183,7 +180,6 @@ Note:
 - It is **not** per-thread fan-in.
 - `merge_fanin` is kept at the budget-limited maximum for the chosen
   `merge_threads`; it is not reduced to match estimated run count.
-- Planner uses a conservative worst-case run estimate (`num_runs ≈ D / rg_buf_mb`),
-  i.e., no assumed replacement-selection expansion.
+- Planner uses `E = 1` for the run estimate (`num_runs ≈ D / rg_buf_mb`).
 
 This matches merge engine behavior (`fanin >= runs.len()` means one merge pass).

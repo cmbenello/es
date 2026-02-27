@@ -30,11 +30,6 @@ pub struct PlannerConfig {
     pub max_threads: usize,
     /// I/O page / buffer size in KB (P, default: 64)
     pub page_size_kb: f64,
-    /// Safety margin for the K=1 single-step merge constraint.
-    /// Applied to run_size and T_merge targets so they sit safely below their
-    /// theoretical limits (avoids operating right on the feasibility boundary).
-    /// (default: 0.05)
-    pub safety_slack: f64,
     /// Fraction of M permanently occupied by the sparse index.
     /// Subtracted after rho scaling:
     /// M_eff = (rho × M) × (1 − sparse_index_fraction).
@@ -56,7 +51,6 @@ impl Default for PlannerConfig {
             memory_mb: 0.0,
             max_threads: 1,
             page_size_kb: 64.0,
-            safety_slack: 0.05,
             sparse_index_fraction: 0.05,
             min_rg_buf_mb: 10.0,
         }
@@ -112,16 +106,13 @@ impl std::fmt::Display for PlannerResult {
 ///   under the global fan-in budget.
 /// * **Memory-bound** (`T_max² > E·M_eff²/(D·P)`): start from `T_gen = T_max`,
 ///   then reduce `T_gen` if needed to satisfy `min_rg_buf_mb`; reduce
-///   `T_merge` until the hyperbola constraint is satisfied (with safety
-///   slack).
+///   `T_merge` until the hyperbola constraint is satisfied.
 ///
-/// **M_eff vs safety_slack**: planner first applies a fixed usable-memory
+/// **M_eff**: planner first applies a fixed usable-memory
 /// ratio `rho=0.8`, then subtracts `sparse_index_fraction`:
 /// `M_eff = (rho × M) × (1 − sparse_index_fraction)`.
 /// This is the effective
 /// memory available for both run-generation buffers and merge I/O buffers.
-/// `safety_slack` is an independent margin applied on top of M_eff to keep
-/// run_size and T_merge safely below the K=1 single-step merge boundary.
 ///
 /// In both regimes the merge fan-in is set to the maximum value allowed by
 /// the selected `T_merge` and the memory budget. Estimated run count is used
@@ -137,7 +128,6 @@ pub fn plan_resource_efficient(config: &PlannerConfig) -> PlannerResult {
     let m = config.memory_mb;
     let t_max = config.max_threads as f64;
     let p = config.page_size_kb / 1024.0; // KB → MB
-    let slack = config.safety_slack;
     let sparse_reserve = config.sparse_index_fraction;
     let min_rg_buf_mb = config.min_rg_buf_mb.max(0.0);
 
@@ -165,8 +155,8 @@ pub fn plan_resource_efficient(config: &PlannerConfig) -> PlannerResult {
         if min_rg <= 0.0 {
             return config.max_threads.max(1);
         }
-        // Per-thread cap is (M_eff/T_gen) * (1-slack) in both regimes.
-        let cap = ((m_eff * (1.0 - slack)) / min_rg).floor() as usize;
+        // Per-thread cap is M_eff/T_gen in both regimes.
+        let cap = (m_eff / min_rg).floor() as usize;
         cap.clamp(1, config.max_threads.max(1))
     };
 
@@ -174,17 +164,12 @@ pub fn plan_resource_efficient(config: &PlannerConfig) -> PlannerResult {
     // Phase 1: derive T_gen, T_merge, rg_buf_mb
     //
     // All memory calculations use M_eff (sparse index already excluded).
-    // safety_slack is an additional margin on top of M_eff to keep run_size
-    // and T_merge away from the K=1 single-step merge boundary.
-    //
     // Memory-bound regime (T_max² > threshold):
     //   Start from T_gen = T_max, but if that would make rg_buf_mb too small,
     //   reduce T_gen so rg_buf_mb reaches at least min_rg_buf_mb.
-    //   T_merge = floor((threshold / T_gen) × (1 − slack))
-    //             ^^^ [slack] keeps T_gen·T_merge safely below the K=1 hyperbola
+    //   T_merge = floor(threshold / T_gen)
     //   rg_buf_mb = max(min_rg_buf_mb, smallest feasible under T_gen)
-    //              then capped by (M_eff / T_gen) × (1 − slack)
-    //              ^^^ [slack] each thread fills ~95% of its effective memory share
+    //              then capped by (M_eff / T_gen)
     //
     // Thread-bound regime (T_max² ≤ threshold):
     //   Start from T_gen = T_merge = T_max (symmetric), but if needed reduce
@@ -198,16 +183,14 @@ pub fn plan_resource_efficient(config: &PlannerConfig) -> PlannerResult {
     //     D / rg_buf_mb ≤ max_fanin_in_budget
     //     rg_buf_mb ≥ D / max_fanin_in_budget = rg_buf_min
     //
-    //   rg_buf_target = max(min_rg_buf_mb, rg_buf_min × (1 + slack))
-    //   rg_buf_mb     = min(rg_buf_target, (M_eff / T_gen) × (1 − slack))
+    //   rg_buf_target = max(min_rg_buf_mb, rg_buf_min)
+    //   rg_buf_mb     = min(rg_buf_target, (M_eff / T_gen))
     // -----------------------------------------------------------------------
     let (t_gen_f, t_merge_f, rg_buf_mb) = match regime {
         PlannerRegime::MemoryBound => {
             let t_gen = t_max.min(max_tgen_for_min_rg(min_rg_buf_mb) as f64);
-            let t_merge = ((threshold / t_gen) * (1.0 - slack)) // [slack] stays below hyperbola
-                .floor()
-                .clamp(1.0, t_max);
-            let run_size_cap = (m_eff / t_gen) * (1.0 - slack); // [slack] stays below per-thread budget
+            let t_merge = (threshold / t_gen).floor().clamp(1.0, t_max);
+            let run_size_cap = m_eff / t_gen;
             // t_gen is already reduced (best-effort) to honor min_rg_buf_mb.
             // If memory is too small even at T_gen=1, this falls back to cap.
             let run_size = run_size_cap;
@@ -220,8 +203,8 @@ pub fn plan_resource_efficient(config: &PlannerConfig) -> PlannerResult {
             // Worst-case K=1 floor (no assumed RS expansion):
             // rg_buf_min_worst_case = D / max_fanin_in_budget
             let rg_buf_min_worst_case = d / (RS_EXPANSION_E * max_fanin_in_budget as f64);
-            let run_size_target = (rg_buf_min_worst_case * (1.0 + slack)).max(min_rg_buf_mb); // [slack] + fixed floor
-            let run_size = run_size_target.min((m_eff / t_gen) * (1.0 - slack)); // capped below per-thread budget
+            let run_size_target = rg_buf_min_worst_case.max(min_rg_buf_mb);
+            let run_size = run_size_target.min(m_eff / t_gen); // capped below per-thread budget
             (t_gen, t_merge, run_size)
         }
     };
@@ -240,7 +223,7 @@ pub fn plan_resource_efficient(config: &PlannerConfig) -> PlannerResult {
     //     - ÷ (T_merge·P): total I/O pages available, split across merge threads
     //     - − 1: each thread needs 1 output buffer beyond its fanin input buffers,
     //            so (fanin + 1)·T_merge·P ≤ M_eff  ⟹  fanin ≤ floor(M_eff/(T_merge·P)) − 1
-    //   No slack here — M_eff is already the hard physical limit for I/O buffers.
+    //   M_eff is the hard physical limit for I/O buffers.
     //
     //   merge_fanin = max_fanin_in_budget
     //     Keep fan-in at the maximum budget-limited value for the chosen
