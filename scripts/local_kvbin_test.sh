@@ -100,9 +100,9 @@ run_bench() {
   local kvbin="${DATASETS_DIR}/${dataset}.kvbin"
   local idx="${DATASETS_DIR}/${dataset}.kvbin.idx"
 
-  # run_size_mb = (MemGB * 1024) / Threads
-  local run_size_mb
-  run_size_mb=$(echo "scale=2; ($MEM_GB * 1024) / $THREADS" | bc)
+  # rg_buf_mb = (MemGB * 1024) / Threads
+  local rg_buf_mb
+  rg_buf_mb=$(echo "scale=2; ($MEM_GB * 1024) / $THREADS" | bc)
 
   # fanin = (mem * 0.95) / (threads * page_size) - 1
   local max_fanin
@@ -118,7 +118,7 @@ run_bench() {
   echo "  Index:           $idx"
   echo "  Mem Constraint:  ${MEM_GB} GB"
   echo "  Threads:         $THREADS"
-  echo "  Buffer/Thread:   $run_size_mb MB"
+  echo "  Buffer/Thread:   $rg_buf_mb MB"
   echo "  Max Fan-In:      $max_fanin"
   echo "  Partition Type:  $partition_type"
   echo "----------------------------------------------------------------"
@@ -132,7 +132,7 @@ run_bench() {
     --index "$idx" \
     --run-gen-threads "$THREADS" \
     --merge-threads "$THREADS" \
-    --run-size-mb "$run_size_mb" \
+    --rg-buf-mb "$rg_buf_mb" \
     --merge-fanin "$max_fanin" \
     --warmup-runs "$WARMUP_RUNS" \
     --benchmark-runs "$BENCHMARK_RUNS" \

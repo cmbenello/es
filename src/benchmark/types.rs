@@ -18,7 +18,7 @@ pub struct BenchmarkConfig {
     pub temp_dir: PathBuf,
     pub run_gen_threads: usize,
     pub use_ovc: bool,
-    pub run_size_mb: f64,
+    pub rg_buf_mb: f64,
     pub run_gen_memory_mb: f64,
     pub merge_threads: usize,
     pub merge_fanin: usize,

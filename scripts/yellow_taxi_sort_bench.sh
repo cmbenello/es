@@ -36,7 +36,7 @@ cooldown() {
 
 run_case() {
   local name="$1"; shift
-  local run_size_mb="$1"; shift
+  local rg_buf_mb="$1"; shift
   local merge_fanin="$1"; shift
   # Any extra flags (e.g., --ovc) are passed through
   local extra_flags=("$@")
@@ -54,7 +54,7 @@ run_case() {
   done
 
   # Derived memory figures for context (MiB)
-  echo "[$name]: Run Size: ${run_size_mb} MB, Run Gen Threads: ${RUN_GEN_THREADS}, Merge Threads: ${MERGE_THREADS}, OVC: ${ovc_label}" | tee -a "${OUT_DIR}/${name}.log"
+  echo "[$name]: Run Size: ${rg_buf_mb} MB, Run Gen Threads: ${RUN_GEN_THREADS}, Merge Threads: ${MERGE_THREADS}, OVC: ${ovc_label}" | tee -a "${OUT_DIR}/${name}.log"
 
   # Note: --headers flag assumes the input CSV has a header row.
   # Key columns default to "2,3"; value column default to "0".
@@ -63,7 +63,7 @@ run_case() {
     -i "$INPUT_CSV" \
     --run-gen-threads "$RUN_GEN_THREADS" \
     --merge-threads "$MERGE_THREADS" \
-    --run-size-mb "$run_size_mb" \
+    --rg-buf-mb "$rg_buf_mb" \
     --merge-fanin "$merge_fanin" \
     --warmup-runs 1 \
     --benchmark-runs 3 \

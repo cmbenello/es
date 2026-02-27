@@ -5,7 +5,7 @@ fn summarize(
     result: &BenchmarkResult,
 ) -> (
     String, // name
-    f64,    // run_size_mb
+    f64,    // rg_buf_mb
     usize,  // gen_thr
     usize,  // merge_thr
     usize,  // bench_runs
@@ -121,7 +121,7 @@ fn summarize(
 
     (
         cfg.config_name.clone(),
-        cfg.run_size_mb,
+        cfg.rg_buf_mb,
         cfg.run_gen_threads,
         cfg.merge_threads,
         svec.len(),
@@ -565,7 +565,7 @@ pub fn print_benchmark_summary(result: &BenchmarkResult) {
         println!(
             "{:<20} {:<10.1} {:<10} {:<10} {:<10} {:<12.2} {:<10.2} {:<10.2} {:<12} {:<16.2} {:<10.1} {:<10.1}",
             name,
-            cfg.run_size_mb,
+            cfg.rg_buf_mb,
             sort_stats.run_gen_stats.num_runs,
             cfg.run_gen_threads,
             cfg.merge_threads,
@@ -582,7 +582,7 @@ pub fn print_benchmark_summary(result: &BenchmarkResult) {
     // Print aggregate line
     let (
         _name,
-        run_size_mb,
+        rg_buf_mb,
         gen_thr,
         merge_thr,
         _bench_runs,
@@ -598,7 +598,7 @@ pub fn print_benchmark_summary(result: &BenchmarkResult) {
     println!(
         "{:<20} {:<10.1} {:<10} {:<10} {:<10} {:<12.2} {:<10.2} {:<10.2} {:<12} {:<16.2} {:<10.1} {:<10.1}",
         "avg",
-        run_size_mb,
+        rg_buf_mb,
         rg_runs,
         gen_thr,
         merge_thr,

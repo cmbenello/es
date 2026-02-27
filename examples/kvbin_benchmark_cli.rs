@@ -67,7 +67,7 @@ struct Args {
     #[arg(long, default_value_t = true, action = ArgAction::Set)]
     ovc: bool,
 
-    /// Automatically derive run_gen_threads, merge_threads, run_size_mb and
+    /// Automatically derive run_gen_threads, merge_threads, rg_buf_mb and
     /// merge_fanin from the dataset size and the budget (--memory-mb,
     /// --max-threads).  The planner applies the two-regime resource-efficient
     /// policy described in the paper.  When set, the four manual tuning args
@@ -93,7 +93,7 @@ struct Args {
 
     /// Run size for run generation (MB)
     #[arg(long, required_unless_present_any = ["estimate_size", "use_planner", "print_plan"])]
-    run_size_mb: Option<f64>,
+    rg_buf_mb: Option<f64>,
 
     /// Merge fan-in (global per merge operation)
     #[arg(long, required_unless_present_any = ["estimate_size", "use_planner", "print_plan"])]
@@ -169,7 +169,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             memory_mb,
             max_threads,
             page_size_kb: DEFAULT_BUFFER_SIZE as f64 / 1024.0,
-            imbalance_factor: args.imbalance_factor,
             ..PlannerConfig::default()
         });
         println!("{plan}");
@@ -177,7 +176,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     // Resolve run configuration — either from explicit args or via the planner.
-    let (run_gen_threads, merge_threads, run_size_mb, merge_fanin) = if args.use_planner {
+    let (run_gen_threads, merge_threads, rg_buf_mb, merge_fanin) = if args.use_planner {
         let memory_mb = args
             .memory_mb
             .ok_or("--memory-mb is required when --use-planner is set")?;
@@ -192,14 +191,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             memory_mb,
             max_threads,
             page_size_kb: DEFAULT_BUFFER_SIZE as f64 / 1024.0,
-            imbalance_factor: args.imbalance_factor,
             ..PlannerConfig::default()
         });
         println!("Planner: {plan}");
         (
             plan.run_gen_threads,
             plan.merge_threads,
-            plan.run_size_mb,
+            plan.rg_buf_mb,
             plan.merge_fanin,
         )
     } else {
@@ -210,13 +208,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let merge_threads = args
             .merge_threads
             .expect("--merge-threads required unless --estimate-size or --use-planner");
-        let run_size_mb = args
-            .run_size_mb
-            .expect("--run-size-mb required unless --estimate-size or --use-planner");
+        let rg_buf_mb = args
+            .rg_buf_mb
+            .expect("--rg-buf-mb required unless --estimate-size or --use-planner");
         let merge_fanin = args
             .merge_fanin
             .expect("--merge-fanin required unless --estimate-size or --use-planner");
-        (run_gen_threads, merge_threads, run_size_mb, merge_fanin)
+        (run_gen_threads, merge_threads, rg_buf_mb, merge_fanin)
     };
 
     let partition_type: PartitionType = args.partition_type.into();
@@ -231,8 +229,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         temp_dir: args.dir,
         run_gen_threads,
         use_ovc: args.ovc,
-        run_size_mb,
-        run_gen_memory_mb: run_size_mb * run_gen_threads as f64,
+        rg_buf_mb,
+        run_gen_memory_mb: rg_buf_mb * run_gen_threads as f64,
         merge_threads,
         merge_fanin,
         merge_memory_mb: (merge_fanin as f64)

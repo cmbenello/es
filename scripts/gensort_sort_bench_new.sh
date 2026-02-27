@@ -202,9 +202,9 @@ run_bench() {
     echo "  Mem Budget:      ${mem_gb} GB (${mem_mb} MB)"
     echo "  Max Threads:     $max_threads"
   else
-    # run_size_mb = (MemGB * 1024) / RunGenThreads
-    local run_size_mb
-    run_size_mb=$(echo "scale=2; ($mem_gb * 1024) / $run_gen_threads" | bc)
+    # rg_buf_mb = (MemGB * 1024) / RunGenThreads
+    local rg_buf_mb
+    rg_buf_mb=$(echo "scale=2; ($mem_gb * 1024) / $run_gen_threads" | bc)
     # 5% of memory reserved for sparse index; remaining 95% for I/O buffers.
     # Each thread needs fanin input buffers + 1 output buffer.
     # fanin = total * 0.95 / (threads * page_size) - 1
@@ -212,7 +212,7 @@ run_bench() {
     max_fanin=$(echo "($mem_gb * 1024 * 1024 * 95 / 100) / ($merge_threads * $PAGE_SIZE_KB) - 1" | bc)
     name="${exp_prefix}_RunGen${run_gen_threads}_Merge${merge_threads}_Mem${mem_gb}GB"
     mode_args=(--run-gen-threads "$run_gen_threads" --merge-threads "$merge_threads"
-               --run-size-mb "$run_size_mb" --merge-fanin "$max_fanin")
+               --rg-buf-mb "$rg_buf_mb" --merge-fanin "$max_fanin")
     temp_dir="${OUT_DIR}/${name}_tmp"
     mkdir -p "$temp_dir"
 
@@ -221,7 +221,7 @@ run_bench() {
     echo "  Mem Constraint:  ${mem_gb} GB"
     echo "  Run Gen Threads: $run_gen_threads"
     echo "  Merge Threads:   $merge_threads"
-    echo "  Buffer/Thread:   $run_size_mb MB"
+    echo "  Buffer/Thread:   $rg_buf_mb MB"
     echo "  Max Fan-In:      $max_fanin"
   fi
 

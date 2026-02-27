@@ -29,7 +29,7 @@ THREADS=14
 MEM_MB=384
 PAGE_SIZE_KB=64
 
-RUN_SIZE_MB=$(echo "scale=2; $MEM_MB / $THREADS" | bc)       # 27.43
+rg_buf_mb=$(echo "scale=2; $MEM_MB / $THREADS" | bc)       # 27.43
 FANIN=$(echo "$MEM_MB * 1024 / ($THREADS * $PAGE_SIZE_KB)" | bc)  # 439
 
 echo "Building gen_sort_cli example (release)..."
@@ -39,7 +39,7 @@ BINARY=./target/release/examples/gen_sort_cli
 echo "================================================================"
 echo "Total Memory:   ${MEM_MB} MiB"
 echo "Threads:        $THREADS"
-echo "Run Size:       ${RUN_SIZE_MB} MiB"
+echo "Run Size:       ${rg_buf_mb} MiB"
 echo "Fan-In:         $FANIN"
 echo "Log:            $LOG_FILE"
 echo "================================================================"
@@ -49,7 +49,7 @@ echo "================================================================"
   -i "$INPUT_DATA" \
   --run-gen-threads "$THREADS" \
   --merge-threads "$THREADS" \
-  --run-size-mb "$RUN_SIZE_MB" \
+  --rg-buf-mb "$rg_buf_mb" \
   --merge-fanin "$FANIN" \
   --warmup-runs 0 \
   --benchmark-runs 1 \

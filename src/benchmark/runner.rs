@@ -36,7 +36,7 @@ impl BenchmarkRunner {
             "Parameters: Run Gen Threads: {}, Use OVC: {}, Run Size: {:.2} MB, Run Gen Memory: {:.1} MB, Merge Threads: {}, Merge Fanin: {}, Merge Memory: {:.1} MB, Imbalance Factor: {:.1}, Partition: {:?}",
             self.config.run_gen_threads,
             self.config.use_ovc,
-            self.config.run_size_mb,
+            self.config.rg_buf_mb,
             self.config.run_gen_memory_mb,
             self.config.merge_threads,
             self.config.merge_fanin,
@@ -68,7 +68,7 @@ impl BenchmarkRunner {
         println!("Estimated data size: {:.2} MB", dataset_mb);
         println!("Run generation threads: {}", self.config.run_gen_threads);
         println!("Use OVC: {}", self.config.use_ovc);
-        println!("Run size (MB): {:.2}", self.config.run_size_mb);
+        println!("Run size (MB): {:.2}", self.config.rg_buf_mb);
         println!(
             "Run generation memory (MB): {:.1}",
             self.config.run_gen_memory_mb
@@ -209,7 +209,7 @@ impl BenchmarkRunner {
         let output = if self.config.use_ovc {
             let mut sorter = ExternalSorterWithOVC::new(
                 self.config.run_gen_threads,
-                (self.config.run_size_mb * 1024.0 * 1024.0) as usize,
+                (self.config.rg_buf_mb * 1024.0 * 1024.0) as usize,
                 self.config.merge_threads,
                 self.config.merge_fanin,
                 temp_dir,
@@ -222,7 +222,7 @@ impl BenchmarkRunner {
         } else {
             let mut sorter = ExternalSorter::new(
                 self.config.run_gen_threads,
-                (self.config.run_size_mb * 1024.0 * 1024.0) as usize,
+                (self.config.rg_buf_mb * 1024.0 * 1024.0) as usize,
                 self.config.merge_threads,
                 self.config.merge_fanin,
                 temp_dir,
