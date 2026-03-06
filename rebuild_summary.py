@@ -67,6 +67,9 @@ def parse_merge_fanin(text: str) -> Optional[int]:
     m = MERGE_FANIN_RE.search(text)
     return int(m.group("x")) if m else None
 
+def parse_estimated_data_mb(text: str) -> Optional[float]:
+    m = EST_SIZE_RE.search(text)
+    return float(m.group("x")) if m else None
 
 # --------------------------
 # Section anchors
@@ -520,7 +523,6 @@ def main() -> None:
 
     if not wrote_any:
         raise SystemExit("[ERR] wrote 0 summaries (no dirs had parseable logs)")
-
 
 if __name__ == "__main__":
     main()
