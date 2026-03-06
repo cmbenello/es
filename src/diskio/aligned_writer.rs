@@ -2,7 +2,9 @@ use std::io::{self, Write};
 use std::sync::Arc;
 
 use crate::diskio::aligned_buffer::AlignedBuffer;
-use crate::diskio::constants::{DEFAULT_BUFFER_SIZE, DIRECT_IO_ALIGNMENT, align_up};
+#[cfg(not(feature = "buffered_io"))]
+use crate::diskio::constants::align_up;
+use crate::diskio::constants::{DEFAULT_BUFFER_SIZE, DIRECT_IO_ALIGNMENT};
 use crate::diskio::file::{SharedFd, pwrite_fd};
 use crate::diskio::io_stats::IoStatsTracker;
 
@@ -59,10 +61,14 @@ impl AlignedWriter {
             return Ok(());
         }
 
-        // For Direct I/O, we need to write aligned chunks
+        // Direct I/O requires writes to be aligned; buffered I/O writes exact bytes.
+        #[cfg(not(feature = "buffered_io"))]
         let write_len = align_up(self.buffer_pos, DIRECT_IO_ALIGNMENT);
+        #[cfg(feature = "buffered_io")]
+        let write_len = self.buffer_pos;
 
-        // Zero out the padding bytes
+        // Zero out the padding bytes (only needed for direct I/O).
+        #[cfg(not(feature = "buffered_io"))]
         for i in self.buffer_pos..write_len {
             self.buffer.as_mut_slice()[i] = 0;
         }
@@ -330,7 +336,10 @@ mod tests {
         writer.flush().unwrap();
         let (ops, bytes) = tracker.get_write_stats();
         assert!(ops > 0);
+        #[cfg(not(feature = "buffered_io"))]
         assert_eq!(bytes as usize, align_up(10_000, DIRECT_IO_ALIGNMENT));
+        #[cfg(feature = "buffered_io")]
+        assert_eq!(bytes as usize, 10_000);
 
         // Write more data
         writer.write_all(&data).unwrap();
@@ -339,6 +348,9 @@ mod tests {
         // Check updated stats
         let (ops2, bytes2) = tracker.get_write_stats();
         assert!(ops2 > ops);
+        #[cfg(not(feature = "buffered_io"))]
         assert_eq!(bytes2 as usize, align_up(20_000, DIRECT_IO_ALIGNMENT));
+        #[cfg(feature = "buffered_io")]
+        assert_eq!(bytes2 as usize, 20_000);
     }
 }

@@ -1,323 +1,261 @@
-/// External sorting policy parameter calculator
-///
-/// This module computes run generation threads, merge threads, and run sizes
-/// for different external sorting policies.
+// ---------------------------------------------------------------------------
+// Practical Resource-Configuration Planner (from paper §Resource Config.)
+// ---------------------------------------------------------------------------
 
-#[derive(Debug, Clone)]
-pub struct PolicyParameters {
-    pub name: String,
-    pub run_size_mb: f64,
-    pub run_gen_threads: f64,
-    pub merge_threads: f64,
-    pub run_gen_memory_mb: f64,
-    pub merge_memory_mb: f64,
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum PlannerRegime {
+    /// Analytical thread-bound side:
+    /// T_max² ≤ (RS expansion)·M_run_gen·M_merge/(D·P).
+    /// K=1 is still checked against the merge engine's global fan-in budget.
+    ThreadBound,
+    /// Analytical memory-bound side:
+    /// T_max² > (RS expansion)·M_run_gen·M_merge/(D·P).
+    MemoryBound,
 }
 
-impl std::fmt::Display for PolicyParameters {
+/// Fixed usable-memory ratio (rho) used by planner equations.
+/// Matches the paper's implementation setting.
+const PLANNER_RHO: f64 = 0.8;
+/// Conservative RS expansion factor `E` used by planner estimates.
+/// `E = 1.0` means no assumed expansion (worst-case for single-step feasibility).
+const RS_EXPANSION_E: f64 = 1.0;
+
+#[derive(Debug, Clone)]
+pub struct PlannerConfig {
+    /// Dataset size in MB (D)
+    pub dataset_mb: f64,
+    /// Available memory budget in MB (M, upper bound)
+    pub memory_mb: f64,
+    /// Maximum thread count (T_max)
+    pub max_threads: usize,
+    /// I/O page / buffer size in KB (P, default: 64)
+    pub page_size_kb: f64,
+    /// Fraction of memory reserved for sparse-index overhead on the merge side.
+    /// Applied after rho scaling to merge-effective memory only:
+    /// M_merge = (rho × M) × (1 − sparse_index_fraction).
+    /// Run generation uses M_run_gen = rho × M, because the runtime already
+    /// applies its own 0.95 run-generation budget split.
+    /// (default: 0.05)
+    pub sparse_index_fraction: f64,
+    /// Minimum per-thread run-generation buffer target (MB).
+    /// Planner will reduce run-generation threads to honor this floor when
+    /// possible (best-effort under extremely small memory budgets).
+    /// (default: 40.0)
+    pub min_rg_buf_mb: f64,
+}
+
+impl Default for PlannerConfig {
+    fn default() -> Self {
+        Self {
+            dataset_mb: 0.0,
+            memory_mb: 0.0,
+            max_threads: 1,
+            page_size_kb: 64.0,
+            sparse_index_fraction: 0.05,
+            min_rg_buf_mb: 40.0,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct PlannerResult {
+    pub run_gen_threads: usize,
+    pub merge_threads: usize,
+    /// Per-thread run-generation memory target (= run size) in MB
+    pub rg_buf_mb: f64,
+    /// Global merge fan-in for each merge operation
+    pub merge_fanin: usize,
+    pub regime: PlannerRegime,
+    pub num_runs: usize,
+    pub run_gen_memory_mb: f64,
+    pub merge_memory_mb: f64,
+    /// True when the computed fanin achieves a single merge step
+    pub is_single_step: bool,
+}
+
+impl std::fmt::Display for PlannerResult {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let regime = match self.regime {
+            PlannerRegime::ThreadBound => "thread-bound",
+            PlannerRegime::MemoryBound => "memory-bound",
+        };
         write!(
             f,
-            "[{}]: Run Size: {:.1} MB, Run Gen Threads: {:.1}, Merge Threads: {:.1}, Run Gen Memory: {:.1} MB, Merge Memory: {:.1} MB",
-            self.name,
-            self.run_size_mb,
-            self.run_gen_threads,
-            self.merge_threads,
-            self.run_gen_memory_mb,
-            self.merge_memory_mb
+            "[Planner/{regime}] T_gen={rg}, T_merge={rm}, rg_buf={rs:.1} MB, \
+             fanin={fi}, runs={nr}, run_gen_mem={rgm:.1} MB, merge_mem={mm:.1} MB, \
+             single_step={ss}",
+            regime = regime,
+            rg = self.run_gen_threads,
+            rm = self.merge_threads,
+            rs = self.rg_buf_mb,
+            fi = self.merge_fanin,
+            nr = self.num_runs,
+            rgm = self.run_gen_memory_mb,
+            mm = self.merge_memory_mb,
+            ss = self.is_single_step,
         )
     }
 }
 
-#[derive(Debug, Clone, Copy)]
-pub struct SortConfig {
-    /// Total memory in MB
-    pub memory_mb: f64,
-    /// Dataset size in MB
-    pub dataset_mb: f64,
-    /// Page size in KB
-    pub page_size_kb: f64,
-    /// Maximum thread count (used as fixed threads for policies 2 and 3)
-    pub max_threads: f64,
-}
-
-impl Default for SortConfig {
-    fn default() -> Self {
-        Self {
-            memory_mb: 4096.0,   // 4 GB
-            dataset_mb: 32768.0, // 32 GB
-            page_size_kb: 64.0,  // 64 KB
-            max_threads: 32.0,   // Maximum/fixed thread count
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub enum Policy {
-    /// Policy 1: Tiny runs to maximize parallelism in run generation, serial merge
-    TinyRunsMaxParallelGenSerialMerge,
-    /// Policy 2: Huge runs with serial generation, maximize merge parallelism
-    HugeRunsSerialGenMaxParallelMerge,
-    /// Policy 3: Medium runs with balanced parallelism at constraint intersection
-    MediumRunsBalancedParallelism,
-    /// Policy 4: Generation-bound runs with max parallel generation, limited parallel merge
-    GenBoundRunsMaxParallelGenLimitedParallelMerge,
-    /// Policy 5: Merge-bound runs with limited parallel generation, max parallel merge
-    MergeBoundRunsLimitedParallelGenMaxParallelMerge,
-}
-
-impl Policy {
-    /// Get all policies
-    pub fn all() -> Vec<Policy> {
-        vec![
-            Policy::TinyRunsMaxParallelGenSerialMerge,
-            Policy::HugeRunsSerialGenMaxParallelMerge,
-            Policy::MediumRunsBalancedParallelism,
-            Policy::GenBoundRunsMaxParallelGenLimitedParallelMerge,
-            Policy::MergeBoundRunsLimitedParallelGenMaxParallelMerge,
-        ]
-    }
-
-    /// Get policy name
-    pub fn name(&self) -> String {
-        match self {
-            Policy::TinyRunsMaxParallelGenSerialMerge => {
-                "TinyRuns_MaxParallelGen_SerialMerge".to_string()
-            }
-            Policy::HugeRunsSerialGenMaxParallelMerge => {
-                "HugeRuns_SerialGen_MaxParallelMerge".to_string()
-            }
-            Policy::MediumRunsBalancedParallelism => "MediumRuns_BalancedParallelism".to_string(),
-            Policy::GenBoundRunsMaxParallelGenLimitedParallelMerge => {
-                "GenBoundRuns_MaxParallelGen_LimitedParallelMerge".to_string()
-            }
-            Policy::MergeBoundRunsLimitedParallelGenMaxParallelMerge => {
-                "MergeBoundRuns_LimitedParallelGen_MaxParallelMerge".to_string()
-            }
-        }
-    }
-}
-
-/// Calculate policy parameters
-pub fn calculate_policy_parameters(policy: Policy, config: SortConfig) -> PolicyParameters {
-    let m = config.memory_mb;
+/// Derive resource-efficient sort parameters from the given budget tuple
+/// `(D, M, T_max, P)` following the two-regime policy:
+///
+/// * **Thread-bound** (`T_max² ≤ E·M_run_gen·M_merge/(D·P)`, `E` = RS expansion):
+///   symmetric `T_gen = T_merge
+///   = T_max`; choose the *smallest* run size (working-set) that keeps K=1
+///   under the global fan-in budget.
+/// * **Memory-bound** (`T_max² > E·M_run_gen·M_merge/(D·P)`): start from `T_gen = T_max`,
+///   then reduce `T_gen` if needed to satisfy `min_rg_buf_mb`; reduce
+///   `T_merge` until the hyperbola constraint is satisfied.
+///
+/// Effective-memory split:
+/// * `M_run_gen = rho × M`
+/// * `M_merge   = (rho × M) × (1 − sparse_index_fraction)`
+///
+/// This keeps merge-side sparse-index reservation in planning while avoiding
+/// double-reserving on run generation (runtime already applies a 0.95 split).
+///
+/// In both regimes the merge fan-in is set to the maximum value allowed by
+/// the selected `T_merge` and the memory budget. Estimated run count is used
+/// only to predict whether the merge will likely be single-step (`is_single_step`).
+/// This avoids overfitting fan-in to estimated run count, which can differ from
+/// actual runs (for example with replacement selection effects).
+///
+/// Note: `merge_fanin` is **global** fan-in per merge operation (the merge
+/// engine receives one `fanin` value and merges up to that many runs in one
+/// operation), not per-thread fan-in.
+pub fn plan_resource_efficient(config: &PlannerConfig) -> PlannerResult {
     let d = config.dataset_mb;
-    let p = config.page_size_kb / 1024.0; // Convert KB to MB
-    let t_max = config.max_threads;
+    let m = config.memory_mb;
+    let t_max = config.max_threads as f64;
+    let p = config.page_size_kb / 1024.0; // KB → MB
+    let sparse_reserve = config.sparse_index_fraction;
+    let min_rg_buf_mb = config.min_rg_buf_mb.max(0.0);
 
-    match policy {
-        Policy::TinyRunsMaxParallelGenSerialMerge => {
-            // Policy 1: Tiny runs to maximize parallelism in run generation, serial merge
-            // Run size = D × P × T / M where T=1
-            let run_size = (d * p * 1.0) / m;
-            let run_gen_threads = (m / run_size).min(t_max);
-            let merge_threads = (m / ((d / run_size) * p)).min(t_max);
+    // Effective-memory split:
+    //   M_run_gen = rho × M
+    //   M_merge   = (rho × M) × (1 - sparse_index_fraction)
+    // Runtime already applies a run-generation 0.95 split, so planner keeps
+    // the sparse-index reserve only on the merge side.
+    let m_base = m * PLANNER_RHO;
+    let m_run_gen = m_base;
+    let m_merge = m_base * (1.0 - sparse_reserve);
 
-            PolicyParameters {
-                name: policy.name(),
-                run_size_mb: run_size,
-                run_gen_threads,
-                merge_threads,
-                run_gen_memory_mb: run_size * run_gen_threads,
-                merge_memory_mb: (d / run_size) * merge_threads * p,
-            }
-        }
-
-        Policy::HugeRunsSerialGenMaxParallelMerge => {
-            // Policy 2: Huge runs with serial generation, maximize merge parallelism
-            // Run size = M / T where T=1
-            let run_size = m / 1.0;
-            let run_gen_threads = 1.0;
-            let merge_threads = (m / ((d / run_size) * p)).min(t_max);
-
-            PolicyParameters {
-                name: policy.name(),
-                run_size_mb: run_size,
-                run_gen_threads,
-                merge_threads,
-                run_gen_memory_mb: run_size * run_gen_threads,
-                merge_memory_mb: (d / run_size) * merge_threads * p,
-            }
-        }
-
-        Policy::MediumRunsBalancedParallelism => {
-            // Policy 3: Medium runs with balanced parallelism at constraint intersection
-            // T = M / sqrt(D × P)
-            let t = m / (d * p).sqrt();
-            let run_size = m / t;
-            let run_gen_threads = t.min(t_max);
-            let merge_threads = t.min(t_max);
-
-            PolicyParameters {
-                name: policy.name(),
-                run_size_mb: run_size,
-                run_gen_threads,
-                merge_threads,
-                run_gen_memory_mb: run_size * t,
-                merge_memory_mb: (d / run_size) * t * p,
-            }
-        }
-
-        Policy::GenBoundRunsMaxParallelGenLimitedParallelMerge => {
-            // Policy 4: Generation-bound runs with max parallel generation, limited parallel merge
-            // Run size = M / T where T=max_threads
-            let run_size = m / t_max;
-            let run_gen_threads = t_max;
-            let merge_threads = (m / ((d / run_size) * p)).min(t_max);
-
-            PolicyParameters {
-                name: policy.name(),
-                run_size_mb: run_size,
-                run_gen_threads,
-                merge_threads,
-                run_gen_memory_mb: run_size * run_gen_threads,
-                merge_memory_mb: (d / run_size) * merge_threads * p,
-            }
-        }
-
-        Policy::MergeBoundRunsLimitedParallelGenMaxParallelMerge => {
-            // Policy 5: Merge-bound runs with limited parallel generation, max parallel merge
-            // Run size = D × P × T / M where T=max_threads
-            let run_size = (d * p * t_max) / m;
-            let run_gen_threads = (m / run_size).min(t_max);
-            let merge_threads = t_max;
-
-            PolicyParameters {
-                name: policy.name(),
-                run_size_mb: run_size,
-                run_gen_threads,
-                merge_threads,
-                run_gen_memory_mb: run_size * run_gen_threads,
-                merge_memory_mb: (d / run_size) * merge_threads * p,
-            }
-        }
-    }
-}
-
-/// Get all policy parameters for a given configuration
-pub fn get_all_policies(config: SortConfig) -> Vec<(Policy, PolicyParameters)> {
-    Policy::all()
-        .into_iter()
-        .map(|p| (p, calculate_policy_parameters(p, config)))
-        .collect()
-}
-
-pub fn get_policy_by_name(
-    name_prefix: &str,
-    config: SortConfig,
-) -> Option<(Policy, PolicyParameters)> {
-    Policy::all()
-        .into_iter()
-        .find(|p| p.name().starts_with(name_prefix))
-        .map(|p| (p, calculate_policy_parameters(p, config)))
-}
-
-/// Check if a policy configuration is feasible
-pub fn is_feasible(params: &PolicyParameters, memory_limit_mb: f64) -> bool {
-    params.run_gen_memory_mb <= memory_limit_mb && params.merge_memory_mb <= memory_limit_mb
-}
-
-/// Get the memory bottleneck phase
-pub fn get_bottleneck(params: &PolicyParameters) -> &'static str {
-    if params.run_gen_memory_mb > params.merge_memory_mb {
-        "Run Generation"
+    // Feasibility threshold:
+    //   T_max² ≤ E·M_run_gen·M_merge/(D·P),
+    // where E is RS run-expansion assumption.
+    let threshold = RS_EXPANSION_E * m_run_gen * m_merge / (d * p);
+    let regime = if t_max * t_max > threshold {
+        PlannerRegime::MemoryBound
     } else {
-        "Merge Phase"
-    }
-}
+        PlannerRegime::ThreadBound
+    };
 
-/// Calculate number of runs
-pub fn calculate_run_count(dataset_mb: f64, run_size_mb: f64) -> f64 {
-    dataset_mb / run_size_mb
-}
-
-/// Pretty print policy parameters
-pub fn print_policy_params(policy: Policy, params: &PolicyParameters, config: &SortConfig) {
-    println!("\n{} ({})", params.name, format!("{:?}", policy));
-    println!("  Run Size: {:.1} MB", params.run_size_mb);
-
-    // Show if run gen threads are capped
-    let uncapped_run_gen = config.memory_mb / params.run_size_mb;
-    if uncapped_run_gen > config.max_threads && params.run_gen_threads == config.max_threads {
-        println!(
-            "  Run Generation: {:.1} threads (capped from {:.0}) × {:.1} MB = {:.1} MB",
-            params.run_gen_threads, uncapped_run_gen, params.run_size_mb, params.run_gen_memory_mb
-        );
-    } else {
-        println!(
-            "  Run Generation: {:.1} threads × {:.1} MB = {:.1} MB",
-            params.run_gen_threads, params.run_size_mb, params.run_gen_memory_mb
-        );
-    }
-
-    // Show if merge threads are capped
-    let uncapped_merge = config.memory_mb
-        / ((config.dataset_mb / params.run_size_mb) * (config.page_size_kb / 1024.0));
-    if uncapped_merge > config.max_threads && params.merge_threads == config.max_threads {
-        println!(
-            "  Merge Phase: {:.1} threads (capped from {:.0}) × ({:.0}/{:.1} runs) × {:.1} KB = {:.1} MB",
-            params.merge_threads,
-            uncapped_merge,
-            config.dataset_mb,
-            params.run_size_mb,
-            config.page_size_kb,
-            params.merge_memory_mb
-        );
-    } else {
-        println!(
-            "  Merge Phase: {:.1} threads × ({:.0}/{:.1} runs) × {:.1} KB = {:.1} MB",
-            params.merge_threads,
-            config.dataset_mb,
-            params.run_size_mb,
-            config.page_size_kb,
-            params.merge_memory_mb
-        );
-    }
-
-    println!(
-        "  Total Runs: {:.0}",
-        calculate_run_count(config.dataset_mb, params.run_size_mb)
-    );
-    println!("  Bottleneck: {}", get_bottleneck(params));
-    println!(
-        "  Feasible: {}",
-        if is_feasible(params, config.memory_mb) {
-            "Yes"
-        } else {
-            "No"
+    let max_fanin_in_budget_for = |t_merge: usize| -> usize {
+        ((m_merge / (t_merge as f64 * p)).floor() as usize)
+            .saturating_sub(1) // reserve 1 output buffer per thread
+            .max(2)
+    };
+    let max_tgen_for_min_rg = |min_rg: f64| -> usize {
+        if min_rg <= 0.0 {
+            return config.max_threads.max(1);
         }
-    );
-}
+        // Per-thread cap for run generation is M_run_gen/T_gen.
+        let cap = (m_run_gen / min_rg).floor() as usize;
+        cap.clamp(1, config.max_threads.max(1))
+    };
 
-/// Print comparison table
-pub fn print_comparison_table(config: &SortConfig) {
-    println!(
-        "\nPolicy Comparison for M={:.0}GB, D={:.0}GB, Max T={:.0}",
-        config.memory_mb / 1024.0,
-        config.dataset_mb / 1024.0,
-        config.max_threads
-    );
-    println!("{}", "=".repeat(140));
-    println!(
-        "{:<40} {:>15} {:>20} {:>20} {:>20} {:>20}",
-        "Policy",
-        "Run Size (MB)",
-        "Run Gen Threads",
-        "Merge Threads",
-        "Run Gen Memory (MB)",
-        "Merge Memory (MB)"
-    );
-    println!("{}", "=".repeat(140));
+    // -----------------------------------------------------------------------
+    // Phase 1: derive T_gen, T_merge, rg_buf_mb
+    //
+    // Run-generation caps use M_run_gen, merge caps use M_merge.
+    // Memory-bound regime (T_max² > threshold):
+    //   Start from T_gen = T_max, but if that would make rg_buf_mb too small,
+    //   reduce T_gen so rg_buf_mb reaches at least min_rg_buf_mb.
+    //   T_merge = floor(threshold / T_gen)
+    //   rg_buf_mb = max(min_rg_buf_mb, smallest feasible under T_gen)
+    //              then capped by (M_run_gen / T_gen)
+    //
+    // Thread-bound regime (T_max² ≤ threshold):
+    //   Start from T_gen = T_merge = T_max (symmetric), but if needed reduce
+    //   T_gen to satisfy min_rg_buf_mb.
+    //
+    //   Derivation of rg_buf_min (K=1 lower bound, worst-case):
+    //     num_runs ≈ D / rg_buf_mb     (worst-case, no expansion)
+    //     K=1 requires num_runs ≤ merge_fanin
+    //     merge_fanin ≤ max_fanin_in_budget
+    //   therefore:
+    //     D / rg_buf_mb ≤ max_fanin_in_budget
+    //     rg_buf_mb ≥ D / max_fanin_in_budget = rg_buf_min
+    //
+    //   rg_buf_target = max(min_rg_buf_mb, rg_buf_min)
+    //   rg_buf_mb     = min(rg_buf_target, (M_run_gen / T_gen))
+    // -----------------------------------------------------------------------
+    let (t_gen_f, t_merge_f, rg_buf_mb) = match regime {
+        PlannerRegime::MemoryBound => {
+            let t_gen = t_max.min(max_tgen_for_min_rg(min_rg_buf_mb) as f64);
+            let t_merge = (threshold / t_gen).floor().clamp(1.0, t_max);
+            let run_size_cap = m_run_gen / t_gen;
+            // t_gen is already reduced (best-effort) to honor min_rg_buf_mb.
+            // If memory is too small even at T_gen=1, this falls back to cap.
+            let run_size = run_size_cap;
+            (t_gen, t_merge, run_size)
+        }
+        PlannerRegime::ThreadBound => {
+            let t_gen = t_max.min(max_tgen_for_min_rg(min_rg_buf_mb) as f64);
+            let t_merge = t_max;
+            let max_fanin_in_budget = max_fanin_in_budget_for(t_merge as usize);
+            // Worst-case K=1 floor (no assumed RS expansion):
+            // rg_buf_min_worst_case = D / max_fanin_in_budget
+            let rg_buf_min_worst_case = d / (RS_EXPANSION_E * max_fanin_in_budget as f64);
+            let run_size_target = rg_buf_min_worst_case.max(min_rg_buf_mb);
+            let run_size = run_size_target.min(m_run_gen / t_gen); // capped by run-gen per-thread budget
+            (t_gen, t_merge, run_size)
+        }
+    };
 
-    for (_policy, params) in get_all_policies(*config) {
-        println!(
-            "{:<40} {:>15.1} {:>20.1} {:>20.1} {:>20.1} {:>20.1}",
-            params.name,
-            params.run_size_mb,
-            params.run_gen_threads,
-            params.merge_threads,
-            params.run_gen_memory_mb,
-            params.merge_memory_mb
-        );
+    let t_gen = t_gen_f.round() as usize;
+    let t_merge = t_merge_f.round() as usize;
+
+    // -----------------------------------------------------------------------
+    // Phase 2: derive merge_fanin
+    //
+    //   num_runs           = ceil(D / rg_buf_mb)
+    //   required_fanin_K1  = num_runs
+    //
+    //   max_fanin_in_budget = floor(M_merge / (T_merge·P)) − 1
+    //     - M_merge: sparse index fraction already excluded (merge side)
+    //     - ÷ (T_merge·P): total I/O pages available, split across merge threads
+    //     - − 1: each thread needs 1 output buffer beyond its fanin input buffers,
+    //            so (fanin + 1)·T_merge·P ≤ M_merge  ⟹  fanin ≤ floor(M_merge/(T_merge·P)) − 1
+    //   M_merge is the hard physical limit for merge I/O buffers.
+    //
+    //   merge_fanin = max_fanin_in_budget
+    //     Keep fan-in at the maximum budget-limited value for the chosen
+    //     merge thread count; do not shrink it to estimated num_runs.
+    //
+    //   is_single_step = (num_runs <= merge_fanin)
+    //     This remains an estimate because actual run count can differ.
+    // -----------------------------------------------------------------------
+    let estimated_run_length_mb = (rg_buf_mb * RS_EXPANSION_E).max(f64::EPSILON);
+    let num_runs = ((d / estimated_run_length_mb).ceil() as usize).max(1);
+    let max_fanin_in_budget = max_fanin_in_budget_for(t_merge);
+    let merge_fanin = max_fanin_in_budget;
+    let is_single_step = num_runs <= merge_fanin;
+
+    let run_gen_memory_mb = t_gen as f64 * rg_buf_mb;
+    let merge_memory_mb = t_merge as f64 * merge_fanin as f64 * p;
+
+    PlannerResult {
+        run_gen_threads: t_gen,
+        merge_threads: t_merge,
+        rg_buf_mb,
+        merge_fanin,
+        regime,
+        num_runs,
+        run_gen_memory_mb,
+        merge_memory_mb,
+        is_single_step,
     }
 }
 
@@ -326,48 +264,116 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_policy1() {
-        let config = SortConfig {
-            memory_mb: 1024.0,   // 1 GB
-            dataset_mb: 32768.0, // 32 GB
-            page_size_kb: 64.0,  // 64 KB
-            max_threads: 32.0,
-        };
+    fn thread_bound_uses_global_fanin_for_single_step() {
+        let plan = plan_resource_efficient(&PlannerConfig {
+            dataset_mb: 204_800.0, // 200 GiB
+            memory_mb: 28_800.0,   // 28.8 GiB budget
+            max_threads: 16,
+            page_size_kb: 64.0,
+            ..PlannerConfig::default()
+        });
 
-        let params = calculate_policy_parameters(Policy::TinyRunsMaxParallelGenSerialMerge, config);
-
-        // Expected: run_size = 32768 * 64 / 1024 / 1024 = 2 MB
-        assert!((params.run_size_mb - 2.0).abs() < 0.01);
-        assert!((params.run_gen_threads - 32.0).abs() < 0.01);
+        assert_eq!(plan.regime, PlannerRegime::ThreadBound);
+        assert!(plan.is_single_step);
+        assert!(plan.num_runs <= plan.merge_fanin);
+        assert!(plan.rg_buf_mb > 1.0);
     }
 
     #[test]
-    fn test_policy2() {
-        let config = SortConfig {
-            memory_mb: 1024.0,
-            dataset_mb: 32768.0,
+    fn single_step_flag_matches_global_fanin_condition() {
+        let thread_bound = PlannerConfig {
+            dataset_mb: 204_800.0,
+            memory_mb: 28_800.0,
+            max_threads: 16,
             page_size_kb: 64.0,
-            max_threads: 32.0,
+            ..PlannerConfig::default()
+        };
+        let memory_bound = PlannerConfig {
+            dataset_mb: 204_800.0,
+            memory_mb: 256.0,
+            max_threads: 16,
+            page_size_kb: 64.0,
+            ..PlannerConfig::default()
         };
 
-        let params = calculate_policy_parameters(
-            Policy::GenBoundRunsMaxParallelGenLimitedParallelMerge,
-            config,
-        );
-
-        // Expected: run_size = 1024 / 32 = 32 MB
-        assert!((params.run_size_mb - 32.0).abs() < 0.01);
-        assert_eq!(params.run_gen_threads, 32.0);
+        for cfg in [thread_bound, memory_bound] {
+            let plan = plan_resource_efficient(&cfg);
+            assert_eq!(plan.is_single_step, plan.num_runs <= plan.merge_fanin);
+        }
     }
 
     #[test]
-    fn test_all_policies() {
-        let config = SortConfig {
-            memory_mb: 1024.0,
-            dataset_mb: 1024.0 * 100.0, // 128 GB
+    fn planner_keeps_merge_fanin_at_budget_max() {
+        let cfg = PlannerConfig {
+            dataset_mb: 204_800.0,
+            memory_mb: 28_800.0,
+            max_threads: 16,
             page_size_kb: 64.0,
-            max_threads: 40.0,
+            ..PlannerConfig::default()
         };
-        print_comparison_table(&config);
+        let plan = plan_resource_efficient(&cfg);
+
+        let p = cfg.page_size_kb / 1024.0;
+        let m_merge = (cfg.memory_mb * PLANNER_RHO) * (1.0 - cfg.sparse_index_fraction);
+        let expected_max_fanin = ((m_merge / (plan.merge_threads as f64 * p)).floor() as usize)
+            .saturating_sub(1)
+            .max(2);
+
+        assert_eq!(plan.merge_fanin, expected_max_fanin);
+    }
+
+    #[test]
+    fn run_generation_cap_is_not_reduced_by_sparse_fraction() {
+        let cfg_low_sparse = PlannerConfig {
+            dataset_mb: 204_800.0,
+            memory_mb: 200.0,
+            max_threads: 16,
+            page_size_kb: 64.0,
+            sparse_index_fraction: 0.0,
+            min_rg_buf_mb: 0.0,
+            ..PlannerConfig::default()
+        };
+        let cfg_high_sparse = PlannerConfig {
+            sparse_index_fraction: 0.5,
+            ..cfg_low_sparse.clone()
+        };
+
+        let plan_low = plan_resource_efficient(&cfg_low_sparse);
+        let plan_high = plan_resource_efficient(&cfg_high_sparse);
+
+        // Run-gen budget cap should depend on rho*M, not sparse_index_fraction.
+        assert_eq!(plan_low.rg_buf_mb, plan_high.rg_buf_mb);
+    }
+
+    #[test]
+    fn estimated_runs_use_fixed_replacement_selection_expansion() {
+        let cfg = PlannerConfig {
+            dataset_mb: 10_000.0,
+            memory_mb: 2_048.0,
+            max_threads: 8,
+            page_size_kb: 64.0,
+            ..PlannerConfig::default()
+        };
+        let plan = plan_resource_efficient(&cfg);
+
+        let expected_runs = (cfg.dataset_mb / (plan.rg_buf_mb * RS_EXPANSION_E)).ceil() as usize;
+        assert_eq!(plan.num_runs, expected_runs.max(1));
+    }
+
+    #[test]
+    fn memory_bound_shrinks_run_gen_threads_for_min_rg_buf() {
+        let cfg = PlannerConfig {
+            dataset_mb: 204_800.0,
+            memory_mb: 200.0,
+            max_threads: 16,
+            page_size_kb: 64.0,
+            min_rg_buf_mb: 40.0,
+            ..PlannerConfig::default()
+        };
+        let plan = plan_resource_efficient(&cfg);
+
+        assert_eq!(plan.regime, PlannerRegime::MemoryBound);
+        assert!(plan.run_gen_threads < cfg.max_threads);
+        assert!(plan.rg_buf_mb >= cfg.min_rg_buf_mb);
     }
 }

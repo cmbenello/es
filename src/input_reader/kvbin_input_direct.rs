@@ -117,6 +117,10 @@ impl SortInput for KvBinInputDirect {
             })
             .collect()
     }
+
+    fn estimated_size_bytes(&self) -> Option<u64> {
+        Some(self.file_size)
+    }
 }
 
 /// Iterates KVBin records within a byte range.

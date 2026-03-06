@@ -1,7 +1,214 @@
 use std::cmp::Ordering;
 use std::mem;
 
-use crate::ovc::offset_value_coding::{OVC64Trait, OVCEntry, OVCU64, SentinelValue};
+use crate::ovc::offset_value_coding_32::{OVC32Trait, OVCEntry32, OVCKey32, OVCKeyValue32, OVCU32};
+use crate::ovc::offset_value_coding_64::{
+    OVC64Trait, OVCEntry, OVCEntryWithCounter, OVCKeyValue, OVCU64, SentinelValue,
+};
+
+pub trait OVCTreeKey: SentinelValue {
+    type OVC: Copy + Ord;
+
+    fn ovc(&self) -> &Self::OVC;
+    fn ovc_mut(&mut self) -> &mut Self::OVC;
+    fn derive_ovc_from(&mut self, prev: &Self) -> bool;
+    fn compare_and_update(&mut self, other: &mut Self) -> Ordering;
+    fn compare_and_update_with_mode(&mut self, other: &mut Self, full_comp: bool) -> Ordering;
+    fn max_ovc(&mut self, other: &Self);
+    fn set_initial_ovc(&mut self);
+}
+
+impl OVCTreeKey for OVCEntry {
+    type OVC = OVCU64;
+
+    fn ovc(&self) -> &Self::OVC {
+        OVC64Trait::ovc(self)
+    }
+
+    fn ovc_mut(&mut self) -> &mut Self::OVC {
+        OVC64Trait::ovc_mut(self)
+    }
+
+    fn derive_ovc_from(&mut self, prev: &Self) -> bool {
+        OVC64Trait::derive_ovc_from(self, prev)
+    }
+
+    fn compare_and_update(&mut self, other: &mut Self) -> Ordering {
+        OVC64Trait::compare_and_update(self, other)
+    }
+
+    fn compare_and_update_with_mode(&mut self, other: &mut Self, full_comp: bool) -> Ordering {
+        OVC64Trait::compare_and_update_with_mode(self, other, full_comp)
+    }
+
+    fn max_ovc(&mut self, other: &Self) {
+        OVC64Trait::max_ovc(self, other);
+    }
+
+    fn set_initial_ovc(&mut self) {
+        *OVC64Trait::ovc_mut(self) = OVCU64::initial_value();
+    }
+}
+
+impl OVCTreeKey for OVCEntryWithCounter {
+    type OVC = OVCU64;
+
+    fn ovc(&self) -> &Self::OVC {
+        OVC64Trait::ovc(self)
+    }
+
+    fn ovc_mut(&mut self) -> &mut Self::OVC {
+        OVC64Trait::ovc_mut(self)
+    }
+
+    fn derive_ovc_from(&mut self, prev: &Self) -> bool {
+        OVC64Trait::derive_ovc_from(self, prev)
+    }
+
+    fn compare_and_update(&mut self, other: &mut Self) -> Ordering {
+        OVC64Trait::compare_and_update(self, other)
+    }
+
+    fn compare_and_update_with_mode(&mut self, other: &mut Self, full_comp: bool) -> Ordering {
+        OVC64Trait::compare_and_update_with_mode(self, other, full_comp)
+    }
+
+    fn max_ovc(&mut self, other: &Self) {
+        OVC64Trait::max_ovc(self, other);
+    }
+
+    fn set_initial_ovc(&mut self) {
+        *OVC64Trait::ovc_mut(self) = OVCU64::initial_value();
+    }
+}
+
+impl OVCTreeKey for OVCKeyValue {
+    type OVC = OVCU64;
+
+    fn ovc(&self) -> &Self::OVC {
+        OVC64Trait::ovc(self)
+    }
+
+    fn ovc_mut(&mut self) -> &mut Self::OVC {
+        OVC64Trait::ovc_mut(self)
+    }
+
+    fn derive_ovc_from(&mut self, prev: &Self) -> bool {
+        OVC64Trait::derive_ovc_from(self, prev)
+    }
+
+    fn compare_and_update(&mut self, other: &mut Self) -> Ordering {
+        OVC64Trait::compare_and_update(self, other)
+    }
+
+    fn compare_and_update_with_mode(&mut self, other: &mut Self, full_comp: bool) -> Ordering {
+        OVC64Trait::compare_and_update_with_mode(self, other, full_comp)
+    }
+
+    fn max_ovc(&mut self, other: &Self) {
+        OVC64Trait::max_ovc(self, other);
+    }
+
+    fn set_initial_ovc(&mut self) {
+        *OVC64Trait::ovc_mut(self) = OVCU64::initial_value();
+    }
+}
+
+impl OVCTreeKey for OVCEntry32 {
+    type OVC = OVCU32;
+
+    fn ovc(&self) -> &Self::OVC {
+        OVC32Trait::ovc(self)
+    }
+
+    fn ovc_mut(&mut self) -> &mut Self::OVC {
+        OVC32Trait::ovc_mut(self)
+    }
+
+    fn derive_ovc_from(&mut self, prev: &Self) -> bool {
+        OVC32Trait::derive_ovc_from(self, prev)
+    }
+
+    fn compare_and_update(&mut self, other: &mut Self) -> Ordering {
+        OVC32Trait::compare_and_update(self, other)
+    }
+
+    fn compare_and_update_with_mode(&mut self, other: &mut Self, full_comp: bool) -> Ordering {
+        OVC32Trait::compare_and_update_with_mode(self, other, full_comp)
+    }
+
+    fn max_ovc(&mut self, other: &Self) {
+        OVC32Trait::max_ovc(self, other);
+    }
+
+    fn set_initial_ovc(&mut self) {
+        *OVC32Trait::ovc_mut(self) = OVCU32::initial_value();
+    }
+}
+
+impl OVCTreeKey for OVCKeyValue32 {
+    type OVC = OVCU32;
+
+    fn ovc(&self) -> &Self::OVC {
+        OVC32Trait::ovc(self)
+    }
+
+    fn ovc_mut(&mut self) -> &mut Self::OVC {
+        OVC32Trait::ovc_mut(self)
+    }
+
+    fn derive_ovc_from(&mut self, prev: &Self) -> bool {
+        OVC32Trait::derive_ovc_from(self, prev)
+    }
+
+    fn compare_and_update(&mut self, other: &mut Self) -> Ordering {
+        OVC32Trait::compare_and_update(self, other)
+    }
+
+    fn compare_and_update_with_mode(&mut self, other: &mut Self, full_comp: bool) -> Ordering {
+        OVC32Trait::compare_and_update_with_mode(self, other, full_comp)
+    }
+
+    fn max_ovc(&mut self, other: &Self) {
+        OVC32Trait::max_ovc(self, other);
+    }
+
+    fn set_initial_ovc(&mut self) {
+        *OVC32Trait::ovc_mut(self) = OVCU32::initial_value();
+    }
+}
+
+impl OVCTreeKey for OVCKey32 {
+    type OVC = OVCU32;
+
+    fn ovc(&self) -> &Self::OVC {
+        OVC32Trait::ovc(self)
+    }
+
+    fn ovc_mut(&mut self) -> &mut Self::OVC {
+        OVC32Trait::ovc_mut(self)
+    }
+
+    fn derive_ovc_from(&mut self, prev: &Self) -> bool {
+        OVC32Trait::derive_ovc_from(self, prev)
+    }
+
+    fn compare_and_update(&mut self, other: &mut Self) -> Ordering {
+        OVC32Trait::compare_and_update(self, other)
+    }
+
+    fn compare_and_update_with_mode(&mut self, other: &mut Self, full_comp: bool) -> Ordering {
+        OVC32Trait::compare_and_update_with_mode(self, other, full_comp)
+    }
+
+    fn max_ovc(&mut self, other: &Self) {
+        OVC32Trait::max_ovc(self, other);
+    }
+
+    fn set_initial_ovc(&mut self) {
+        *OVC32Trait::ovc_mut(self) = OVCU32::initial_value();
+    }
+}
 
 pub struct LoserTreeOVC<T> {
     // The tree nodes.
@@ -17,51 +224,69 @@ pub struct LoserTreeOVC<T> {
 /// A node in the Loser Tree.
 #[derive(Clone, Debug)]
 struct Node<T> {
-    key: T,       // The value of the LOSER at this node
-    index: usize, // The run ID of the LOSER
+    key: T,     // The value of the LOSER at this node
+    index: u32, // Leaf/source index of the LOSER (used for updates/push)
 }
 
 impl<T> Node<T> {
-    pub fn new(key: T, index: usize) -> Self {
+    pub fn new(key: T, index: u32) -> Self {
         Node { key, index }
     }
 }
 
-impl<T: OVC64Trait> LoserTreeOVC<T> {
+impl<T: OVCTreeKey> LoserTreeOVC<T> {
     pub fn new(values: Vec<T>) -> Self {
+        let mut lt = Self {
+            nodes: Vec::new(),
+            capacity: 0,
+        };
+        lt.reset(values);
+        lt
+    }
+
+    /// Reset the tree with a new set of values, reusing the existing allocation.
+    pub fn reset(&mut self, values: Vec<T>) {
         let size = values.len();
+        self.reset_from_iter(size, values);
+    }
+
+    /// Reset the tree with a known number of values from an iterator.
+    pub fn reset_from_iter<I>(&mut self, size: usize, values: I)
+    where
+        I: IntoIterator<Item = T>,
+    {
         if size == 0 {
-            return Self {
-                nodes: vec![],
-                capacity: 0,
-            };
+            self.nodes.clear();
+            self.capacity = 0;
+            return;
         }
 
         let capacity = size.next_power_of_two();
-        let mut nodes = Vec::with_capacity(capacity);
+        self.capacity = capacity;
+        self.nodes.clear();
+        self.nodes.resize_with(capacity, || Node {
+            key: T::early_fence(),
+            index: u32::MAX,
+        });
 
-        // Initialize internal nodes (1..capacity) with Early Fence sentinels.
-        // Index 0 is also initialized but will be overwritten at the end.
-        for _ in 0..capacity {
-            nodes.push(Node {
-                key: T::early_fence(),
-                index: usize::MAX,
-            });
+        let mut used = 0usize;
+        for mut val in values.into_iter() {
+            debug_assert!(used < size, "reset_from_iter: more values than size");
+            if used >= size {
+                break;
+            }
+            if !val.is_sentinel() {
+                val.set_initial_ovc();
+            }
+            self.pass(used, val);
+            used += 1;
         }
+        debug_assert!(used == size, "reset_from_iter: fewer values than size");
 
-        let mut lt = LoserTreeOVC { nodes, capacity };
-
-        // 1. Process Real Values
-        for (i, val) in values.into_iter().enumerate() {
-            lt.pass(i, val);
+        // Process padding (late fences) for unused slots
+        for i in used..capacity {
+            self.pass(i, T::late_fence());
         }
-
-        // 2. Process Padding (Late Fence)
-        for i in size..capacity {
-            lt.pass(i, T::late_fence());
-        }
-
-        lt
     }
 
     pub fn peek(&self) -> Option<(&T, usize)> {
@@ -72,7 +297,7 @@ impl<T: OVC64Trait> LoserTreeOVC<T> {
             return None;
         }
         debug_assert!(!self.nodes[0].key.is_early_fence());
-        return Some((&self.nodes[0].key, self.nodes[0].index));
+        return Some((&self.nodes[0].key, self.nodes[0].index as usize));
     }
 
     /// Replaces the current winner with `new_val`, replays the tournament,
@@ -83,7 +308,7 @@ impl<T: OVC64Trait> LoserTreeOVC<T> {
             panic!("Cannot push to an empty LoserTree");
         }
 
-        let source_idx = self.nodes[0].index;
+        let source_idx = self.nodes[0].index as usize;
         let old_node = self.pass(source_idx, new_val);
         return old_node.key;
     }
@@ -91,7 +316,7 @@ impl<T: OVC64Trait> LoserTreeOVC<T> {
     /// Replaces the OVC of the current winner with `new_ovc`,
     /// and returns the OLD OVC value (ownership transferred).
     /// This is used for handling duplicate OVC values efficiently.
-    pub fn replace_top_ovc(&mut self, new_ovc: OVCU64) -> OVCU64 {
+    pub fn replace_top_ovc(&mut self, new_ovc: T::OVC) -> T::OVC {
         if self.nodes.is_empty() {
             panic!("Cannot replace OVC of an empty LoserTree");
         }
@@ -108,6 +333,13 @@ impl<T: OVC64Trait> LoserTreeOVC<T> {
         if self.nodes.is_empty() {
             panic!("Cannot update empty tree");
         }
+        assert!(
+            source_idx < self.capacity,
+            "source_idx {} out of bounds for capacity {}",
+            source_idx,
+            self.capacity
+        );
+
         let old_node = self.pass_for_update(source_idx, new_val, true);
         old_node.key
     }
@@ -118,7 +350,7 @@ impl<T: OVC64Trait> LoserTreeOVC<T> {
             return None;
         }
 
-        let source_idx = self.nodes[0].index;
+        let source_idx = self.nodes[0].index as usize;
         let old_node = self.pass(source_idx, T::late_fence());
 
         if old_node.key.is_late_fence() {
@@ -129,8 +361,8 @@ impl<T: OVC64Trait> LoserTreeOVC<T> {
     }
 
     fn pass(&mut self, index: usize, key: T) -> Node<T> {
-        let mut candidate = Node::new(key, index);
-        let mut slot = Self::parent_index(self.leaf_index(index));
+        let mut candidate = Node::new(key, index as u32);
+        let mut slot = Self::parent_index(self.leaf_index(index as u32));
 
         while slot != self.root_index() {
             if self.nodes[slot].key.compare_and_update(&mut candidate.key) == Ordering::Less {
@@ -150,16 +382,16 @@ impl<T: OVC64Trait> LoserTreeOVC<T> {
     /// - Performs full comparison at root when candidate wins to maintain OVC correctness
     /// - Uses copy-down optimization to efficiently update multiple tree levels
     fn pass_for_update(&mut self, index: usize, key: T, mut full_comp: bool) -> Node<T> {
-        let mut candidate = Node::new(key, index);
+        let mut candidate = Node::new(key, index as u32);
 
         // Initialize OVC - we don't know the relationship to previous value
         self.init_candidate_ovc(&mut candidate);
 
-        let mut slot = Self::parent_index(self.leaf_index(index));
+        let mut slot = Self::parent_index(self.leaf_index(index as u32));
         let mut level = 1;
 
         // Phase 1: Climb up the tree until we hit root or find our own index
-        while slot != self.root_index() && self.nodes[slot].index != index {
+        while slot != self.root_index() && self.nodes[slot].index != index as u32 {
             if self.nodes[slot]
                 .key
                 .compare_and_update_with_mode(&mut candidate.key, full_comp)
@@ -180,7 +412,7 @@ impl<T: OVC64Trait> LoserTreeOVC<T> {
         // Phase 2: Copy-down for updates
         let old_node = self.save_old_node(slot);
 
-        if candidate.index == index {
+        if candidate.index == index as u32 {
             let final_slot = self.bubble_up_with_copy_down(&mut candidate, slot, level, full_comp);
             slot = final_slot;
         }
@@ -195,18 +427,18 @@ impl<T: OVC64Trait> LoserTreeOVC<T> {
     #[inline]
     fn init_candidate_ovc(&self, candidate: &mut Node<T>) {
         assert!(
-            !candidate.key.ovc().is_early_fence(),
+            !candidate.key.is_early_fence(),
             "Candidate OVC should not be Early Fence"
         );
         if !candidate.key.is_late_fence() {
-            *candidate.key.ovc_mut() = OVCU64::initial_value();
+            candidate.key.set_initial_ovc();
         }
     }
 
     /// Handle the case where candidate reaches root during update
     fn handle_root_update(&mut self, mut candidate: Node<T>, slot: usize, index: usize) -> Node<T> {
         if !candidate.key.is_late_fence() {
-            if candidate.index == index {
+            if candidate.index == index as u32 {
                 // Full comparison needed - candidate came from update
                 if candidate
                     .key
@@ -214,7 +446,7 @@ impl<T: OVC64Trait> LoserTreeOVC<T> {
                     == Ordering::Less
                 {
                     // Candidate wins - reset OVC (could be smaller than old root)
-                    *candidate.key.ovc_mut() = OVCU64::initial_value();
+                    candidate.key.set_initial_ovc();
                 } else {
                     // Candidate loses - inherit max OVC
                     candidate.key.max_ovc(&self.nodes[slot].key);
@@ -288,7 +520,7 @@ impl<T: OVC64Trait> LoserTreeOVC<T> {
 
             // Check if this slot's value originated from our subtree
             let opp_idx = self.nodes[*slot].index;
-            if opp_idx != usize::MAX {
+            if opp_idx != u32::MAX {
                 let opp_leaf = self.leaf_index(opp_idx);
                 if (opp_leaf >> dest_level) == dest {
                     break; // Found a relevant opponent
@@ -335,8 +567,13 @@ impl<T: OVC64Trait> LoserTreeOVC<T> {
 
     // --- Navigation Helpers ---
 
-    pub fn leaf_index(&self, run_id: usize) -> usize {
-        self.capacity + run_id
+    /// Returns the capacity of the tree (number of leaf slots, rounded up to power of 2)
+    pub fn capacity(&self) -> usize {
+        self.capacity
+    }
+
+    pub fn leaf_index(&self, run_id: u32) -> usize {
+        self.capacity + run_id as usize
     }
 
     pub fn root_index(&self) -> usize {
@@ -387,7 +624,7 @@ impl<T: OVC64Trait> LoserTreeOVC<T> {
             for idx in start_idx..end_idx {
                 if idx < self.nodes.len() {
                     let node = &self.nodes[idx];
-                    let value_str = if node.index == usize::MAX {
+                    let value_str = if node.index == u32::MAX {
                         format!("{} (sentinel)", node.key)
                     } else {
                         format!("{}", node.key)
@@ -434,7 +671,7 @@ impl<T: OVC64Trait> LoserTreeOVC<T> {
 
         // Internal nodes
         for (idx, node) in self.nodes.iter().enumerate().skip(1) {
-            let display = if node.index == usize::MAX {
+            let display = if node.index == u32::MAX {
                 format!("[{}:-]", idx)
             } else {
                 format!("[{}:{}(s{})]", idx, node.key, node.index)
@@ -478,7 +715,7 @@ impl<T: OVC64Trait> LoserTreeOVC<T> {
                 ));
             } else if idx < nodes.len() {
                 let node = &nodes[idx];
-                let value_str = if node.index == usize::MAX {
+                let value_str = if node.index == u32::MAX {
                     format!("{} (sentinel)", node.key)
                 } else {
                     format!("{}", node.key)
@@ -594,7 +831,9 @@ pub fn sort_with_tree_of_losers_with_ovc64(run: Vec<Vec<u8>>) -> Vec<OVCEntry> {
 #[cfg(test)]
 mod test {
     use crate::ovc::{
-        offset_value_coding::{OVCEntryWithCounter, encode_run_with_ovc64, encode_runs_with_ovc64},
+        offset_value_coding_64::{
+            OVCEntryWithCounter, encode_run_with_ovc64, encode_runs_with_ovc64,
+        },
         utils::generate_random_string_array,
     };
 
@@ -1974,7 +2213,7 @@ mod test {
         OVCEntryWithCounter::reset_ovc_comparisons();
         let mut current = OVCEntryWithCounter::new(b"abf".to_vec());
         let prev = OVCEntryWithCounter::new(b"abe".to_vec());
-        assert!(current.derive_ovc_from(&prev));
+        assert!(OVC64Trait::derive_ovc_from(&mut current, &prev));
         let derive_count = OVCEntryWithCounter::take_byte_comparisons();
         let derive_ovc_cmp = OVCEntryWithCounter::take_ovc_comparisons();
         assert_eq!(derive_count, 3);

@@ -4,8 +4,26 @@ use es::benchmark::{
     GenSortInputProvider, SimpleVerifier, print_benchmark_summary,
 };
 use es::diskio::constants::DEFAULT_BUFFER_SIZE;
-use es::sketch::SketchType;
+use es::sort::core::engine::PartitionType;
+use es::sort_policy_sub::{PlannerConfig, plan_resource_efficient};
 use std::path::PathBuf;
+
+#[derive(clap::ValueEnum, Clone, Copy, Debug)]
+enum PartitionArg {
+    KeyOnly,
+    CountBalanced,
+    SizeBalanced,
+}
+
+impl From<PartitionArg> for PartitionType {
+    fn from(value: PartitionArg) -> Self {
+        match value {
+            PartitionArg::KeyOnly => PartitionType::KeyOnly,
+            PartitionArg::CountBalanced => PartitionType::CountBalanced,
+            PartitionArg::SizeBalanced => PartitionType::SizeBalanced,
+        }
+    }
+}
 
 #[derive(Parser)]
 struct SortArgs {
@@ -15,22 +33,6 @@ struct SortArgs {
     /// Input GenSort file path
     #[arg(short, long)]
     input: PathBuf,
-
-    /// Sketch type for quantile estimation (`kll` or `reservoir-sampling`)
-    #[arg(long, default_value = "kll", value_name = "SKETCH")]
-    sketch_type: SketchType,
-
-    /// Sketch size for quantile estimation
-    #[arg(long, default_value = "200")]
-    sketch_size: usize,
-
-    /// Sketch sampling interval (update the sketch every N records of the run)
-    #[arg(long, default_value = "100")]
-    sketch_sampling_interval: usize,
-
-    /// Run indexing interval (store every Nth key in the run index)
-    #[arg(long, default_value = "1000")]
-    run_indexing_interval: usize,
 
     /// Directory for temporary files
     #[arg(short, long, default_value = ".")]
@@ -56,29 +58,58 @@ struct SortArgs {
     #[arg(long, default_value_t = true, action = ArgAction::Set)]
     ovc: bool,
 
+    /// Automatically derive run_gen_threads, merge_threads, rg_buf_mb and
+    /// merge_fanin from the dataset size and the budget (--memory-mb,
+    /// --max-threads).  The planner applies the two-regime resource-efficient
+    /// policy described in the paper.  When set, the four manual tuning args
+    /// below become optional.
+    #[arg(long, default_value = "false")]
+    use_planner: bool,
+
+    /// Available memory budget in MB (used by --use-planner / --print-plan)
+    #[arg(long)]
+    memory_mb: Option<f64>,
+
+    /// Maximum thread count (used by --use-planner / --print-plan)
+    #[arg(long)]
+    max_threads: Option<usize>,
+
     /// Threads for run generation
-    #[arg(long, required_unless_present = "estimate_size")]
+    #[arg(long, required_unless_present_any = ["estimate_size", "use_planner", "print_plan"])]
     run_gen_threads: Option<usize>,
 
     /// Threads for merge phase
-    #[arg(long, required_unless_present = "estimate_size")]
+    #[arg(long, required_unless_present_any = ["estimate_size", "use_planner", "print_plan"])]
     merge_threads: Option<usize>,
 
-    /// Run size for run generation (MB)
-    #[arg(long, required_unless_present = "estimate_size")]
-    run_size_mb: Option<f64>,
+    /// RG buffer for run generation (MB)
+    #[arg(long, required_unless_present_any = ["estimate_size", "use_planner", "print_plan"])]
+    rg_buf_mb: Option<f64>,
 
-    /// Merge fan-in (per-thread)
-    #[arg(long, required_unless_present = "estimate_size")]
+    /// Merge fan-in (global per merge operation)
+    #[arg(long, required_unless_present_any = ["estimate_size", "use_planner", "print_plan"])]
     merge_fanin: Option<usize>,
 
     /// Merge imbalance factor (>= 1.0)
     #[arg(long, default_value = "1.0")]
     imbalance_factor: f64,
 
+    /// Merge partition type (`key-only`, `count-balanced`, `size-balanced`)
+    #[arg(long, default_value = "size-balanced", value_name = "PARTITION")]
+    partition_type: PartitionArg,
+
+    /// Discard final output (no write) for benchmarking
+    #[arg(long, default_value = "false")]
+    discard_final_output: bool,
+
     /// Only estimate dataset size (MB) and exit
     #[arg(long, default_value = "false")]
     estimate_size: bool,
+
+    /// Compute and print the planner's resource configuration, then exit
+    /// without running the sort.  Requires --memory-mb and --max-threads.
+    #[arg(long, default_value = "false")]
+    print_plan: bool,
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -94,19 +125,68 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         return Ok(());
     }
 
-    // Unwrap required args (clap enforces presence when not estimating)
-    let run_gen_threads = args
-        .run_gen_threads
-        .expect("--run-gen-threads required unless --estimate-size");
-    let merge_threads = args
-        .merge_threads
-        .expect("--merge-threads required unless --estimate-size");
-    let run_size_mb = args
-        .run_size_mb
-        .expect("--run-size-mb required unless --estimate-size");
-    let merge_fanin = args
-        .merge_fanin
-        .expect("--merge-fanin required unless --estimate-size");
+    // If only printing the plan, compute it and exit without sorting
+    if args.print_plan {
+        let memory_mb = args
+            .memory_mb
+            .ok_or("--memory-mb is required when --print-plan is set")?;
+        let max_threads = args
+            .max_threads
+            .ok_or("--max-threads is required when --print-plan is set")?;
+        let dataset_mb = input_provider.estimate_data_size_mb()?;
+        println!("Estimated data size: {dataset_mb:.2} MB");
+        let plan = plan_resource_efficient(&PlannerConfig {
+            dataset_mb,
+            memory_mb,
+            max_threads,
+            page_size_kb: DEFAULT_BUFFER_SIZE as f64 / 1024.0,
+            ..PlannerConfig::default()
+        });
+        println!("{plan}");
+        return Ok(());
+    }
+
+    // Resolve run configuration — either from explicit args or via the planner.
+    let (run_gen_threads, merge_threads, rg_buf_mb, merge_fanin) = if args.use_planner {
+        let memory_mb = args
+            .memory_mb
+            .ok_or("--memory-mb is required when --use-planner is set")?;
+        let max_threads = args
+            .max_threads
+            .ok_or("--max-threads is required when --use-planner is set")?;
+        let dataset_mb = input_provider.estimate_data_size_mb()?;
+        println!("Planner: estimated dataset size = {dataset_mb:.2} MB");
+        let plan = plan_resource_efficient(&PlannerConfig {
+            dataset_mb,
+            memory_mb,
+            max_threads,
+            page_size_kb: DEFAULT_BUFFER_SIZE as f64 / 1024.0,
+            ..PlannerConfig::default()
+        });
+        println!("Planner: {plan}");
+        (
+            plan.run_gen_threads,
+            plan.merge_threads,
+            plan.rg_buf_mb,
+            plan.merge_fanin,
+        )
+    } else {
+        let run_gen_threads = args
+            .run_gen_threads
+            .expect("--run-gen-threads required unless --estimate-size or --use-planner");
+        let merge_threads = args
+            .merge_threads
+            .expect("--merge-threads required unless --estimate-size or --use-planner");
+        let rg_buf_mb = args
+            .rg_buf_mb
+            .expect("--rg-buf-mb required unless --estimate-size or --use-planner");
+        let merge_fanin = args
+            .merge_fanin
+            .expect("--merge-fanin required unless --estimate-size or --use-planner");
+        (run_gen_threads, merge_threads, rg_buf_mb, merge_fanin)
+    };
+
+    let partition_type: PartitionType = args.partition_type.into();
 
     // Create benchmark configuration
     let config = BenchmarkConfig {
@@ -116,20 +196,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         cooldown_seconds: args.cooldown_seconds,
         verify: args.verify,
         temp_dir: args.dir,
-        sketch_type: args.sketch_type,
-        sketch_size: args.sketch_size,
-        sketch_sampling_interval: args.sketch_sampling_interval,
-        run_indexing_interval: args.run_indexing_interval,
         run_gen_threads,
         use_ovc: args.ovc,
-        run_size_mb,
-        run_gen_memory_mb: run_size_mb * run_gen_threads as f64,
+        rg_buf_mb,
+        run_gen_memory_mb: rg_buf_mb * run_gen_threads as f64,
         merge_threads,
         merge_fanin,
         merge_memory_mb: (merge_fanin as f64)
             * (merge_threads as f64)
             * (DEFAULT_BUFFER_SIZE as f64 / 1024.0 / 1024.0),
         imbalance_factor: args.imbalance_factor,
+        partition_type,
+        discard_final_output: args.discard_final_output,
     };
 
     let input_provider = Box::new(input_provider);

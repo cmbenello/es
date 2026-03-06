@@ -3,6 +3,7 @@
 /example_storage
 /test_runs
 /test_cleanup
+/logs
 *.csv
 *.parquet
 *.kvbin

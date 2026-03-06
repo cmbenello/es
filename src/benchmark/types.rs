@@ -1,5 +1,5 @@
 use crate::SortStats;
-use crate::sketch::SketchType;
+use crate::sort::core::engine::PartitionType;
 use std::path::PathBuf;
 
 #[derive(Clone)]
@@ -16,16 +16,14 @@ pub struct BenchmarkConfig {
     pub cooldown_seconds: u64,
     pub verify: bool,
     pub temp_dir: PathBuf,
-    pub sketch_type: SketchType,
-    pub sketch_size: usize,
-    pub sketch_sampling_interval: usize,
-    pub run_indexing_interval: usize,
     pub run_gen_threads: usize,
     pub use_ovc: bool,
-    pub run_size_mb: f64,
+    pub rg_buf_mb: f64,
     pub run_gen_memory_mb: f64,
     pub merge_threads: usize,
     pub merge_fanin: usize,
     pub merge_memory_mb: f64,
     pub imbalance_factor: f64,
+    pub partition_type: PartitionType,
+    pub discard_final_output: bool,
 }

@@ -1,0 +1,65 @@
+=========================================
+DuckDB Parallelism Sweep - Configuration Log
+=========================================
+Configuration: memory_limit=100GB, threads=44
+Input: ../es/datasets/lineitem_sf500.k-8-9-13-14-15.v-0-3.kvbin
+Database: ./duckdb_bench.db
+Table: bench_data
+Temp directory: ./duckdb_temp
+Start time: 2026-01-19 14:46:18
+
+Exit code: 0
+Status: SUCCESS
+
+=========================================
+Full output:
+=========================================
+    Finished `release` profile [optimized] target(s) in 1.47s
+     Running `target/release/sort-duckdb --db ./duckdb_bench.db --table bench_data --output ./duckdb_sorted/result_44_threads --memory-limit 100GB --temp-dir ./duckdb_temp --threads 44`
+Setting threads to 44
+Setting temp_directory to "./duckdb_temp"
+Setting memory_limit to 100GB
+Gathering table statistics...
+Table: bench_data
+Row count: 3000028242
+Database size: 65670754304 bytes (61.16 GB)
+
+Running EXPLAIN...
+
+===== QUERY PLAN =====
+┌───────────────────────────┐
+│          ORDER_BY         │
+│    ────────────────────   │
+│     duckdb_bench.main     │
+│  .bench_data.sort_key ASC │
+└─────────────┬─────────────┘
+┌─────────────┴─────────────┐
+│         SEQ_SCAN          │
+│    ────────────────────   │
+│     Table: bench_data     │
+│   Type: Sequential Scan   │
+│                           │
+│        Projections:       │
+│          sort_key         │
+│          payload          │
+│                           │
+│    ~3,000,028,242 rows    │
+└───────────────────────────┘
+
+======================
+
+Running external sort on table 'bench_data'...
+Output: "./duckdb_sorted/result_44_threads"
+
+External sorting completed in 2226.09 seconds.
+Output size: 42888029662 bytes (39.94 GB)
+Compression ratio: 65.31%
+TIMING: 2226.09
+
+=========================================
+Summary:
+=========================================
+Duration: 2226.09s
+Result: 100GB,44,2226.09
+End time: 2026-01-19 14:46:18
+=========================================

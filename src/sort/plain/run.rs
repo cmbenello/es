@@ -4,49 +4,67 @@ use crate::diskio::constants::align_down;
 use crate::diskio::file::SharedFd;
 use crate::diskio::io_stats::IoStatsTracker;
 use crate::sort::core::engine::RunSummary;
+use crate::sort::core::run_format::{
+    IndexingInterval, KeyRunIdOffsetBound, RUN_ID_COUNTER, cmp_key_run_offset,
+};
+use crate::sort::core::sparse_index::{SparseIndex, SparseIndexPagePool};
+use std::cell::UnsafeCell;
 use std::io::{Read, Write};
 use std::sync::Arc;
-
-// Sparse index entry
-#[derive(Debug, Clone)]
-pub struct IndexEntry {
-    pub key: Vec<u8>,
-    pub file_offset: usize,
-    pub entry_number: usize,
-}
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 // File-based run implementation with direct I/O
 pub struct Run {
+    run_id: u32,
     fd: Arc<SharedFd>,
     writer: Option<AlignedWriter>,
     total_entries: usize,
     start_bytes: usize,
     total_bytes: usize,
-    sparse_index: Vec<IndexEntry>,
-    indexing_interval: usize,
+    sparse_index: UnsafeCell<SparseIndex>,
+    sparse_index_refcount: AtomicUsize,
 }
 
+// SAFETY: Run is shared across threads via Arc during merge.
+// The sparse_index UnsafeCell is safe because:
+// - During write phase: single-threaded, only the owner mutates
+// - During merge: all threads read concurrently (no mutation),
+//   then each calls release_sparse_index(); the last thread (atomic
+//   decrement to 0) clears the index with no concurrent readers remaining.
+unsafe impl Sync for Run {}
+
 impl Run {
-    pub fn from_writer(writer: AlignedWriter) -> Result<Self, String> {
-        Self::from_writer_with_indexing_interval(writer, 1000)
+    #[cfg(test)]
+    pub(crate) fn from_writer(writer: AlignedWriter) -> Result<Self, String> {
+        Self::from_writer_with_indexing_interval(writer, IndexingInterval::records(1000))
     }
 
     pub fn from_writer_with_indexing_interval(
         writer: AlignedWriter,
-        indexing_interval: usize,
+        indexing_interval: IndexingInterval,
+    ) -> Result<Self, String> {
+        let run_id = RUN_ID_COUNTER.fetch_add(1, Ordering::AcqRel);
+        Self::from_writer_with_indexing_interval_and_id(writer, indexing_interval, run_id)
+    }
+
+    pub fn from_writer_with_indexing_interval_and_id(
+        writer: AlignedWriter,
+        indexing_interval: IndexingInterval,
+        run_id: u32,
     ) -> Result<Self, String> {
         // Get current position in the file
         let start_bytes = writer.position() as usize;
         let fd = writer.get_fd();
 
         Ok(Self {
+            run_id,
             fd,
             writer: Some(writer),
             total_entries: 0,
             start_bytes,
             total_bytes: 0,
-            sparse_index: Vec::new(),
-            indexing_interval,
+            sparse_index: UnsafeCell::new(SparseIndex::new(indexing_interval)),
+            sparse_index_refcount: AtomicUsize::new(0),
         })
     }
 
@@ -66,53 +84,187 @@ impl Run {
         self.total_bytes
     }
 
-    pub fn start_key(&self) -> Option<&[u8]> {
-        self.sparse_index.first().map(|entry| entry.key.as_slice())
+    pub fn run_id(&self) -> u32 {
+        self.run_id
     }
 
-    fn find_start_position(&self, lower_bound: &[u8]) -> Option<(usize, Vec<u8>)> {
-        if self.sparse_index.is_empty() {
+    pub fn start_key(&self) -> Option<&[u8]> {
+        // SAFETY: No concurrent mutation during reads.
+        let index = unsafe { &*self.sparse_index.get() };
+        index.first_key()
+    }
+
+    pub fn sparse_index(&self) -> &SparseIndex {
+        // SAFETY: No concurrent mutation during reads.
+        unsafe { &*self.sparse_index.get() }
+    }
+
+    /// Set the number of threads that will read the sparse index.
+    /// Must be called before spawning threads.
+    pub fn set_sparse_index_readers(&self, count: usize) {
+        self.sparse_index_refcount.store(count, Ordering::Release);
+    }
+
+    /// Decrement the sparse index refcount. The thread that decrements to 0
+    /// clears the sparse index, freeing the memory.
+    pub fn release_sparse_index(&self) {
+        let prev = self.sparse_index_refcount.fetch_sub(1, Ordering::AcqRel);
+        if prev == 1 {
+            let index = unsafe { &mut *self.sparse_index.get() };
+            index.clear();
+        }
+    }
+
+    /// Decrement the sparse index refcount. The last thread drains pages to the pool.
+    pub fn release_sparse_index_to_pool(&self, pool: &SparseIndexPagePool) {
+        let prev = self.sparse_index_refcount.fetch_sub(1, Ordering::AcqRel);
+        if prev == 1 {
+            let index = unsafe { &mut *self.sparse_index.get() };
+            pool.return_pages(index.take_buffer());
+        }
+    }
+
+    /// Get mutable access to the sparse index (for seeding buffer).
+    /// SAFETY: Caller must ensure no concurrent access.
+    pub fn sparse_index_mut(&self) -> &mut SparseIndex {
+        unsafe { &mut *self.sparse_index.get() }
+    }
+
+    fn find_start_position(
+        &self,
+        lower_bound: Option<(&[u8], u32, usize)>,
+    ) -> Option<(usize, Vec<u8>)> {
+        // SAFETY: No concurrent mutation during reads.
+        let sparse_index = unsafe { &*self.sparse_index.get() };
+        if sparse_index.is_empty() {
             return None;
         }
-        let mut best_entry = &self.sparse_index[0];
-        if lower_bound.is_empty() {
-            return Some((best_entry.file_offset, best_entry.key.clone()));
+        let mut best_idx: usize = 0;
+        let lower_bound = lower_bound.map(KeyRunIdOffsetBound::from_components);
+        if lower_bound.is_none() {
+            return Some((sparse_index.file_offset(0), sparse_index.key(0).to_vec()));
         }
 
         // Binary search to find the last entry with key < lower_bound
         let mut left = 0;
-        let mut right = self.sparse_index.len();
+        let mut right = sparse_index.len();
+        let lower_bound = lower_bound.unwrap();
 
         while left < right {
             let mid = left + (right - left) / 2;
-            if &self.sparse_index[mid].key[..] < lower_bound {
-                best_entry = &self.sparse_index[mid];
+            if cmp_key_run_offset(
+                (
+                    sparse_index.key(mid),
+                    self.run_id,
+                    sparse_index.file_offset(mid),
+                ),
+                (&lower_bound.key, lower_bound.run_id, lower_bound.offset),
+            ) == std::cmp::Ordering::Less
+            {
+                best_idx = mid;
                 left = mid + 1;
             } else {
                 right = mid;
             }
         }
 
-        Some((best_entry.file_offset, best_entry.key.clone()))
+        Some((
+            sparse_index.file_offset(best_idx),
+            sparse_index.key(best_idx).to_vec(),
+        ))
     }
 }
 
 impl Run {
+    fn should_sample_index(&self) -> bool {
+        // SAFETY: Called only during single-threaded write phase.
+        let sparse_index = unsafe { &*self.sparse_index.get() };
+        sparse_index.should_sample(self.total_entries, self.total_bytes)
+    }
+
+    pub fn set_sparse_index_bootstrap(
+        &mut self,
+        avg_key_bytes: f64,
+        avg_record_bytes: f64,
+        sample_count: usize,
+    ) {
+        let sparse_index = self.sparse_index.get_mut();
+        sparse_index.set_bootstrap(avg_key_bytes, avg_record_bytes, sample_count);
+    }
+
+    pub fn sparse_index_bootstrap(&self) -> Option<(f64, f64, usize)> {
+        let sparse_index = unsafe { &*self.sparse_index.get() };
+        sparse_index.bootstrap()
+    }
+
+    fn observe_record(&mut self, key_len: usize, record_bytes: usize) {
+        let sparse_index = self.sparse_index.get_mut();
+        sparse_index.observe_record(key_len, record_bytes);
+    }
+
+    fn record_sparse_index(
+        &mut self,
+        key: &[u8],
+        sampled_record_index: usize,
+        sampled_file_offset: usize,
+        _record_bytes: usize,
+    ) {
+        let sparse_index = self.sparse_index.get_mut();
+        sparse_index.record_sample(
+            key,
+            sampled_file_offset,
+            sampled_record_index,
+            sampled_file_offset,
+        );
+    }
+
+    /// Write only the header (key_len + value_len) and key to the output.
+    /// The caller is responsible for writing the value bytes separately via `writer()`.
+    pub fn append_header_and_key(&mut self, key: &[u8], value_len: usize) {
+        if self.writer.is_none() {
+            panic!("Run is not initialized with a writer");
+        }
+
+        let should_sample = self.should_sample_index();
+        let record_index = self.total_entries;
+        let record_offset = self.total_bytes;
+
+        let writer = self.writer.as_mut().unwrap();
+        let key_len = key.len() as u32;
+        let value_len_u32 = value_len as u32;
+
+        writer.write_all(&key_len.to_le_bytes()).unwrap();
+        writer.write_all(&value_len_u32.to_le_bytes()).unwrap();
+        writer.write_all(key).unwrap();
+        // Value written separately by caller via writer()
+
+        let record_bytes = 8 + key.len() + value_len;
+        self.total_bytes += record_bytes;
+        self.total_entries += 1;
+        self.observe_record(key.len(), record_bytes);
+
+        if should_sample {
+            self.record_sparse_index(key, record_index, record_offset, record_bytes);
+        }
+    }
+
+    /// Get a mutable reference to the underlying writer.
+    /// Used for zero-copy value transfer from source reader.
+    pub fn writer(&mut self) -> &mut AlignedWriter {
+        self.writer.as_mut().expect("Run has no writer")
+    }
+
     pub fn append(&mut self, key: &[u8], value: &[u8]) {
-        let writer = self
-            .writer
-            .as_mut()
-            .expect("RunImpl is not initialized with a writer");
+        if self.writer.is_none() {
+            panic!("RunImpl is not initialized with a writer");
+        }
 
         // Use sampling interval for sparse index
-        if self.total_entries % self.indexing_interval == 0 {
-            let index_entry = IndexEntry {
-                key: key.to_vec(),
-                file_offset: self.total_bytes,
-                entry_number: self.total_entries,
-            };
-            self.sparse_index.push(index_entry);
-        }
+        let should_sample = self.should_sample_index();
+        let record_index = self.total_entries;
+        let record_offset = self.total_bytes;
+
+        let writer = self.writer.as_mut().unwrap();
 
         let key_len = key.len() as u32;
         let value_len = value.len() as u32;
@@ -123,22 +275,28 @@ impl Run {
         writer.write_all(&key).unwrap();
         writer.write_all(&value).unwrap();
 
-        self.total_bytes += 8 + key.len() + value.len();
+        let record_bytes = 8 + key.len() + value.len();
+        self.total_bytes += record_bytes;
         self.total_entries += 1;
+        self.observe_record(key.len(), record_bytes);
+
+        if should_sample {
+            self.record_sparse_index(key, record_index, record_offset, record_bytes);
+        }
     }
 
     pub fn scan_range(
         &self,
-        lower_inc: &[u8],
-        upper_exc: &[u8],
+        lower_inc: Option<(&[u8], u32, usize)>,
+        upper_exc: Option<(&[u8], u32, usize)>,
     ) -> Box<dyn Iterator<Item = (Vec<u8>, Vec<u8>)> + Send> {
         self.scan_range_with_io_tracker(lower_inc, upper_exc, None)
     }
 
     pub fn scan_range_with_io_tracker(
         &self,
-        lower_inc: &[u8],
-        upper_exc: &[u8],
+        lower_inc: Option<(&[u8], u32, usize)>,
+        upper_exc: Option<(&[u8], u32, usize)>,
         io_tracker: Option<IoStatsTracker>,
     ) -> Box<dyn Iterator<Item = (Vec<u8>, Vec<u8>)> + Send> {
         // Handle empty runs (no entries written)
@@ -174,35 +332,99 @@ impl Run {
             // We'll need to skip the first few bytes after seeking
             return Box::new(RunIterator {
                 reader,
-                lower_bound: lower_inc.to_vec(),
-                upper_bound: upper_exc.to_vec(),
-                bytes_read: aligned_offset,
-                total_bytes: self.total_bytes,
-                skip_bytes,
-                actual_start: self.start_bytes,
+                run_id: self.run_id,
+                lower_inc: lower_inc.map(KeyRunIdOffsetBound::from_components),
+                upper_exc: upper_exc.map(KeyRunIdOffsetBound::from_components),
+                file_pos: aligned_offset,
+                run_len_bytes: self.total_bytes,
+                align_skip_bytes: skip_bytes,
+                run_start: self.start_bytes,
+                done: false,
             }) as Box<dyn Iterator<Item = (Vec<u8>, Vec<u8>)> + Send>;
         }
 
         Box::new(RunIterator {
             reader,
-            lower_bound: lower_inc.to_vec(),
-            upper_bound: upper_exc.to_vec(),
-            bytes_read: self.start_bytes, // Start from the beginning of this run
-            total_bytes: self.total_bytes,
-            skip_bytes: 0,
-            actual_start: self.start_bytes,
+            run_id: self.run_id,
+            lower_inc: lower_inc.map(KeyRunIdOffsetBound::from_components),
+            upper_exc: upper_exc.map(KeyRunIdOffsetBound::from_components),
+            file_pos: self.start_bytes, // Start from the beginning of this run
+            run_len_bytes: self.total_bytes,
+            align_skip_bytes: 0,
+            run_start: self.start_bytes,
+            done: false,
         }) as Box<dyn Iterator<Item = (Vec<u8>, Vec<u8>)> + Send>
+    }
+
+    /// Create a PlainMergeSource for zero-copy merge.
+    /// Returns None for empty runs.
+    pub fn scan_range_as_source(
+        &self,
+        lower_inc: Option<(&[u8], u32, usize)>,
+        upper_exc: Option<(&[u8], u32, usize)>,
+        io_tracker: Option<IoStatsTracker>,
+    ) -> Option<RunIterator> {
+        if self.total_entries == 0 {
+            return None;
+        }
+
+        let mut reader = if let Some(tracker) = io_tracker {
+            AlignedReader::from_fd_with_tracer(self.fd.clone(), Some(tracker)).unwrap()
+        } else {
+            AlignedReader::from_fd(self.fd.clone()).unwrap()
+        };
+
+        let (offset, _start_key) = self.find_start_position(lower_inc).unwrap();
+        let start_offset = self.start_bytes + offset;
+
+        if start_offset > 0 {
+            let aligned_offset = align_down(start_offset as u64, 4096) as usize;
+            let skip_bytes = start_offset - aligned_offset;
+            if aligned_offset > 0 {
+                reader.seek(aligned_offset as u64).unwrap();
+            }
+            Some(RunIterator {
+                reader,
+                run_id: self.run_id,
+                lower_inc: lower_inc.map(KeyRunIdOffsetBound::from_components),
+                upper_exc: upper_exc.map(KeyRunIdOffsetBound::from_components),
+                file_pos: aligned_offset,
+                run_len_bytes: self.total_bytes,
+                align_skip_bytes: skip_bytes,
+                run_start: self.start_bytes,
+                done: false,
+            })
+        } else {
+            Some(RunIterator {
+                reader,
+                run_id: self.run_id,
+                lower_inc: lower_inc.map(KeyRunIdOffsetBound::from_components),
+                upper_exc: upper_exc.map(KeyRunIdOffsetBound::from_components),
+                file_pos: self.start_bytes,
+                run_len_bytes: self.total_bytes,
+                align_skip_bytes: 0,
+                run_start: self.start_bytes,
+                done: false,
+            })
+        }
     }
 }
 
-struct RunIterator {
+pub struct RunIterator {
     reader: AlignedReader,
-    lower_bound: Vec<u8>,
-    upper_bound: Vec<u8>,
-    bytes_read: usize,
-    total_bytes: usize,
-    skip_bytes: usize,   // Bytes to skip after seeking to aligned position
-    actual_start: usize, // Where this run actually starts in the file
+    run_id: u32,
+    lower_inc: Option<KeyRunIdOffsetBound>,
+    upper_exc: Option<KeyRunIdOffsetBound>,
+    /// Absolute file offset where the reader currently is.
+    file_pos: usize,
+    /// Total bytes in this run (length from `run_start`).
+    run_len_bytes: usize,
+    /// Bytes to skip after seeking to aligned position (absolute).
+    align_skip_bytes: usize,
+    /// Absolute file offset where this run begins.
+    run_start: usize,
+    /// Once we return None, remain exhausted.
+    done: bool,
 }
 
 impl RunSummary for Run {
@@ -221,21 +443,28 @@ impl Iterator for RunIterator {
     fn next(&mut self) -> Option<Self::Item> {
         use std::io::ErrorKind;
 
+        if self.done {
+            return None;
+        }
+
         // First, skip bytes if we sought to an aligned position
-        if self.skip_bytes > 0 {
-            let mut skip_buf = vec![0u8; self.skip_bytes];
+        if self.align_skip_bytes > 0 {
+            let mut skip_buf = vec![0u8; self.align_skip_bytes];
             self.reader
                 .read_exact(&mut skip_buf)
                 .expect("Failed to skip bytes after seek");
-            self.bytes_read += self.skip_bytes;
-            self.skip_bytes = 0;
+            self.file_pos += self.align_skip_bytes;
+            self.align_skip_bytes = 0;
         }
 
         loop {
             // Check if we've read all the actual data for this run
-            if self.total_bytes > 0 && self.bytes_read - self.actual_start >= self.total_bytes {
+            if self.run_len_bytes > 0 && self.file_pos - self.run_start >= self.run_len_bytes {
+                self.done = true;
                 return None;
             }
+
+            let cur_offset = self.file_pos - self.run_start;
 
             // Read key length
             let mut key_len_bytes = [0u8; 4];
@@ -243,6 +472,7 @@ impl Iterator for RunIterator {
                 Ok(_) => {}
                 Err(e) if e.kind() == ErrorKind::UnexpectedEof => {
                     // Legitimate EOF - we've reached the end of data
+                    self.done = true;
                     return None;
                 }
                 Err(e) => panic!("Failed to read key length: {}", e),
@@ -262,6 +492,26 @@ impl Iterator for RunIterator {
                 .read_exact(&mut key)
                 .expect("Failed to read key");
 
+            let entry_size = 8 + key.len() + value_len;
+
+            // Check if key is in range [lower_inc, upper_exc)
+            if let Some(lb) = &self.lower_inc {
+                if lb.lt(&key, self.run_id, cur_offset) {
+                    let new_pos = self.reader.position().saturating_add(value_len as u64);
+                    self.reader
+                        .seek(new_pos)
+                        .expect("Failed to skip value bytes");
+                    self.file_pos += entry_size;
+                    continue;
+                }
+            }
+            if let Some(ub) = &self.upper_exc {
+                if ub.ge(&key, self.run_id, cur_offset) {
+                    self.done = true;
+                    return None;
+                }
+            }
+
             // Read value
             let mut value = vec![0u8; value_len];
             self.reader
@@ -269,25 +519,117 @@ impl Iterator for RunIterator {
                 .expect("Failed to read value");
 
             // Update bytes read
-            let entry_size = 8 + key.len() + value.len();
-            self.bytes_read += entry_size;
-
-            // Check if this entry belongs to our run
-            if self.bytes_read - entry_size < self.actual_start {
-                continue; // This entry is before our run
-            }
-
-            // Check if key is in range [lower_inc, upper_exc)
-            if !self.lower_bound.is_empty() && key < self.lower_bound {
-                continue;
-            }
-            if !self.upper_bound.is_empty() && key >= self.upper_bound {
-                // Since data is sorted in runs, we can stop here
-                return None;
-            }
+            self.file_pos += entry_size;
 
             return Some((key, value));
         }
+    }
+}
+
+impl crate::sort::plain::merge::PlainMergeSource for RunIterator {
+    fn next_key_into(&mut self, key: &mut Vec<u8>) -> Option<usize> {
+        use std::io::ErrorKind;
+
+        if self.done {
+            return None;
+        }
+
+        // Skip alignment bytes on first call
+        if self.align_skip_bytes > 0 {
+            let mut skip_buf = vec![0u8; self.align_skip_bytes];
+            self.reader
+                .read_exact(&mut skip_buf)
+                .expect("Failed to skip bytes after seek");
+            self.file_pos += self.align_skip_bytes;
+            self.align_skip_bytes = 0;
+        }
+
+        loop {
+            // Check if we've read all data for this run
+            if self.run_len_bytes > 0 && self.file_pos - self.run_start >= self.run_len_bytes {
+                self.done = true;
+                return None;
+            }
+
+            let cur_offset = self.file_pos - self.run_start;
+
+            // Read key length
+            let mut key_len_bytes = [0u8; 4];
+            match self.reader.read_exact(&mut key_len_bytes) {
+                Ok(_) => {}
+                Err(e) if e.kind() == ErrorKind::UnexpectedEof => {
+                    self.done = true;
+                    return None;
+                }
+                Err(e) => panic!("Failed to read key length: {}", e),
+            }
+            let key_len = u32::from_le_bytes(key_len_bytes) as usize;
+
+            // Read value length
+            let mut value_len_bytes = [0u8; 4];
+            self.reader
+                .read_exact(&mut value_len_bytes)
+                .expect("Failed to read value length");
+            let value_len = u32::from_le_bytes(value_len_bytes) as usize;
+
+            // Read key into provided buffer
+            key.resize(key_len, 0);
+            if key_len > 0 {
+                self.reader.read_exact(key).expect("Failed to read key");
+            }
+
+            // Check if key is in range [lower_inc, upper_exc)
+            if let Some(lb) = &self.lower_inc {
+                if lb.lt(key, self.run_id, cur_offset) {
+                    // Skip value bytes and continue
+                    let new_pos = self.reader.position().saturating_add(value_len as u64);
+                    self.reader
+                        .seek(new_pos)
+                        .expect("Failed to skip value bytes");
+                    self.file_pos += 8 + key_len + value_len;
+                    continue;
+                }
+            }
+            if let Some(ub) = &self.upper_exc {
+                if ub.ge(key, self.run_id, cur_offset) {
+                    self.done = true;
+                    return None;
+                }
+            }
+
+            // Header bytes consumed: key_len(4) + value_len(4) + key = 8 + key_len
+            // Value bytes NOT consumed yet (reader is at value start)
+            self.file_pos += 8 + key_len;
+
+            return Some(value_len);
+        }
+    }
+
+    fn copy_value_to(&mut self, writer: &mut dyn std::io::Write, len: usize) {
+        use std::io::BufRead;
+        let mut remaining = len;
+        while remaining > 0 {
+            let buf = self
+                .reader
+                .fill_buf()
+                .expect("Failed to fill reader buffer");
+            let available = buf.len().min(remaining);
+            writer
+                .write_all(&buf[..available])
+                .expect("Failed to write value bytes");
+            self.reader.consume(available);
+            remaining -= available;
+        }
+        self.file_pos += len;
+    }
+
+    fn skip_value(&mut self, len: usize) {
+        if len == 0 {
+            return;
+        }
+        let new_pos = self.reader.position().saturating_add(len as u64);
+        self.reader.seek(new_pos).expect("Failed to skip value");
+        self.file_pos += len;
     }
 }
 
@@ -314,6 +656,10 @@ mod tests {
         AlignedWriter::from_fd(fd).unwrap()
     }
 
+    fn bound(key: &[u8]) -> Option<(&[u8], u32, usize)> {
+        Some((key, 0, 0))
+    }
+
     #[test]
     fn test_basic_append_and_scan() {
         let writer = get_test_writer("basic");
@@ -325,7 +671,7 @@ mod tests {
         run.append(b"key3", b"value3");
         run.finalize_write();
 
-        let mut iter = run.scan_range(&[], &[]);
+        let mut iter = run.scan_range(None, None);
         assert_eq!(iter.next(), Some((b"key1".to_vec(), b"value1".to_vec())));
         assert_eq!(iter.next(), Some((b"key2".to_vec(), b"value2".to_vec())));
         assert_eq!(iter.next(), Some((b"key3".to_vec(), b"value3".to_vec())));
@@ -343,7 +689,7 @@ mod tests {
         assert_eq!(run.total_entries(), 0);
 
         // Scanning should return no items
-        let mut iter = run.scan_range(&[], &[]);
+        let mut iter = run.scan_range(None, None);
         assert_eq!(iter.next(), None);
     }
 
@@ -361,21 +707,21 @@ mod tests {
         run.finalize_write();
 
         // Test inclusive lower bound
-        let iter = run.scan_range(b"b", &[]);
+        let iter = run.scan_range(bound(b"b"), None);
         let results: Vec<_> = iter.collect();
         assert_eq!(results.len(), 4);
         assert_eq!(results[0].0, b"b");
         assert_eq!(results[3].0, b"e");
 
         // Test exclusive upper bound
-        let iter = run.scan_range(&[], b"d");
+        let iter = run.scan_range(None, bound(b"d"));
         let results: Vec<_> = iter.collect();
         assert_eq!(results.len(), 3);
         assert_eq!(results[0].0, b"a");
         assert_eq!(results[2].0, b"c");
 
         // Test both bounds
-        let iter = run.scan_range(b"b", b"d");
+        let iter = run.scan_range(bound(b"b"), bound(b"d"));
         let results: Vec<_> = iter.collect();
         assert_eq!(results.len(), 2);
         assert_eq!(results[0].0, b"b");
@@ -395,7 +741,7 @@ mod tests {
         run.append(b"small", b"val");
         run.finalize_write();
 
-        let mut iter = run.scan_range(&[], &[]);
+        let mut iter = run.scan_range(None, None);
         let (key, value) = iter.next().unwrap();
         assert_eq!(key, large_key);
         assert_eq!(value, large_value);
@@ -424,7 +770,7 @@ mod tests {
         run.finalize_write();
 
         // Verify all entries are present
-        let iter = run.scan_range(&[], &[]);
+        let iter = run.scan_range(None, None);
         let mut count = 0;
         for (key, value) in iter {
             assert_eq!(key, entries[count].0);
@@ -445,11 +791,11 @@ mod tests {
         run.finalize_write();
 
         // First scan
-        let mut iter1 = run.scan_range(&[], &[]);
+        let mut iter1 = run.scan_range(None, None);
         assert_eq!(iter1.next().unwrap().0, b"a");
 
         // Second concurrent scan
-        let mut iter2 = run.scan_range(&[], &[]);
+        let mut iter2 = run.scan_range(None, None);
         assert_eq!(iter2.next().unwrap().0, b"a");
         assert_eq!(iter2.next().unwrap().0, b"b");
 
@@ -501,7 +847,7 @@ mod tests {
         run.append(&key2, &value2);
         run.finalize_write();
 
-        let mut iter = run.scan_range(&[], &[]);
+        let mut iter = run.scan_range(None, None);
         let (key, value) = iter.next().unwrap();
         assert_eq!(key, binary_key);
         assert_eq!(value, binary_value);
@@ -547,7 +893,7 @@ mod tests {
         run.finalize_write();
 
         // Verify all entries
-        let mut iter = run.scan_range(&[], &[]);
+        let mut iter = run.scan_range(None, None);
         for (expected_key, expected_value) in &entries {
             let (key, value) = iter.next().unwrap();
             assert_eq!(&key, expected_key);
@@ -565,7 +911,7 @@ mod tests {
         run.finalize_write();
 
         // Can still scan after multiple finalizes
-        let mut iter = run.scan_range(&[], &[]);
+        let mut iter = run.scan_range(None, None);
         assert_eq!(iter.next(), Some((b"key".to_vec(), b"value".to_vec())));
         assert_eq!(iter.next(), None);
     }
@@ -588,7 +934,7 @@ mod tests {
         }
         run.finalize_write();
 
-        let mut iter = run.scan_range(&[], &[]);
+        let mut iter = run.scan_range(None, None);
         for (key, value) in &test_cases {
             let (k, v) = iter.next().unwrap();
             assert_eq!(k, key.as_bytes());
@@ -611,7 +957,7 @@ mod tests {
         run.finalize_write();
 
         // Start a scan and read only partially
-        let mut iter = run.scan_range(&[], &[]);
+        let mut iter = run.scan_range(None, None);
         assert_eq!(iter.next().unwrap().0, b"00");
         assert_eq!(iter.next().unwrap().0, b"01");
         assert_eq!(iter.next().unwrap().0, b"02");
@@ -619,7 +965,7 @@ mod tests {
         drop(iter);
 
         // Start a new scan - should work fine
-        let iter = run.scan_range(&[], &[]);
+        let iter = run.scan_range(None, None);
         let all: Vec<_> = iter.collect();
         assert_eq!(all.len(), 10);
     }
@@ -647,7 +993,7 @@ mod tests {
 
         run.finalize_write();
 
-        let mut iter = run.scan_range(&[], &[]);
+        let mut iter = run.scan_range(None, None);
 
         let (k, v) = iter.next().unwrap();
         assert_eq!(k, Vec::<u8>::new());
@@ -684,7 +1030,7 @@ mod tests {
         run.finalize_write();
 
         // Verify all entries
-        let iter = run.scan_range(&[], &[]);
+        let iter = run.scan_range(None, None);
         let all: Vec<_> = iter.collect();
         assert_eq!(all.len(), count);
 
@@ -741,7 +1087,7 @@ mod tests {
         run.append(b"small", b"entry");
         run.finalize_write();
 
-        let mut iter = run.scan_range(&[], &[]);
+        let mut iter = run.scan_range(None, None);
         let (k, v) = iter.next().unwrap();
         assert_eq!(k.len(), 1_000_000);
         assert_eq!(v.len(), 5_000_000);
@@ -772,7 +1118,7 @@ mod tests {
         }
         run.finalize_write();
 
-        let iter = run.scan_range(&[], &[]);
+        let iter = run.scan_range(None, None);
         let all: Vec<_> = iter.collect();
         assert_eq!(all.len(), 100);
 
@@ -798,7 +1144,7 @@ mod tests {
         run.finalize_write();
 
         // Verify we can still read the data
-        let mut iter = run.scan_range(&[], &[]);
+        let mut iter = run.scan_range(None, None);
         let mut count = 0;
         while iter.next().is_some() {
             count += 1;
@@ -817,7 +1163,7 @@ mod tests {
         run.finalize_write();
 
         // Scan with equal lower and upper bounds - should return nothing
-        let iter = run.scan_range(b"b", b"b");
+        let iter = run.scan_range(bound(b"b"), bound(b"b"));
         let results: Vec<_> = iter.collect();
         assert_eq!(results.len(), 0);
     }
@@ -834,7 +1180,7 @@ mod tests {
         run.append(b"other", b"value");
         run.finalize_write();
 
-        let iter = run.scan_range(&[], &[]);
+        let iter = run.scan_range(None, None);
         let all: Vec<_> = iter.collect();
         assert_eq!(all.len(), 4);
 
@@ -933,7 +1279,7 @@ mod tests {
         let (initial_read_ops, initial_read_bytes) = read_tracker.get_read_stats();
 
         // Scan all records with IO tracking
-        let iter = run.scan_range_with_io_tracker(&[], &[], Some(read_tracker.clone()));
+        let iter = run.scan_range_with_io_tracker(None, None, Some(read_tracker.clone()));
         let scanned_records: Vec<_> = iter.collect();
 
         // Get final stats after scanning
@@ -967,8 +1313,8 @@ mod tests {
         // Test partial scan to show different IO patterns
         let partial_tracker = IoStatsTracker::new();
         let iter = run.scan_range_with_io_tracker(
-            b"key_00000100",
-            b"key_00000150",
+            bound(b"key_00000100"),
+            bound(b"key_00000150"),
             Some(partial_tracker.clone()),
         );
         let partial_results: Vec<_> = iter.collect();
@@ -1008,15 +1354,16 @@ mod tests {
         let mut writer = run.finalize_write();
         writer.flush().expect("Failed to flush data to disk");
 
+        let si = run.sparse_index();
         println!("=== SPARSE INDEX ANALYSIS ===");
         println!("Total records: {}", num_records);
-        println!("Sparse index size: {}", run.sparse_index.len());
-        println!("Indexing interval: {}", run.indexing_interval);
+        println!("Sparse index size: {}", si.len());
+        println!("Indexing interval: {}", si.indexing_interval());
 
         // Check sparse index distribution
-        if !run.sparse_index.is_empty() {
-            let first_offset = run.sparse_index[0].file_offset;
-            let last_offset = run.sparse_index[run.sparse_index.len() - 1].file_offset;
+        if !si.is_empty() {
+            let first_offset = si.file_offset(0);
+            let last_offset = si.file_offset(si.len() - 1);
             let total_bytes = run.total_bytes();
 
             println!("First index offset: {}", first_offset);
@@ -1036,7 +1383,8 @@ mod tests {
 
             for test_key in &test_keys {
                 let io_tracker = IoStatsTracker::new();
-                let iter = run.scan_range_with_io_tracker(test_key, &[], Some(io_tracker.clone()));
+                let iter =
+                    run.scan_range_with_io_tracker(bound(test_key), None, Some(io_tracker.clone()));
                 let results: Vec<_> = iter.take(100).collect(); // Only take first 100 to avoid reading everything
 
                 let (read_ops, read_bytes) = io_tracker.get_read_stats();
@@ -1092,22 +1440,37 @@ mod tests {
 
         println!("=== MERGE IO EFFICIENCY TEST ===");
         println!("Run1 logical bytes: {}", run1_logical_bytes);
-        println!("Run1 sparse index size: {}", run1.sparse_index.len());
+        println!("Run1 sparse index size: {}", run1.sparse_index().len());
         println!("Run2 logical bytes: {}", run2_logical_bytes);
-        println!("Run2 sparse index size: {}", run2.sparse_index.len());
+        println!("Run2 sparse index size: {}", run2.sparse_index().len());
         println!("Total logical bytes: {}", total_logical_bytes);
 
         // Test different merge patterns
         let test_cases = [
-            ("Full scan both runs", &b""[..], &b""[..]),
-            ("Middle range", b"key_00002000", b"key_00003000"),
-            ("Early range", b"key_00000100", b"key_00000200"),
-            ("Late range", b"key_00004800", b"key_00004900"),
+            ("Full scan both runs", None, None),
+            (
+                "Middle range",
+                Some(b"key_00002000".as_ref()),
+                Some(b"key_00003000".as_ref()),
+            ),
+            (
+                "Early range",
+                Some(b"key_00000100".as_ref()),
+                Some(b"key_00000200".as_ref()),
+            ),
+            (
+                "Late range",
+                Some(b"key_00004800".as_ref()),
+                Some(b"key_00004900".as_ref()),
+            ),
         ];
 
         for (test_name, lower, upper) in &test_cases {
             let tracker1 = IoStatsTracker::new();
             let tracker2 = IoStatsTracker::new();
+
+            let lower = lower.map(|k| (k, 0, 0));
+            let upper = upper.map(|k| (k, 0, 0));
 
             let iter1 = run1.scan_range_with_io_tracker(lower, upper, Some(tracker1.clone()));
             let iter2 = run2.scan_range_with_io_tracker(lower, upper, Some(tracker2.clone()));
@@ -1152,49 +1515,57 @@ mod tests {
     #[test]
     fn test_indexing_interval_sparse_index() {
         let writer = get_test_writer("indexing_interval");
-        let mut run = Run::from_writer_with_indexing_interval(writer, 500).unwrap();
+        let interval = 500;
+        let total_entries = 50000;
+        let key_len = 5;
+        let value_len = 50;
+        let entry_bytes = 8 + key_len + value_len;
+        let mut run =
+            Run::from_writer_with_indexing_interval(writer, IndexingInterval::records(interval))
+                .unwrap();
 
         // Add many entries to test sampling interval
         // Should sample every 500th entry
-        for i in 0..50000 {
+        for i in 0..total_entries {
             let key = format!("{:05}", i).into_bytes();
-            let value = vec![b'v'; 50]; // 50 byte value
+            let value = vec![b'v'; value_len]; // 50 byte value
             run.append(&key, &value);
         }
         let writer = run.finalize_write();
         drop(writer); // Ensure all data is written
 
         // Verify sparse index has entries based on sampling interval
-        let expected_entries = 50000 / 500; // Every 500th entry
+        let si = run.sparse_index();
+        let expected_entries = total_entries / interval; // Every 500th entry
         assert_eq!(
-            run.sparse_index.len(),
+            si.len(),
             expected_entries,
             "Sparse index should have exactly {} entries",
             expected_entries
         );
 
-        // Verify index entries are sorted by offset after finalize
-        for i in 1..run.sparse_index.len() {
-            assert!(
-                run.sparse_index[i - 1].file_offset < run.sparse_index[i].file_offset,
-                "Index should be sorted by file offset"
-            );
+        assert_eq!(si.key(0), b"00000");
+        assert_eq!(si.file_offset(0), 0);
+
+        for i in 0..si.len() {
+            let expected_index = i * interval;
+            let expected_key = format!("{:05}", expected_index);
+            assert_eq!(si.key(i), expected_key.as_bytes());
+            assert_eq!(si.file_offset(i), expected_index * entry_bytes);
         }
 
-        // Verify sampling interval consistency
-        for (i, index_entry) in run.sparse_index.iter().enumerate() {
-            let expected_entry_number = i * 500;
-            assert_eq!(
-                index_entry.entry_number, expected_entry_number,
-                "Entry {} should have entry_number {}",
-                i, expected_entry_number
+        // Verify index entries are sorted by offset after finalize
+        for i in 1..si.len() {
+            assert!(
+                si.file_offset(i - 1) < si.file_offset(i),
+                "Index should be sorted by file offset"
             );
         }
 
         // Verify we have good distribution across the file
         let total_size = run.total_bytes;
-        let first_offset = run.sparse_index.first().unwrap().file_offset;
-        let last_offset = run.sparse_index.last().unwrap().file_offset;
+        let first_offset = si.file_offset(0);
+        let last_offset = si.file_offset(si.len() - 1);
 
         // Verify good coverage - the span should cover a significant portion of the file
         let coverage = (last_offset - first_offset) as f64 / total_size as f64;
@@ -1206,12 +1577,92 @@ mod tests {
 
         // Test that scan_range uses the sparse index efficiently
         let lower = b"25000";
-        let iter = run.scan_range(lower, &[]);
+        let iter = run.scan_range(bound(lower), None);
         let results: Vec<_> = iter.collect();
 
         // Should get approximately half the entries
         assert_eq!(results.len(), 25000);
         assert_eq!(results[0].0, b"25000");
+    }
+
+    #[test]
+    fn test_byte_indexing_interval_sparse_index() {
+        let writer = get_test_writer("byte_indexing_interval");
+        let mut run =
+            Run::from_writer_with_indexing_interval(writer, IndexingInterval::bytes(15)).unwrap();
+
+        for _ in 0..5 {
+            run.append(b"k", b"v");
+        }
+        let writer = run.finalize_write();
+        drop(writer);
+
+        let si = run.sparse_index();
+        let offsets: Vec<usize> = (0..si.len()).map(|i| si.file_offset(i)).collect();
+        assert_eq!(offsets, vec![0, 20, 40]);
+    }
+
+    #[test]
+    fn test_record_budget_ignored_fixed_stride() {
+        let writer = get_test_writer("record_budget_adaptive");
+        let stride = 7;
+        let key_len = 4;
+        let value_len = 1;
+        let data_entry_bytes = 8 + key_len + value_len;
+        let mut run = Run::from_writer_with_indexing_interval(
+            writer,
+            IndexingInterval::records_with_budget(stride, 1),
+        )
+        .unwrap();
+
+        let total_entries = 50;
+        for i in 0..total_entries {
+            let key = format!("{:04}", i).into_bytes();
+            run.append(&key, b"v");
+        }
+        let writer = run.finalize_write();
+        drop(writer);
+
+        let si = run.sparse_index();
+        let expected_entries = (total_entries + stride - 1) / stride;
+        assert_eq!(si.len(), expected_entries);
+        assert_eq!(si.file_offset(0), 0);
+        for i in 0..si.len() {
+            let expected_index = i * stride;
+            let expected_key = format!("{:04}", expected_index);
+            assert_eq!(si.key(i), expected_key.as_bytes());
+            assert_eq!(si.file_offset(i), expected_index * data_entry_bytes);
+        }
+    }
+
+    #[test]
+    fn test_byte_budget_ignored_fixed_stride() {
+        let writer = get_test_writer("byte_budget_adaptive");
+        let stride = 64;
+        let key_len = 3;
+        let value_len = 1;
+        let data_entry_bytes = 8 + key_len + value_len;
+        let mut run = Run::from_writer_with_indexing_interval(
+            writer,
+            IndexingInterval::bytes_with_budget(stride, 1),
+        )
+        .unwrap();
+
+        for i in 0..50 {
+            let key = format!("{:03}", i).into_bytes();
+            run.append(&key, b"v");
+        }
+        let writer = run.finalize_write();
+        drop(writer);
+
+        let si = run.sparse_index();
+        let offsets: Vec<usize> = (0..si.len()).map(|i| si.file_offset(i)).collect();
+        assert_eq!(offsets[0], 0);
+        assert!(offsets.len() > 2);
+        for pair in offsets.windows(2) {
+            assert!(pair[1] >= pair[0] + stride);
+            assert_eq!(pair[1] % data_entry_bytes, 0);
+        }
     }
 
     #[test]
@@ -1230,7 +1681,7 @@ mod tests {
         // Test that scan_range with a high lower bound is efficient
         // It should use the sparse index to skip ahead
         let lower = b"4000";
-        let iter = run.scan_range(lower, &[]);
+        let iter = run.scan_range(bound(lower), None);
         let results: Vec<_> = iter.collect();
 
         // Should get entries from 4000 onwards
@@ -1285,7 +1736,7 @@ mod tests {
         run.finalize_write();
 
         // Test 1: Full scan - should get all duplicates
-        let iter = run.scan_range(&[], &[]);
+        let iter = run.scan_range(None, None);
         let all: Vec<_> = iter.collect();
         assert_eq!(all.len(), 600); // Total entries
 
@@ -1297,7 +1748,7 @@ mod tests {
         assert_eq!(actual_counts, expected_counts);
 
         // Test 2: Scan range [b, d) - should get all 'b' and 'c' entries
-        let iter = run.scan_range(b"b", b"d");
+        let iter = run.scan_range(bound(b"b"), bound(b"d"));
         let range_results: Vec<_> = iter.collect();
         assert_eq!(range_results.len(), 350); // 200 'b' + 150 'c'
 
@@ -1313,12 +1764,12 @@ mod tests {
         assert_eq!(c_count, 150);
 
         // Test 3: Scan range [c, c) - should get nothing (exclusive upper bound)
-        let iter = run.scan_range(b"c", b"c");
+        let iter = run.scan_range(bound(b"c"), bound(b"c"));
         let empty: Vec<_> = iter.collect();
         assert_eq!(empty.len(), 0);
 
         // Test 4: Scan range [c, d) - should get all 'c' entries
-        let iter = run.scan_range(b"c", b"d");
+        let iter = run.scan_range(bound(b"c"), bound(b"d"));
         let c_only: Vec<_> = iter.collect();
         assert_eq!(c_only.len(), 150);
         for (key, _) in &c_only {
@@ -1326,12 +1777,12 @@ mod tests {
         }
 
         // Test 5: Scan with lower bound only [d, ...) - should get 'd' and 'e'
-        let iter = run.scan_range(b"d", &[]);
+        let iter = run.scan_range(bound(b"d"), None);
         let d_onwards: Vec<_> = iter.collect();
         assert_eq!(d_onwards.len(), 150); // 100 'd' + 50 'e'
 
         // Test 6: Scan with upper bound only [..., c) - should get 'a' and 'b'
-        let iter = run.scan_range(&[], b"c");
+        let iter = run.scan_range(None, bound(b"c"));
         let before_c: Vec<_> = iter.collect();
         assert_eq!(before_c.len(), 300); // 100 'a' + 200 'b'
     }
@@ -1364,14 +1815,14 @@ mod tests {
 
         // Verify sparse index was built
         assert!(
-            run.sparse_index.len() > 3,
+            run.sparse_index().len() > 3,
             "Sparse index should have multiple entries"
         );
 
         // Test scan ranges work correctly with sparse index
 
         // Range [bbb, ccc) should return exactly 1000 'bbb' entries
-        let iter = run.scan_range(b"bbb", b"ccc");
+        let iter = run.scan_range(bound(b"bbb"), bound(b"ccc"));
         let bbb_results: Vec<_> = iter.collect();
         assert_eq!(bbb_results.len(), 10000);
         for (key, _) in &bbb_results {
@@ -1379,17 +1830,17 @@ mod tests {
         }
 
         // Range [b, c) should also return 1000 'bbb' entries
-        let iter = run.scan_range(b"b", b"c");
+        let iter = run.scan_range(bound(b"b"), bound(b"c"));
         let b_range: Vec<_> = iter.collect();
         assert_eq!(b_range.len(), 10000);
 
         // Range [aab, bba) should return 0 entries (no keys in this range)
-        let iter = run.scan_range(b"aab", b"bba");
+        let iter = run.scan_range(bound(b"aab"), bound(b"bba"));
         let empty: Vec<_> = iter.collect();
         assert_eq!(empty.len(), 0);
 
         // Full scan should return all 3000 entries
-        let iter = run.scan_range(&[], &[]);
+        let iter = run.scan_range(None, None);
         let all: Vec<_> = iter.collect();
         assert_eq!(all.len(), 30000);
     }
@@ -1453,9 +1904,9 @@ mod tests {
         drop(run3.finalize_write());
 
         // Now read from each run using their actual byte ranges
-        let run1_data: Vec<_> = run1.scan_range(&[], &[]).collect();
-        let run2_data: Vec<_> = run2.scan_range(&[], &[]).collect();
-        let run3_data: Vec<_> = run3.scan_range(&[], &[]).collect();
+        let run1_data: Vec<_> = run1.scan_range(None, None).collect();
+        let run2_data: Vec<_> = run2.scan_range(None, None).collect();
+        let run3_data: Vec<_> = run3.scan_range(None, None).collect();
 
         println!("Run1 data length: {}", run1_data.len());
         println!("Run2 data length: {}", run2_data.len());

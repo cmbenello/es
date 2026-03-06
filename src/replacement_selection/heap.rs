@@ -539,7 +539,6 @@ mod tests {
 
     mod driver {
         use super::*;
-        use crate::sketch::{Sketch, SketchType};
         use crate::sort::core::engine::RunSummary;
         use crate::sort::run_sink::RunSink;
 
@@ -589,13 +588,13 @@ mod tests {
                 }
             }
 
-            fn finalize(self) -> (Vec<Self::MergeableRun>, Sketch<Vec<u8>>) {
+            fn finalize(self) -> Vec<Self::MergeableRun> {
                 let runs = self
                     .runs
                     .into_iter()
                     .map(|entries| TestRun { entries })
                     .collect();
-                (runs, Sketch::new(SketchType::Kll, 0))
+                runs
             }
         }
 

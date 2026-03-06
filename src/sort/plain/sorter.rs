@@ -1,11 +1,14 @@
+use std::sync::Barrier;
+
 use crate::diskio::aligned_writer::AlignedWriter;
 use crate::diskio::io_stats::IoStatsTracker;
 use crate::sort::core::engine::SorterCore;
 use crate::sort::core::run_format::{
-    FormatSortHooks, MergeableRun as GenericMergeableRun, RunFormat,
-    RunsOutput as GenericRunsOutput,
+    FormatSortHooks, IndexingInterval, MergeableRun as GenericMergeableRun, RunFormat,
+    RunsOutput as GenericRunsOutput, cmp_key_run_offset,
 };
-use crate::sort::plain::merge::MergeIterator;
+use crate::sort::core::sparse_index::{SparseIndex, SparseIndexPage, SparseIndexPagePool};
+use crate::sort::plain::merge::{MergeIterator, PlainMergeSource, ZeroCopyMergePlain};
 use crate::sort::plain::run::Run;
 
 pub type PlainSortHooks = FormatSortHooks<PlainRunFormat>;
@@ -15,14 +18,26 @@ pub type RunsOutput = GenericRunsOutput<PlainRunFormat>;
 
 #[derive(Clone, Copy, Default)]
 pub struct PlainRunFormat;
+const DEFAULT_RUN_INDEXING_INTERVAL: usize = 100;
 
 impl RunFormat for PlainRunFormat {
     type Run = Run;
     type Record = (Vec<u8>, Vec<u8>);
     type AppendState = ();
 
-    fn new_run(writer: AlignedWriter, indexing_interval: usize) -> Result<Self::Run, String> {
+    fn new_run(
+        writer: AlignedWriter,
+        indexing_interval: IndexingInterval,
+    ) -> Result<Self::Run, String> {
         Run::from_writer_with_indexing_interval(writer, indexing_interval)
+    }
+
+    fn create_merge_run_with_id(
+        writer: AlignedWriter,
+        indexing_interval: IndexingInterval,
+        run_id: u32,
+    ) -> Result<Self::Run, String> {
+        Run::from_writer_with_indexing_interval_and_id(writer, indexing_interval, run_id)
     }
 
     fn finalize_run(run: &mut Self::Run) -> AlignedWriter {
@@ -40,11 +55,11 @@ impl RunFormat for PlainRunFormat {
 
     fn scan_range(
         run: &Self::Run,
-        lower_bound: &[u8],
-        upper_bound: &[u8],
+        lower_inc: Option<(&[u8], u32, usize)>,
+        upper_exc: Option<(&[u8], u32, usize)>,
         io_tracker: Option<IoStatsTracker>,
     ) -> Box<dyn Iterator<Item = Self::Record> + Send> {
-        run.scan_range_with_io_tracker(lower_bound, upper_bound, io_tracker)
+        run.scan_range_with_io_tracker(lower_inc, upper_exc, io_tracker)
     }
 
     fn merge_iterators(
@@ -53,8 +68,16 @@ impl RunFormat for PlainRunFormat {
         Box::new(MergeIterator::new(iterators))
     }
 
-    fn start_key<'a>(run: &'a Self::Run) -> Option<&'a [u8]> {
-        run.start_key()
+    fn run_id(run: &Self::Run) -> u32 {
+        run.run_id()
+    }
+
+    fn sparse_index<'a>(run: &'a Self::Run) -> &'a SparseIndex {
+        run.sparse_index()
+    }
+
+    fn start_key<'a>(run: &'a Self::Run) -> Option<(&'a [u8], u32, usize)> {
+        run.start_key().map(|key| (key, run.run_id(), 0))
     }
 
     fn record_key<'a>(record: &'a Self::Record) -> &'a [u8] {
@@ -76,25 +99,316 @@ impl RunFormat for PlainRunFormat {
     >(
         scanner: crate::sort::core::engine::Scanner,
         sink: &mut S,
-        run_size: usize,
+        run_gen_mem: usize,
     ) -> crate::replacement_selection::ReplacementSelectionStats {
-        crate::replacement_selection::run_replacement_selection_tol(scanner, sink, run_size)
+        crate::replacement_selection::run_replacement_selection_mm(
+            scanner,
+            sink,
+            run_gen_mem.saturating_mul(95) / 100,
+        )
+    }
+
+    fn set_sparse_index_bootstrap(
+        run: &mut Self::Run,
+        avg_key_bytes: f64,
+        avg_record_bytes: f64,
+        sample_count: usize,
+    ) {
+        run.set_sparse_index_bootstrap(avg_key_bytes, avg_record_bytes, sample_count);
+    }
+
+    fn sparse_index_bootstrap(run: &Self::Run) -> Option<(f64, f64, usize)> {
+        run.sparse_index_bootstrap()
+    }
+
+    fn set_sparse_index_readers(run: &Self::Run, count: usize) {
+        run.set_sparse_index_readers(count);
+    }
+
+    fn release_sparse_index(run: &Self::Run) {
+        run.release_sparse_index();
+    }
+
+    fn release_sparse_index_to_pool(run: &Self::Run, pool: &SparseIndexPagePool) {
+        run.release_sparse_index_to_pool(pool);
+    }
+
+    fn seed_sparse_index_buffer(run: &mut Self::Run, pages: Vec<SparseIndexPage>) {
+        run.sparse_index_mut().seed_buffer(pages);
+    }
+
+    fn sparse_index_budget_pages(run: &Self::Run) -> usize {
+        run.sparse_index().budget_pages()
+    }
+
+    fn create_merge_sources_and_discard(
+        runs: &[GenericMergeableRun<Self>],
+        lower_bound: Option<(&[u8], u32, usize)>,
+        upper_bound: Option<(&[u8], u32, usize)>,
+        io_tracker: Option<IoStatsTracker>,
+        page_pool: &SparseIndexPagePool,
+        barrier: &Barrier,
+        _thread_id: usize,
+    ) -> usize {
+        // Step 1: Create merge sources (reads sparse index for seek)
+        let mut sources = Vec::new();
+
+        for run in runs {
+            match run {
+                GenericMergeableRun::Single(r) => {
+                    if let Some(src) =
+                        r.scan_range_as_source(lower_bound, upper_bound, io_tracker.clone())
+                    {
+                        sources.push(src);
+                    }
+                }
+                GenericMergeableRun::RangePartitioned(sub_runs) => {
+                    let non_empty: Vec<&Run> = sub_runs
+                        .iter()
+                        .filter(|r| r.start_key().is_some())
+                        .collect();
+
+                    if non_empty.is_empty() {
+                        continue;
+                    }
+
+                    let start_partition = if lower_bound.is_none() {
+                        0
+                    } else {
+                        let lb = lower_bound.unwrap();
+                        let mut ok: isize = -1;
+                        let mut ng: isize = non_empty.len() as isize;
+                        while (ng - ok).abs() > 1 {
+                            let mid = (ok + ng) / 2;
+                            let r = non_empty[mid as usize];
+                            let sk = (r.start_key().unwrap(), r.run_id(), 0usize);
+                            if cmp_key_run_offset(sk, lb) == std::cmp::Ordering::Less {
+                                ok = mid;
+                            } else {
+                                ng = mid;
+                            }
+                        }
+                        if ok == -1 { 0 } else { ok as usize }
+                    };
+
+                    let end_partition = if upper_bound.is_none() {
+                        non_empty.len()
+                    } else {
+                        let ub = upper_bound.unwrap();
+                        let mut ok: isize = non_empty.len() as isize;
+                        let mut ng: isize = -1;
+                        while (ng - ok).abs() > 1 {
+                            let mid = (ok + ng) / 2;
+                            let r = non_empty[mid as usize];
+                            let sk = (r.start_key().unwrap(), r.run_id(), 0usize);
+                            if matches!(
+                                cmp_key_run_offset(ub, sk),
+                                std::cmp::Ordering::Less | std::cmp::Ordering::Equal
+                            ) {
+                                ok = mid;
+                            } else {
+                                ng = mid;
+                            }
+                        }
+                        ok as usize
+                    };
+
+                    for sub_run in &non_empty[start_partition..end_partition] {
+                        if let Some(src) = sub_run.scan_range_as_source(
+                            lower_bound,
+                            upper_bound,
+                            io_tracker.clone(),
+                        ) {
+                            sources.push(src);
+                        }
+                    }
+                }
+                GenericMergeableRun::StatsOnly { .. } => {}
+            }
+        }
+
+        // Step 2: Release sparse index pages to pool
+        for run in runs {
+            run.release_sparse_index_to_pool(page_pool);
+        }
+
+        // Step 3: Barrier - wait for all threads to release
+        barrier.wait();
+
+        // Step 4: Execute discard merge
+        match sources.len() {
+            0 => 0,
+            1 => {
+                let mut source = sources.into_iter().next().unwrap();
+                let mut key = Vec::new();
+                let mut entries = 0usize;
+                while let Some(value_len) = source.next_key_into(&mut key) {
+                    source.skip_value(value_len);
+                    entries = entries.saturating_add(1);
+                }
+                entries
+            }
+            _ => ZeroCopyMergePlain::new(sources).discard(),
+        }
+    }
+
+    fn create_merge_sources_and_execute(
+        runs: &[GenericMergeableRun<Self>],
+        output_run: &mut Self::Run,
+        lower_bound: Option<(&[u8], u32, usize)>,
+        upper_bound: Option<(&[u8], u32, usize)>,
+        io_tracker: Option<IoStatsTracker>,
+        page_pool: &SparseIndexPagePool,
+        barrier: &Barrier,
+        thread_id: usize,
+        merge_threads: usize,
+    ) {
+        // Step 1: Create merge sources (reads sparse index for seek)
+        let mut sources = Vec::new();
+
+        for run in runs {
+            match run {
+                GenericMergeableRun::Single(r) => {
+                    if let Some(src) =
+                        r.scan_range_as_source(lower_bound, upper_bound, io_tracker.clone())
+                    {
+                        sources.push(src);
+                    }
+                }
+                GenericMergeableRun::RangePartitioned(sub_runs) => {
+                    let non_empty: Vec<&Run> = sub_runs
+                        .iter()
+                        .filter(|r| r.start_key().is_some())
+                        .collect();
+
+                    if non_empty.is_empty() {
+                        continue;
+                    }
+
+                    let start_partition = if lower_bound.is_none() {
+                        0
+                    } else {
+                        let lb = lower_bound.unwrap();
+                        let mut ok: isize = -1;
+                        let mut ng: isize = non_empty.len() as isize;
+                        while (ng - ok).abs() > 1 {
+                            let mid = (ok + ng) / 2;
+                            let r = non_empty[mid as usize];
+                            let sk = (r.start_key().unwrap(), r.run_id(), 0usize);
+                            if cmp_key_run_offset(sk, lb) == std::cmp::Ordering::Less {
+                                ok = mid;
+                            } else {
+                                ng = mid;
+                            }
+                        }
+                        if ok == -1 { 0 } else { ok as usize }
+                    };
+
+                    let end_partition = if upper_bound.is_none() {
+                        non_empty.len()
+                    } else {
+                        let ub = upper_bound.unwrap();
+                        let mut ok: isize = non_empty.len() as isize;
+                        let mut ng: isize = -1;
+                        while (ng - ok).abs() > 1 {
+                            let mid = (ok + ng) / 2;
+                            let r = non_empty[mid as usize];
+                            let sk = (r.start_key().unwrap(), r.run_id(), 0usize);
+                            if matches!(
+                                cmp_key_run_offset(ub, sk),
+                                std::cmp::Ordering::Less | std::cmp::Ordering::Equal
+                            ) {
+                                ok = mid;
+                            } else {
+                                ng = mid;
+                            }
+                        }
+                        ok as usize
+                    };
+
+                    for sub_run in &non_empty[start_partition..end_partition] {
+                        if let Some(src) = sub_run.scan_range_as_source(
+                            lower_bound,
+                            upper_bound,
+                            io_tracker.clone(),
+                        ) {
+                            sources.push(src);
+                        }
+                    }
+                }
+                GenericMergeableRun::StatsOnly { .. } => {}
+            }
+        }
+
+        // Step 2: Release sparse index pages to pool
+        for run in runs {
+            run.release_sparse_index_to_pool(page_pool);
+        }
+
+        // Step 3: Barrier - wait for all threads to release
+        barrier.wait();
+
+        // Step 4: Redistribute pages from pool to output run
+        let total = page_pool.len();
+        let budget_cap = output_run.sparse_index_mut().budget_pages();
+        let per_thread = total / merge_threads;
+        let extra = total % merge_threads;
+        let fair_share = per_thread + if thread_id < extra { 1 } else { 0 };
+        let my_count = fair_share.min(budget_cap);
+        let my_pages = page_pool.take(my_count);
+        output_run.sparse_index_mut().seed_buffer(my_pages);
+
+        // Step 5: Execute merge
+        match sources.len() {
+            0 => {}
+            1 => {
+                // Single source: direct copy without tree
+                let mut source = sources.into_iter().next().unwrap();
+                let mut key = Vec::new();
+                while let Some(value_len) = source.next_key_into(&mut key) {
+                    output_run.append_header_and_key(&key, value_len);
+                    source.copy_value_to(output_run.writer(), value_len);
+                }
+            }
+            _ => {
+                ZeroCopyMergePlain::new(sources).merge_into(output_run);
+            }
+        }
     }
 }
 
 impl SorterCore<PlainSortHooks> {
     pub fn new(
         run_gen_threads: usize,
-        run_size: usize,
+        run_gen_mem: usize,
         merge_threads: usize,
         merge_fanin: usize,
         base_dir: impl AsRef<std::path::Path>,
     ) -> Self {
-        SorterCore::with_defaults(
+        Self::new_with_indexing_interval(
             run_gen_threads,
-            run_size,
+            run_gen_mem,
             merge_threads,
             merge_fanin,
+            DEFAULT_RUN_INDEXING_INTERVAL,
+            base_dir,
+        )
+    }
+
+    pub fn new_with_indexing_interval(
+        run_gen_threads: usize,
+        run_gen_mem: usize,
+        merge_threads: usize,
+        merge_fanin: usize,
+        run_indexing_interval: usize,
+        base_dir: impl AsRef<std::path::Path>,
+    ) -> Self {
+        SorterCore::with_indexing_interval(
+            run_gen_threads,
+            run_gen_mem,
+            merge_threads,
+            merge_fanin,
+            run_indexing_interval,
             base_dir,
         )
     }
@@ -107,7 +421,6 @@ mod tests {
     use crate::diskio::aligned_writer::AlignedWriter;
     use crate::diskio::file::SharedFd;
     use crate::rand::small_thread_rng;
-    use crate::sketch::SketchType;
     use rand::seq::SliceRandom;
     use std::sync::Arc;
     use tempfile::TempDir;
@@ -152,8 +465,13 @@ mod tests {
         let mergeable_run = MergeableRun::RangePartitioned(vec![run0, run1, run2]);
 
         let io_tracker1 = IoStatsTracker::new();
-        let iter1 =
-            mergeable_run.scan_range_with_io_tracker(b"a10", b"a20", Some(io_tracker1.clone()));
+        let lower: (&[u8], _, _) = (b"a10", 0, 0);
+        let upper: (&[u8], _, _) = (b"a20", 0, 0);
+        let iter1 = mergeable_run.scan_range_with_io_tracker(
+            Some(lower),
+            Some(upper),
+            Some(io_tracker1.clone()),
+        );
         let results1: Vec<_> = iter1.collect();
         assert_eq!(results1.len(), 10);
         assert_eq!(results1[0].0, b"a10");
@@ -163,8 +481,13 @@ mod tests {
         assert!(read_bytes1 > 0);
 
         let io_tracker2 = IoStatsTracker::new();
-        let iter2 =
-            mergeable_run.scan_range_with_io_tracker(b"a90", b"c10", Some(io_tracker2.clone()));
+        let lower2: (&[u8], _, _) = (b"a90", 0, 0);
+        let upper2: (&[u8], _, _) = (b"c10", 0, 0);
+        let iter2 = mergeable_run.scan_range_with_io_tracker(
+            Some(lower2),
+            Some(upper2),
+            Some(io_tracker2.clone()),
+        );
         let results2: Vec<_> = iter2.collect();
         assert_eq!(results2.len(), 120);
         assert_eq!(results2[0].0, b"a90");
@@ -174,11 +497,13 @@ mod tests {
         assert!(read_ops2 > 0);
         assert!(read_bytes2 > 0);
 
-        let iter3 = mergeable_run.scan_range_with_io_tracker(b"d00", b"d99", None);
+        let lower3: (&[u8], _, _) = (b"d00", 0, 0);
+        let upper3: (&[u8], _, _) = (b"d99", 0, 0);
+        let iter3 = mergeable_run.scan_range_with_io_tracker(Some(lower3), Some(upper3), None);
         assert!(iter3.collect::<Vec<_>>().is_empty());
 
         let io_tracker4 = IoStatsTracker::new();
-        let iter4 = mergeable_run.scan_range_with_io_tracker(&[], &[], Some(io_tracker4.clone()));
+        let iter4 = mergeable_run.scan_range_with_io_tracker(None, None, Some(io_tracker4.clone()));
         let results4: Vec<_> = iter4.collect();
         assert_eq!(results4.len(), 300);
         let (read_ops4, read_bytes4) = io_tracker4.get_read_stats();
@@ -190,10 +515,7 @@ mod tests {
     fn test_multi_level_merge_small_fanout() {
         let num_records = 100000;
         let num_threads_run_gen = 2;
-        let run_size = 512;
-        let sketch_type = SketchType::Kll;
-        let sketch_size = 200;
-        let sketch_sampling_interval = 1000;
+        let run_gen_mem = 512 * 1024;
         let run_indexing_interval = 1000;
         let fanin = 100;
         let num_threads = 4;
@@ -211,13 +533,10 @@ mod tests {
             .collect();
         data.shuffle(&mut small_thread_rng());
 
-        let (runs, sketch, _run_gen_stats) = ExternalSorter::run_generation(
+        let (runs, _run_gen_stats) = ExternalSorter::run_generation(
             Box::new(InMemInput { data }),
             num_threads_run_gen,
-            run_size,
-            sketch_type,
-            sketch_size,
-            sketch_sampling_interval,
+            run_gen_mem,
             run_indexing_interval,
             temp_dir.path(),
         )
@@ -227,8 +546,8 @@ mod tests {
             runs,
             fanin,
             num_threads,
-            &sketch,
             imbalance_factor,
+            crate::sort::core::engine::PartitionType::default(),
             temp_dir.path(),
         )
         .unwrap();

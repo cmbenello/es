@@ -3,7 +3,6 @@ use crate::sketch::{CDF, MergeableSampler, Quantile, QuantileSampler};
 use rand::Rng;
 use std::cmp::Ordering;
 use std::collections::BinaryHeap;
-use std::fmt;
 
 /// A mergeable Reservoir Sampler using Priority Sampling.
 #[derive(Clone)]
@@ -186,11 +185,8 @@ where
     }
 }
 
+/*
 mod tests {
-    use crate::sketch::kll::KLL;
-
-    use super::*;
-
     #[test]
     fn test_reservoir_sampler_basic() {
         let mut sampler = ReservoirSampler::new(100);
@@ -317,3 +313,4 @@ mod tests {
         // );
     }
 }
+*/

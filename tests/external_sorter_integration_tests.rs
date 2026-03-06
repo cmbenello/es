@@ -48,7 +48,7 @@ fn test_real_world_log_sorting() {
 #[test]
 fn test_structured_data_sorting() {
     // Test sorting various structured data formats: JSON, URLs, composite keys
-    let mut sorter = ExternalSorter::new(4, 512, 4, 10000, test_dir());
+    let mut sorter = ExternalSorter::new(4, 512 * 1024, 4, 10000, test_dir());
 
     let mut data = Vec::new();
 
@@ -96,7 +96,7 @@ fn test_structured_data_sorting() {
 #[test]
 fn test_ascii_and_unicode_ordering() {
     // Test ASCII ordering (numbers < uppercase < lowercase) and Unicode handling
-    let mut sorter = ExternalSorter::new(2, 512, 2, 10000, test_dir());
+    let mut sorter = ExternalSorter::new(2, 512 * 1024, 2, 10000, test_dir());
 
     let test_data = vec![
         "Apple",
@@ -156,7 +156,7 @@ fn test_cleanup_on_drop() {
         .count();
 
     {
-        let mut sorter = ExternalSorter::new(2, 256, 2, 10000, &temp_dir);
+        let mut sorter = ExternalSorter::new(2, 256 * 1024, 2, 10000, &temp_dir);
         let mut data = Vec::new();
         for i in 0..1000 {
             data.push((format!("{:04}", i).into_bytes(), b"value".to_vec()));

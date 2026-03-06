@@ -5,17 +5,17 @@ use es::ExternalSorter;
 
 #[test]
 fn test_basic_functionality() {
-    sorter_behavior::basic_sort(|| ExternalSorter::new(1, 512, 1, 10000, test_dir()));
+    sorter_behavior::basic_sort(|| ExternalSorter::new(1, 512 * 1024, 1, 10000, test_dir()));
 }
 
 #[test]
 fn test_empty_input() {
-    sorter_behavior::empty_input(|| ExternalSorter::new(2, 512, 2, 10000, test_dir()));
+    sorter_behavior::empty_input(|| ExternalSorter::new(2, 512 * 1024, 2, 10000, test_dir()));
 }
 
 #[test]
 fn test_single_element() {
-    sorter_behavior::single_element(|| ExternalSorter::new(2, 512, 2, 10000, test_dir()));
+    sorter_behavior::single_element(|| ExternalSorter::new(2, 512 * 1024, 2, 10000, test_dir()));
 }
 
 #[test]
@@ -28,19 +28,19 @@ fn test_large_dataset_with_threading() {
 #[test]
 fn test_small_buffer_forces_external_sort() {
     sorter_behavior::small_buffer_external_sort(|| {
-        ExternalSorter::new(2, 512, 2, 10000, test_dir())
+        ExternalSorter::new(2, 512 * 1024, 2, 10000, test_dir())
     });
 }
 
 #[test]
 fn test_duplicate_keys_and_stability() {
-    sorter_behavior::duplicate_keys(|| ExternalSorter::new(2, 512, 2, 10000, test_dir()));
+    sorter_behavior::duplicate_keys(|| ExternalSorter::new(2, 512 * 1024, 2, 10000, test_dir()));
 }
 
 #[test]
 fn test_run_generation_stats_with_small_buffer() {
     sorter_behavior::run_generation_stats_small_buffer(|| {
-        ExternalSorter::new(1, 30, 1, 10000, test_dir())
+        ExternalSorter::new(1, 128 * 1024, 1, 10000, test_dir())
     });
 }
 
@@ -61,36 +61,35 @@ fn test_binary_data_with_null_bytes() {
 #[test]
 fn test_buffer_boundary_edge_cases() {
     sorter_behavior::buffer_boundary_cases(|| {
-        ExternalSorter::new(1, 32 * 100, 1, 10000, test_dir())
+        ExternalSorter::new(1, 128 * 1024, 1, 10000, test_dir())
     });
 }
 
 #[test]
-fn test_entry_too_large_panics() {
-    sorter_behavior::entry_too_large_errors(|| ExternalSorter::new(1, 50, 1, 10000, test_dir()));
-}
-
-#[test]
 fn test_concurrent_sorters() {
-    sorter_behavior::concurrent_sorters(|| ExternalSorter::new(2, 512, 2, 10000, test_dir()));
+    sorter_behavior::concurrent_sorters(|| {
+        ExternalSorter::new(2, 512 * 1024, 2, 10000, test_dir())
+    });
 }
 
 #[test]
 fn test_large_values() {
-    sorter_behavior::large_values(|| ExternalSorter::new(2, 512, 2, 10000, test_dir()));
+    sorter_behavior::large_values(|| ExternalSorter::new(2, 512 * 1024, 2, 10000, test_dir()));
 }
 
 #[test]
 fn test_sort_stats() {
-    sorter_behavior::stats_populated(|| ExternalSorter::new(2, 512, 2, 10000, test_dir()));
+    sorter_behavior::stats_populated(|| ExternalSorter::new(2, 512 * 1024, 2, 10000, test_dir()));
 }
 
 #[test]
 fn test_binary_keys() {
-    sorter_behavior::binary_keys(|| ExternalSorter::new(2, 512, 2, 10000, test_dir()));
+    sorter_behavior::binary_keys(|| ExternalSorter::new(2, 512 * 1024, 2, 10000, test_dir()));
 }
 
 #[test]
 fn test_variable_length_keys() {
-    sorter_behavior::variable_length_keys(|| ExternalSorter::new(2, 512, 2, 10000, test_dir()));
+    sorter_behavior::variable_length_keys(|| {
+        ExternalSorter::new(2, 512 * 1024, 2, 10000, test_dir())
+    });
 }

@@ -1,6 +1,6 @@
 use std::mem;
 
-use crate::ovc::offset_value_coding::SentinelValue;
+use crate::ovc::offset_value_coding_64::SentinelValue;
 
 pub struct LoserTree<T> {
     // The tree nodes.
@@ -16,51 +16,66 @@ pub struct LoserTree<T> {
 /// A node in the Loser Tree.
 #[derive(Clone, Debug)]
 struct Node<T> {
-    key: T,       // The value of the LOSER at this node
-    index: usize, // The run ID of the LOSER
+    key: T,     // The value of the LOSER at this node
+    index: u32, // Leaf/source index of the LOSER (used for updates/push)
 }
 
 impl<T> Node<T> {
-    pub fn new(key: T, index: usize) -> Self {
+    pub fn new(key: T, index: u32) -> Self {
         Node { key, index }
     }
 }
 
 impl<T: Ord + SentinelValue> LoserTree<T> {
     pub fn new(values: Vec<T>) -> Self {
+        let mut lt = LoserTree {
+            nodes: Vec::new(),
+            capacity: 0,
+        };
+        lt.reset(values);
+        lt
+    }
+
+    /// Reset the tree with a new set of values, reusing the existing allocation.
+    pub fn reset(&mut self, values: Vec<T>) {
         let size = values.len();
+        self.reset_from_iter(size, values);
+    }
+
+    /// Reset the tree with a known number of values from an iterator.
+    pub fn reset_from_iter<I>(&mut self, size: usize, values: I)
+    where
+        I: IntoIterator<Item = T>,
+    {
         if size == 0 {
-            return Self {
-                nodes: vec![],
-                capacity: 0,
-            };
+            self.nodes.clear();
+            self.capacity = 0;
+            return;
         }
 
         let capacity = size.next_power_of_two();
-        let mut nodes = Vec::with_capacity(capacity);
+        self.capacity = capacity;
+        self.nodes.clear();
+        self.nodes.resize_with(capacity, || Node {
+            key: T::early_fence(),
+            index: u32::MAX,
+        });
 
-        // Initialize internal nodes (1..capacity) with Early Fence sentinels.
-        // Index 0 is also initialized but will be overwritten at the end.
-        for _ in 0..capacity {
-            nodes.push(Node {
-                key: T::early_fence(),
-                index: usize::MAX,
-            });
+        let mut used = 0usize;
+        for val in values.into_iter() {
+            debug_assert!(used < size, "reset_from_iter: more values than size");
+            if used >= size {
+                break;
+            }
+            self.pass(used, val);
+            used += 1;
         }
+        debug_assert!(used == size, "reset_from_iter: fewer values than size");
 
-        let mut lt = LoserTree { nodes, capacity };
-
-        // 1. Process Real Values
-        for (i, val) in values.into_iter().enumerate() {
-            lt.pass(i, val);
+        // Process padding (late fences) for unused slots
+        for i in used..capacity {
+            self.pass(i, T::late_fence());
         }
-
-        // 2. Process Padding (Late Fence)
-        for i in size..capacity {
-            lt.pass(i, T::late_fence());
-        }
-
-        lt
     }
 
     pub fn capacity(&self) -> usize {
@@ -75,7 +90,7 @@ impl<T: Ord + SentinelValue> LoserTree<T> {
             return None;
         }
         debug_assert!(!self.nodes[0].key.is_early_fence());
-        return Some((&self.nodes[0].key, self.nodes[0].index));
+        return Some((&self.nodes[0].key, self.nodes[0].index as usize));
     }
 
     /// Replaces the current winner with `new_val`, replays the tournament,
@@ -85,7 +100,7 @@ impl<T: Ord + SentinelValue> LoserTree<T> {
             panic!("Cannot push to an empty LoserTree");
         }
 
-        let source_idx = self.nodes[0].index;
+        let source_idx = self.nodes[0].index as usize;
         let old_node = self.pass(source_idx, new_val);
         return old_node.key;
     }
@@ -107,7 +122,7 @@ impl<T: Ord + SentinelValue> LoserTree<T> {
             return None;
         }
 
-        let source_idx = self.nodes[0].index;
+        let source_idx = self.nodes[0].index as usize;
         let old_node = self.pass(source_idx, T::late_fence());
 
         if old_node.key.is_late_fence() {
@@ -139,14 +154,14 @@ impl<T: Ord + SentinelValue> LoserTree<T> {
     /// Supports arbitrary updates (decrease-key) via Phase 2 bubble-up.
     /// Uses efficient geometric check (bit shifting) to identify Former Winners.
     fn pass(&mut self, index: usize, key: T) -> Node<T> {
-        let mut candidate = Node::new(key, index);
+        let mut candidate = Node::new(key, index as u32);
         let mut slot = Self::parent_index(self.leaf_index(index));
         // Tracks the height (level) of `slot`. Leaf is level 0. Parent is level 1.
         let mut level = 1;
 
         // --- PHASE 1: Standard Loser Tree Climb ---
         // Bubbles up from leaf. Standard "Play Match" logic.
-        while slot != self.root_index() && self.nodes[slot].index != index {
+        while slot != self.root_index() && self.nodes[slot].index != index as u32 {
             if candidate.key > self.nodes[slot].key {
                 mem::swap(&mut candidate, &mut self.nodes[slot]);
             }
@@ -159,7 +174,7 @@ impl<T: Ord + SentinelValue> LoserTree<T> {
         let mut dest_level = level; // Level of `dest`
 
         // Update Case: We found our own run ID in the tree.
-        if candidate.index == index {
+        if candidate.index == index as u32 {
             while slot != self.root_index() {
                 // Find the ancestor that holds the opponent (the former winner).
                 // The former winner is the value in the ancestors that originates
@@ -175,8 +190,8 @@ impl<T: Ord + SentinelValue> LoserTree<T> {
                     // Geometric Property: If `opp_leaf` is a descendant of `dest`,
                     // shifting it up by `dest_level` must equal `dest`.
                     let opp_idx = self.nodes[slot].index;
-                    if opp_idx != usize::MAX {
-                        let opp_leaf = self.leaf_index(opp_idx);
+                    if opp_idx != u32::MAX {
+                        let opp_leaf = self.leaf_index(opp_idx as usize);
                         if (opp_leaf >> dest_level) == dest {
                             break;
                         }
@@ -259,7 +274,7 @@ impl<T: Ord + SentinelValue> LoserTree<T> {
             for idx in start_idx..end_idx {
                 if idx < self.nodes.len() {
                     let node = &self.nodes[idx];
-                    let value_str = if node.index == usize::MAX {
+                    let value_str = if node.index == u32::MAX {
                         format!("{} (sentinel)", node.key)
                     } else {
                         format!("{}", node.key)
@@ -306,7 +321,7 @@ impl<T: Ord + SentinelValue> LoserTree<T> {
 
         // Internal nodes
         for (idx, node) in self.nodes.iter().enumerate().skip(1) {
-            let display = if node.index == usize::MAX {
+            let display = if node.index == u32::MAX {
                 format!("[{}:-]", idx)
             } else {
                 format!("[{}:{}(s{})]", idx, node.key, node.index)
@@ -350,7 +365,7 @@ impl<T: Ord + SentinelValue> LoserTree<T> {
                 ));
             } else if idx < nodes.len() {
                 let node = &nodes[idx];
-                let value_str = if node.index == usize::MAX {
+                let value_str = if node.index == u32::MAX {
                     format!("{} (sentinel)", node.key)
                 } else {
                     format!("{}", node.key)

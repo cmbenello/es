@@ -102,6 +102,10 @@ impl SortInput for GenSortInputDirect {
 
         scanners
     }
+
+    fn estimated_size_bytes(&self) -> Option<u64> {
+        self.file_size().ok()
+    }
 }
 
 /// Scanner for reading a range of records from a GenSort file

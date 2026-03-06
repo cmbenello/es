@@ -5,7 +5,7 @@ fn summarize(
     result: &BenchmarkResult,
 ) -> (
     String, // name
-    f64,    // run_size_mb
+    f64,    // rg_buf_mb
     usize,  // gen_thr
     usize,  // merge_thr
     usize,  // bench_runs
@@ -121,7 +121,7 @@ fn summarize(
 
     (
         cfg.config_name.clone(),
-        cfg.run_size_mb,
+        cfg.rg_buf_mb,
         cfg.run_gen_threads,
         cfg.merge_threads,
         svec.len(),
@@ -138,19 +138,16 @@ fn summarize(
 
 /// Print merge operations summary table
 fn print_merge_operations_table(result: &BenchmarkResult, max_merges: usize) {
-    let merges_to_show = max_merges.min(5);
-    let start_merge = max_merges.saturating_sub(merges_to_show);
-
     println!("\n{}", "=".repeat(160));
     println!(
-        "Merge Operations Summary (showing last {} of {} merge passes)",
-        merges_to_show, max_merges
+        "Merge Operations Summary — {} ({} merge passes)",
+        result.config.config_name, max_merges
     );
     println!("{}", "=".repeat(160));
 
     // Build header dynamically based on number of merges to show
     let mut header = format!("{:<20}", "Config");
-    for mi in (start_merge..max_merges).map(|i| i + 1) {
+    for mi in (0..max_merges).map(|i| i + 1) {
         header.push_str(&format!(
             " {:<10} {:<10} {:<10} {:<12} {:<12}",
             format!("M{}PAvg", mi),
@@ -165,10 +162,10 @@ fn print_merge_operations_table(result: &BenchmarkResult, max_merges: usize) {
 
     // Print each benchmark run on one line
     for (run_idx, sort_stats) in result.stats.iter().enumerate() {
-        let name = format!("{}[{}]", result.config.config_name, run_idx + 1);
+        let name = format!("Run {}", run_idx + 1);
         let mut line = format!("{:<20}", name);
 
-        for mi in start_merge..max_merges {
+        for mi in 0..max_merges {
             if mi < sort_stats.per_merge_stats.len() {
                 let m = &sort_stats.per_merge_stats[mi];
                 let total_entries: u64 = m.merge_entry_num.iter().sum();
@@ -185,12 +182,18 @@ fn print_merge_operations_table(result: &BenchmarkResult, max_merges: usize) {
                     0.0
                 };
 
-                // For single run, slowest and fastest are the same
-                let time_s = m.time_ms as f64 / 1000.0;
+                let (slow_s, fast_s) = if !m.per_thread_times_ms.is_empty() {
+                    let min_time = *m.per_thread_times_ms.iter().min().unwrap_or(&0);
+                    let max_time = *m.per_thread_times_ms.iter().max().unwrap_or(&0);
+                    (max_time as f64 / 1000.0, min_time as f64 / 1000.0)
+                } else {
+                    let time_s = m.time_ms as f64 / 1000.0;
+                    (time_s, time_s)
+                };
 
                 line.push_str(&format!(
                     " {:<10} {:<10} {:<10.2} {:<12.2} {:<12.2}",
-                    part_avg, part_max, imbalance, time_s, time_s
+                    part_avg, part_max, imbalance, slow_s, fast_s
                 ));
             } else {
                 // No merge data for this pass
@@ -205,14 +208,14 @@ fn print_merge_operations_table(result: &BenchmarkResult, max_merges: usize) {
 
     // Print aggregate statistics
     println!("{}", "-".repeat(160));
-    let aggregate_name = format!("{}[avg]", result.config.config_name);
-    let mut agg_line = format!("{:<20}", aggregate_name);
+    let mut agg_line = format!("{:<20}", "avg");
 
-    for mi in start_merge..max_merges {
+    for mi in 0..max_merges {
         let mut part_avgs: Vec<u64> = Vec::new();
         let mut part_maxs: Vec<u64> = Vec::new();
         let mut imbalances: Vec<f64> = Vec::new();
-        let mut times_s: Vec<f64> = Vec::new();
+        let mut slow_times_s: Vec<f64> = Vec::new();
+        let mut fast_times_s: Vec<f64> = Vec::new();
 
         for s in &result.stats {
             if mi < s.per_merge_stats.len() {
@@ -234,16 +237,28 @@ fn print_merge_operations_table(result: &BenchmarkResult, max_merges: usize) {
                 part_avgs.push(part_avg);
                 part_maxs.push(part_max);
                 imbalances.push(imbalance);
-                times_s.push(m.time_ms as f64 / 1000.0);
+                if !m.per_thread_times_ms.is_empty() {
+                    let min_time = *m.per_thread_times_ms.iter().min().unwrap_or(&0);
+                    let max_time = *m.per_thread_times_ms.iter().max().unwrap_or(&0);
+                    slow_times_s.push(max_time as f64 / 1000.0);
+                    fast_times_s.push(min_time as f64 / 1000.0);
+                } else {
+                    let time_s = m.time_ms as f64 / 1000.0;
+                    slow_times_s.push(time_s);
+                    fast_times_s.push(time_s);
+                }
             }
         }
 
-        if !times_s.is_empty() {
+        if !slow_times_s.is_empty() {
             let avg_part_avg = part_avgs.iter().sum::<u64>() / part_avgs.len() as u64;
             let avg_part_max = part_maxs.iter().sum::<u64>() / part_maxs.len() as u64;
             let avg_imbalance = imbalances.iter().sum::<f64>() / imbalances.len() as f64;
-            let slowest_time = times_s.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
-            let fastest_time = times_s.iter().cloned().fold(f64::INFINITY, f64::min);
+            let slowest_time = slow_times_s
+                .iter()
+                .cloned()
+                .fold(f64::NEG_INFINITY, f64::max);
+            let fastest_time = fast_times_s.iter().cloned().fold(f64::INFINITY, f64::min);
 
             agg_line.push_str(&format!(
                 " {:<10} {:<10} {:<10.2} {:<12.2} {:<12.2}",
@@ -263,7 +278,7 @@ fn print_merge_operations_table(result: &BenchmarkResult, max_merges: usize) {
 /// Print detailed I/O statistics table
 fn print_detailed_io_statistics_table(result: &BenchmarkResult, max_merges: usize) {
     println!("\n{}", "=".repeat(160));
-    println!("Detailed I/O Statistics");
+    println!("Detailed I/O Statistics — {}", result.config.config_name);
     println!("{}", "=".repeat(160));
 
     // Build header dynamically based on number of merges
@@ -296,7 +311,7 @@ fn print_detailed_io_statistics_table(result: &BenchmarkResult, max_merges: usiz
             .map(|io| io.write_bytes as f64 / (1024.0 * 1024.0))
             .unwrap_or(0.0);
 
-        let name = format!("{}[{}]", result.config.config_name, run_idx + 1);
+        let name = format!("Run {}", run_idx + 1);
         let mut io_line = format!("{:<20} {:<12.1} {:<12.1}", name, rg_read_mb, rg_write_mb);
 
         for mi in 0..max_merges {
@@ -327,8 +342,6 @@ fn print_detailed_io_statistics_table(result: &BenchmarkResult, max_merges: usiz
 
     // Print aggregate statistics
     println!("{}", "-".repeat(160));
-    let aggregate_name = format!("{}[avg]", result.config.config_name);
-
     let num_runs = result.stats.len() as f64;
     let avg_rg_read_mb = result
         .stats
@@ -357,7 +370,7 @@ fn print_detailed_io_statistics_table(result: &BenchmarkResult, max_merges: usiz
 
     let mut agg_io_line = format!(
         "{:<20} {:<12.1} {:<12.1}",
-        aggregate_name, avg_rg_read_mb, avg_rg_write_mb
+        "avg", avg_rg_read_mb, avg_rg_write_mb
     );
 
     for mi in 0..max_merges {
@@ -407,7 +420,10 @@ fn print_detailed_io_statistics_table(result: &BenchmarkResult, max_merges: usiz
 /// Print run generation time breakdown table (total, load, sort, store)
 fn print_run_gen_breakdown_table(result: &BenchmarkResult) {
     println!("\n{}", "=".repeat(100));
-    println!("Run Generation Time Breakdown");
+    println!(
+        "Run Generation Time Breakdown — {}",
+        result.config.config_name
+    );
     println!("{}", "=".repeat(100));
 
     // Header
@@ -419,7 +435,7 @@ fn print_run_gen_breakdown_table(result: &BenchmarkResult) {
 
     // Per-run lines
     for (run_idx, s) in result.stats.iter().enumerate() {
-        let name = format!("{}[{}]", result.config.config_name, run_idx + 1);
+        let name = format!("Run {}", run_idx + 1);
         let total_s = s.run_gen_stats.time_ms as f64 / 1000.0;
         let load_s = s.run_gen_stats.load_time_ms as f64 / 1000.0;
         let sort_s = s.run_gen_stats.sort_time_ms as f64 / 1000.0;
@@ -459,22 +475,21 @@ fn print_run_gen_breakdown_table(result: &BenchmarkResult) {
         .sum::<f64>()
         / runs;
 
-    let agg_name = format!("{}[avg]", result.config.config_name);
     println!(
         "{:<20} {:<12.2} {:<12.2} {:<12.2} {:<12.2}",
-        agg_name, avg_total_s, avg_load_s, avg_sort_s, avg_store_s
+        "avg", avg_total_s, avg_load_s, avg_sort_s, avg_store_s
     );
     println!("{}", "=".repeat(100));
 }
 
 pub fn print_benchmark_summary(result: &BenchmarkResult) {
     println!("\n{}", "=".repeat(160));
-    println!("Benchmark Results Summary");
+    println!("Benchmark Results Summary — {}", result.config.config_name);
     println!("{}", "=".repeat(160));
     println!(
         "{:<20} {:<10} {:<10} {:<10} {:<10} {:<10} {:<12} {:<10} {:<12} {:<16} {:<10} {:<10}",
         "Config",
-        "Run Size",
+        "RG Buf",
         "RG Runs",
         "Gen Thr",
         "Merge Thr",
@@ -545,12 +560,12 @@ pub fn print_benchmark_summary(result: &BenchmarkResult) {
             0.0
         };
 
-        let name = format!("{}[{}]", cfg.config_name, run_idx + 1);
+        let name = format!("Run {}", run_idx + 1);
 
         println!(
             "{:<20} {:<10.1} {:<10} {:<10} {:<10} {:<12.2} {:<10.2} {:<10.2} {:<12} {:<16.2} {:<10.1} {:<10.1}",
             name,
-            cfg.run_size_mb,
+            cfg.rg_buf_mb,
             sort_stats.run_gen_stats.num_runs,
             cfg.run_gen_threads,
             cfg.merge_threads,
@@ -566,8 +581,8 @@ pub fn print_benchmark_summary(result: &BenchmarkResult) {
 
     // Print aggregate line
     let (
-        name,
-        run_size_mb,
+        _name,
+        rg_buf_mb,
         gen_thr,
         merge_thr,
         _bench_runs,
@@ -580,11 +595,10 @@ pub fn print_benchmark_summary(result: &BenchmarkResult) {
         read_mb,
         write_mb,
     ) = summarize(result);
-    let aggregate_name = format!("{}[avg]", name);
     println!(
         "{:<20} {:<10.1} {:<10} {:<10} {:<10} {:<12.2} {:<10.2} {:<10.2} {:<12} {:<16.2} {:<10.1} {:<10.1}",
-        aggregate_name,
-        run_size_mb,
+        "avg",
+        rg_buf_mb,
         rg_runs,
         gen_thr,
         merge_thr,

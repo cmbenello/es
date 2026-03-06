@@ -1,26 +1,26 @@
-use crate::ovc::offset_value_coding::{OVC64Trait, OVCKeyValue, OVCU64, SentinelValue};
+use crate::ovc::offset_value_coding_32::{OVC32Trait, OVCKey32, OVCKeyValue32, OVCU32};
+use crate::ovc::offset_value_coding_64::SentinelValue;
 use crate::ovc::tree_of_losers_ovc::LoserTreeOVC;
-
+use crate::sort::ovc::run::RunWithOVC;
 // K-way merge iterator
-pub struct MergeWithOVC<I: Iterator<Item = (OVCU64, Vec<u8>, Vec<u8>)>> {
+pub struct MergeWithOVC<I: Iterator<Item = (OVCU32, Vec<u8>, Vec<u8>)>> {
     // Tree of losers with OVC
-    tree: LoserTreeOVC<OVCKeyValue>,
+    tree: LoserTreeOVC<OVCKeyValue32>,
     // Iterators for each run
     iterators: Vec<I>,
 }
 
-impl<I: Iterator<Item = (OVCU64, Vec<u8>, Vec<u8>)>> MergeWithOVC<I> {
+impl<I: Iterator<Item = (OVCU32, Vec<u8>, Vec<u8>)>> MergeWithOVC<I> {
     pub fn new(mut iterators: Vec<I>) -> Self {
         if iterators.is_empty() || iterators.len() == 1 {
             panic!("MergeWithOVC requires at least two iterators");
         }
-
         let mut initial = Vec::with_capacity(iterators.len());
         for iter in iterators.iter_mut() {
             if let Some(val) = iter.next().map(|e| e.into()) {
                 initial.push(val);
             } else {
-                initial.push(OVCKeyValue::late_fence());
+                initial.push(OVCKeyValue32::late_fence());
             }
         }
 
@@ -30,43 +30,198 @@ impl<I: Iterator<Item = (OVCU64, Vec<u8>, Vec<u8>)>> MergeWithOVC<I> {
     }
 }
 
-impl<I: Iterator<Item = (OVCU64, Vec<u8>, Vec<u8>)>> Iterator for MergeWithOVC<I> {
-    type Item = (OVCU64, Vec<u8>, Vec<u8>);
+impl<I: Iterator<Item = (OVCU32, Vec<u8>, Vec<u8>)>> Iterator for MergeWithOVC<I> {
+    type Item = (OVCU32, Vec<u8>, Vec<u8>);
 
     fn next(&mut self) -> Option<Self::Item> {
         let (_, source_idx) = self.tree.peek()?;
         if let Some(mut next_item) = self.iterators[source_idx]
             .next()
-            .map(|e: Self::Item| OVCKeyValue::from(e))
+            .map(|e: Self::Item| OVCKeyValue32::from(e))
         {
             if next_item.ovc().is_duplicate_value() {
                 // For duplicate OVC, we swap the OVC value in the top of the tree
                 // and return the item directly
                 *next_item.ovc_mut() = self.tree.replace_top_ovc(*next_item.ovc());
                 return Some(next_item.take());
+            } else {
+                let winner = self.tree.push(next_item);
+                return Some(winner.take());
             }
-            let winner = self.tree.push(next_item);
-            return Some(winner.take());
-        }
+        };
         self.tree
             .mark_current_exhausted()
             .map(|winner| winner.take())
     }
 }
 
+/// A source that can produce keys one at a time and copy values directly
+/// to an output writer without intermediate allocation.
+pub trait MergeSource: Send {
+    /// Read the next key from this source into the provided buffer.
+    /// Returns `(ovc, value_len)` on success. After this call, the source
+    /// reader is positioned at the start of the value bytes.
+    /// The key buffer is resized/filled with the full reconstructed key.
+    fn next_key_into(&mut self, key: &mut Vec<u8>) -> Option<(OVCU32, usize)>;
+
+    /// Copy `len` value bytes directly from this source's reader to `writer`.
+    fn copy_value_to(&mut self, writer: &mut dyn std::io::Write, len: usize);
+
+    /// Skip `len` value bytes (advance past value without reading).
+    fn skip_value(&mut self, len: usize);
+}
+
+/// Zero-copy k-way merge that writes directly to an output run.
+///
+/// Keys live in the loser tree (`OVCKey32`). Values are never buffered -
+/// they flow directly from source `AlignedReader` to output `AlignedWriter`.
+/// Key buffers are recycled through the tree via a spare buffer.
+pub struct ZeroCopyMergeWithOVC<S: MergeSource> {
+    tree: LoserTreeOVC<OVCKey32>,
+    sources: Vec<S>,
+    spare_key: Vec<u8>,
+}
+
+impl<S: MergeSource> ZeroCopyMergeWithOVC<S> {
+    pub fn new(mut sources: Vec<S>) -> Self {
+        if sources.len() < 2 {
+            panic!("ZeroCopyMergeWithOVC requires at least two sources");
+        }
+
+        let mut initial = Vec::with_capacity(sources.len());
+        let mut spare_key = Vec::new();
+
+        for source in sources.iter_mut() {
+            if let Some((ovc, value_len)) = source.next_key_into(&mut spare_key) {
+                let key = std::mem::take(&mut spare_key);
+                initial.push(OVCKey32::new(ovc, key, value_len));
+            } else {
+                initial.push(OVCKey32::late_fence());
+            }
+        }
+
+        let tree = LoserTreeOVC::new(initial);
+        Self {
+            tree,
+            sources,
+            spare_key,
+        }
+    }
+
+    /// Iterate through all records in merge order, discarding values.
+    /// Returns the total number of entries consumed.
+    pub fn discard(mut self) -> usize {
+        let mut entries = 0usize;
+        loop {
+            let Some((_, source_idx)) = self.tree.peek() else {
+                break;
+            };
+            let value_len = self.tree.peek().unwrap().0.value_len;
+
+            // Skip value bytes in the source
+            self.sources[source_idx].skip_value(value_len);
+            entries = entries.saturating_add(1);
+
+            // Advance: read next key from winner's source, handling duplicates
+            loop {
+                let Some((next_ovc, next_value_len)) =
+                    self.sources[source_idx].next_key_into(&mut self.spare_key)
+                else {
+                    // Source exhausted
+                    if let Some(old) = self.tree.mark_current_exhausted() {
+                        self.spare_key = old.take_key();
+                    }
+                    break;
+                };
+
+                if next_ovc.is_duplicate_value() {
+                    // Duplicate: skip its value too, count it
+                    let _swapped_ovc = self.tree.replace_top_ovc(next_ovc);
+                    self.sources[source_idx].skip_value(next_value_len);
+                    entries = entries.saturating_add(1);
+                    // Continue loop to check for more consecutive duplicates
+                } else {
+                    // Non-duplicate: push new key to tree, recycle old winner's key
+                    let new_key = OVCKey32::new(
+                        next_ovc,
+                        std::mem::take(&mut self.spare_key),
+                        next_value_len,
+                    );
+                    let old_winner = self.tree.push(new_key);
+                    self.spare_key = old_winner.take_key();
+                    break;
+                }
+            }
+        }
+        entries
+    }
+
+    /// Merge all records and write them to the output run.
+    ///
+    /// For each record: writes OVC+key header from the tree, then copies value
+    /// bytes directly from the source reader to the output writer.
+    pub fn merge_into(mut self, output: &mut RunWithOVC) {
+        loop {
+            let Some((winner_entry, source_idx)) = self.tree.peek() else {
+                break;
+            };
+            let ovc = *winner_entry.ovc();
+            let value_len = winner_entry.value_len;
+            let key = winner_entry.key();
+
+            // 1. Write winner's header+key to output
+            output.append_header_and_key(ovc, key, value_len);
+
+            // 2. Copy value directly from source reader to output writer
+            self.sources[source_idx].copy_value_to(output.writer(), value_len);
+
+            // 3. Advance: read next key from winner's source, handling duplicates
+            loop {
+                let Some((next_ovc, next_value_len)) =
+                    self.sources[source_idx].next_key_into(&mut self.spare_key)
+                else {
+                    // Source exhausted
+                    if let Some(old) = self.tree.mark_current_exhausted() {
+                        self.spare_key = old.take_key();
+                    }
+                    break;
+                };
+
+                if next_ovc.is_duplicate_value() {
+                    // Duplicate: output immediately (key in spare_key, value pending)
+                    let swapped_ovc = self.tree.replace_top_ovc(next_ovc);
+                    output.append_header_and_key(swapped_ovc, &self.spare_key, next_value_len);
+                    self.sources[source_idx].copy_value_to(output.writer(), next_value_len);
+                    // Continue loop to check for more consecutive duplicates
+                } else {
+                    // Non-duplicate: push new key to tree, recycle old winner's key
+                    let new_key = OVCKey32::new(
+                        next_ovc,
+                        std::mem::take(&mut self.spare_key),
+                        next_value_len,
+                    );
+                    let old_winner = self.tree.push(new_key);
+                    self.spare_key = old_winner.take_key();
+                    break;
+                }
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ovc::offset_value_coding::OVC64Trait;
+    use crate::ovc::offset_value_coding_32::OVC32Trait;
 
     // Helper function to encode a sorted run with proper OVC values
-    fn encode_run_with_ovc(data: Vec<(Vec<u8>, Vec<u8>)>) -> Vec<(OVCU64, Vec<u8>, Vec<u8>)> {
+    fn encode_run_with_ovc(data: Vec<(Vec<u8>, Vec<u8>)>) -> Vec<(OVCU32, Vec<u8>, Vec<u8>)> {
         assert!(data.is_sorted_by_key(|(k, _)| k.clone()));
 
         let mut result = Vec::with_capacity(data.len());
 
         for (i, (key, value)) in data.into_iter().enumerate() {
-            let mut new_entry = OVCKeyValue::new(key, value);
+            let mut new_entry = OVCKeyValue32::new(key, value);
             if i > 0 {
                 new_entry.derive_ovc_from(&result[i - 1]);
             }
@@ -79,7 +234,7 @@ mod tests {
     #[test]
     #[should_panic(expected = "MergeWithOVC requires at least two iterators")]
     fn test_merge_empty_iterators() {
-        let iterators: Vec<std::vec::IntoIter<(OVCU64, Vec<u8>, Vec<u8>)>> = vec![];
+        let iterators: Vec<std::vec::IntoIter<(OVCU32, Vec<u8>, Vec<u8>)>> = vec![];
         let mut merger = MergeWithOVC::new(iterators);
 
         assert!(merger.next().is_none());
@@ -274,14 +429,14 @@ mod tests {
 
     #[test]
     fn test_merge_empty_and_nonempty() {
-        let data1: Vec<(OVCU64, Vec<u8>, Vec<u8>)> = vec![];
+        let data1: Vec<(OVCU32, Vec<u8>, Vec<u8>)> = vec![];
 
         let data2 = encode_run_with_ovc(vec![
             (b"a".to_vec(), b"1".to_vec()),
             (b"b".to_vec(), b"2".to_vec()),
         ]);
 
-        let data3: Vec<(OVCU64, Vec<u8>, Vec<u8>)> = vec![];
+        let data3: Vec<(OVCU32, Vec<u8>, Vec<u8>)> = vec![];
 
         let iterators = vec![data1.into_iter(), data2.into_iter(), data3.into_iter()];
         let merger = MergeWithOVC::new(iterators);
