@@ -1,0 +1,53 @@
+\documentclass[11pt]{article}
+
+\usepackage{booktabs}
+\usepackage[margin=1in]{geometry}
+
+\title{External Sort Model: Data- vs Machine-Dependent Factors}
+\author{}
+\date{}
+
+\begin{document}
+\maketitle
+
+\section*{Summary}
+This table separates model inputs/constants into \emph{data-dependent} (properties of the dataset or workload) and \emph{machine-dependent} (properties of the hardware or system). Use it as a checklist when porting the model to new data or new machines.
+
+\begin{center}
+\begin{tabular}{p{0.40\textwidth} p{0.18\textwidth} p{0.36\textwidth}}
+\toprule
+Factor & Depends On & Notes \\
+\midrule
+$D$ (dataset size) & Data & Total input size (MB). \\
+$B$ (record size) & Data & Bytes per record; drives per-record CPU cost. \\
+$c_{out}$ (output ratio) & Data & Output vs input size; affected by compression/filtering. \\
+Input distribution & Data & Affects run formation and merge balance. \\
+Key distribution / skew & Data & Skew makes merging uneven; shifts $\phi$. \\
+Sort order / key width & Data & Wider keys increase compare cost. \\
+OVC dataset specifics (schema, key width, skew) & Data & OVC mixes can move skew and key sizes. \\
+$\phi$ (merge imbalance) & Data & Captures skew/imbalance in merge. \\
+$\rho$ (run packing factor) & Data + Machine & Format and buffering change effective run size. \\
+$F$ (fan-in) & Machine + Config & Limited by memory and file handles. \\
+\midrule
+Disk speed / IO bandwidth & Machine & Sets IO slopes for run-gen/merge. \\
+Memory bandwidth (RAM speed) & Machine & Limits CPU scaling on large runs. \\
+CPU throughput & Machine & Sets CPU slope terms. \\
+NUMA topology & Machine & Can penalize scaling past socket. \\
+Cache hierarchy & Machine & Affects compare cost and locality. \\
+$a_{read}$ (read amplification) & Machine + Config & Merge strategy and IO scheduling. \\
+rg/merge penalty parameters & Machine & Oversubscription/contended threads. \\
+rg\_opt / merge\_opt & Machine + Config & Best thread counts for this box. \\
+tm\_eff\_cap & Machine & Effective merge-thread ceiling. \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\section*{Notes}
+\begin{itemize}
+  \item If the dataset changes (schema, key width, compression), revisit $B$, $c_{out}$, and $\phi$ first.
+  \item If the machine changes (CPU/IO/memory), refit IO and CPU slopes plus the penalty parameters.
+  \item OVC data tends to shift skew and key distributions, so expect $\phi$ and $c_{out}$ to move.
+  \item Fan-in $F$ and $a_{read}$ are mostly config/implementation choices; keep them explicit in logs.
+\end{itemize}
+
+\end{document}
