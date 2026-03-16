@@ -172,7 +172,7 @@ impl RunFormat for OvcRunFormat {
         lower_bound: Option<(&[u8], u32, usize)>,
         upper_bound: Option<(&[u8], u32, usize)>,
         io_tracker: Option<IoStatsTracker>,
-        page_pool: &SparseIndexPagePool,
+        _page_pool: &SparseIndexPagePool,
         _thread_id: usize,
     ) -> usize {
         // Step 1: Create merge sources (reads sparse index for seek)
@@ -252,12 +252,7 @@ impl RunFormat for OvcRunFormat {
             }
         }
 
-        // Step 2: Release sparse index pages to pool
-        for run in runs {
-            run.release_sparse_index_to_pool(page_pool);
-        }
-
-        // Step 3: Execute discard merge
+        // Step 2: Execute discard merge
         match sources.len() {
             0 => 0,
             1 => {
@@ -280,7 +275,7 @@ impl RunFormat for OvcRunFormat {
         lower_bound: Option<(&[u8], u32, usize)>,
         upper_bound: Option<(&[u8], u32, usize)>,
         io_tracker: Option<IoStatsTracker>,
-        page_pool: &SparseIndexPagePool,
+        _page_pool: &SparseIndexPagePool,
         _thread_id: usize,
         _merge_threads: usize,
     ) {
@@ -361,12 +356,7 @@ impl RunFormat for OvcRunFormat {
             }
         }
 
-        // Step 2: Release sparse index pages to pool
-        for run in runs {
-            run.release_sparse_index_to_pool(page_pool);
-        }
-
-        // Step 3: Execute merge
+        // Step 2: Execute merge
         match sources.len() {
             0 => {}
             1 => {
