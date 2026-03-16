@@ -1,6 +1,5 @@
 use std::path::Path;
 use std::sync::Arc;
-use std::sync::Barrier;
 use std::sync::atomic::AtomicU32;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
@@ -107,8 +106,7 @@ pub trait RunFormat: Clone + Send + Sync + 'static {
     /// drains the pages to the given pool instead of dropping them.
     fn release_sparse_index_to_pool(_run: &Self::Run, _pool: &SparseIndexPagePool) {}
 
-    /// Create merge sources, release sparse indexes to pool, barrier-sync,
-    /// redistribute pages, then execute the merge.
+    /// Create merge sources, release sparse indexes to pool, then execute the merge.
     fn create_merge_sources_and_execute(
         runs: &[MergeableRun<Self>],
         output_run: &mut Self::Run,
@@ -116,13 +114,12 @@ pub trait RunFormat: Clone + Send + Sync + 'static {
         upper_bound: Option<(&[u8], u32, usize)>,
         io_tracker: Option<IoStatsTracker>,
         page_pool: &SparseIndexPagePool,
-        barrier: &Barrier,
         thread_id: usize,
         merge_threads: usize,
     ) where
         Self: Sized;
 
-    /// Create merge sources, release sparse indexes to pool, barrier-sync,
+    /// Create merge sources, release sparse indexes to pool,
     /// then iterate through all records discarding values. Returns entry count.
     fn create_merge_sources_and_discard(
         runs: &[MergeableRun<Self>],
@@ -130,7 +127,6 @@ pub trait RunFormat: Clone + Send + Sync + 'static {
         upper_bound: Option<(&[u8], u32, usize)>,
         io_tracker: Option<IoStatsTracker>,
         page_pool: &SparseIndexPagePool,
-        barrier: &Barrier,
         thread_id: usize,
     ) -> usize
     where
@@ -960,7 +956,6 @@ impl<F: RunFormat> SortHooks for FormatSortHooks<F> {
         io_tracker: Arc<IoStatsTracker>,
         discard_output: bool,
         page_pool: Arc<SparseIndexPagePool>,
-        barrier: Arc<Barrier>,
         merge_threads: usize,
     ) -> Result<(Self::MergeableRun, u128), String> {
         let thread_start = Instant::now();
@@ -972,7 +967,6 @@ impl<F: RunFormat> SortHooks for FormatSortHooks<F> {
                 upper_bound,
                 Some((*io_tracker).clone()),
                 &page_pool,
-                &barrier,
                 thread_id,
             );
 
@@ -1014,7 +1008,6 @@ impl<F: RunFormat> SortHooks for FormatSortHooks<F> {
             upper_bound,
             Some((*io_tracker).clone()),
             &page_pool,
-            &barrier,
             thread_id,
             merge_threads,
         );

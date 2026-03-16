@@ -1,4 +1,3 @@
-use std::sync::Barrier;
 
 use crate::diskio::aligned_writer::AlignedWriter;
 use crate::diskio::io_stats::IoStatsTracker;
@@ -174,7 +173,6 @@ impl RunFormat for OvcRunFormat {
         upper_bound: Option<(&[u8], u32, usize)>,
         io_tracker: Option<IoStatsTracker>,
         page_pool: &SparseIndexPagePool,
-        barrier: &Barrier,
         _thread_id: usize,
     ) -> usize {
         // Step 1: Create merge sources (reads sparse index for seek)
@@ -259,10 +257,7 @@ impl RunFormat for OvcRunFormat {
             run.release_sparse_index_to_pool(page_pool);
         }
 
-        // Step 3: Barrier - wait for all threads to release
-        barrier.wait();
-
-        // Step 4: Execute discard merge
+        // Step 3: Execute discard merge
         match sources.len() {
             0 => 0,
             1 => {
@@ -286,9 +281,8 @@ impl RunFormat for OvcRunFormat {
         upper_bound: Option<(&[u8], u32, usize)>,
         io_tracker: Option<IoStatsTracker>,
         page_pool: &SparseIndexPagePool,
-        barrier: &Barrier,
-        thread_id: usize,
-        merge_threads: usize,
+        _thread_id: usize,
+        _merge_threads: usize,
     ) {
         // Step 1: Create merge sources (reads sparse index for seek)
         let mut sources = Vec::new();
@@ -372,20 +366,7 @@ impl RunFormat for OvcRunFormat {
             run.release_sparse_index_to_pool(page_pool);
         }
 
-        // Step 3: Barrier - wait for all threads to release
-        barrier.wait();
-
-        // Step 4: Redistribute pages from pool to output run
-        let total = page_pool.len();
-        let budget_cap = output_run.sparse_index_mut().budget_pages();
-        let per_thread = total / merge_threads;
-        let extra = total % merge_threads;
-        let fair_share = per_thread + if thread_id < extra { 1 } else { 0 };
-        let my_count = fair_share.min(budget_cap);
-        let my_pages = page_pool.take(my_count);
-        output_run.sparse_index_mut().seed_buffer(my_pages);
-
-        // Step 5: Execute merge
+        // Step 3: Execute merge
         match sources.len() {
             0 => {}
             1 => {

@@ -1,6 +1,6 @@
 use std::path::{Path, PathBuf};
 use std::sync::atomic::Ordering;
-use std::sync::{Arc, Barrier};
+use std::sync::Arc;
 use std::thread;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
@@ -188,7 +188,6 @@ pub trait SortHooks: Clone + Send + Sync + 'static {
         io_tracker: Arc<IoStatsTracker>,
         discard_output: bool,
         page_pool: Arc<SparseIndexPagePool>,
-        barrier: Arc<Barrier>,
         merge_threads: usize,
     ) -> Result<(Self::MergeableRun, u128), String>;
 
@@ -677,9 +676,8 @@ fn merge_once_with_hooks<H: SortHooks>(
         hooks.set_sparse_index_readers(run, merge_threads);
     }
 
-    // Create page pool and barrier for sparse index memory recycling.
+    // Create page pool for sparse index memory recycling.
     let page_pool = Arc::new(SparseIndexPagePool::new());
-    let barrier = Arc::new(Barrier::new(merge_threads));
 
     let runs_arc = Arc::new(output_runs);
     let mut merge_handles = vec![];
@@ -697,7 +695,6 @@ fn merge_once_with_hooks<H: SortHooks>(
         let hooks = hooks.clone();
         let run_id = run_id_base + thread_id as u32;
         let page_pool = Arc::clone(&page_pool);
-        let barrier = Arc::clone(&barrier);
 
         let handle = thread::spawn(move || {
             let indexes: Vec<_> = runs.iter().map(|run| hooks.sparse_indexes(run)).collect();
@@ -781,7 +778,6 @@ fn merge_once_with_hooks<H: SortHooks>(
                     io_tracker,
                     discard_output,
                     page_pool,
-                    barrier,
                     merge_threads,
                 )
                 .map(|(run, thread_time)| {
