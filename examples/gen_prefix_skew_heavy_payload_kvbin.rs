@@ -373,6 +373,7 @@ fn pick_weighted_heavy_group(
         let w = heavy_dup_remaining[group_id] + heavy_near_remaining[group_id];
         if r < w {
             return group_id;
+
         }
         r -= w;
     }
