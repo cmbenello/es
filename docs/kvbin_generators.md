@@ -1,14 +1,15 @@
 # KVBin Dataset Generators
 
-Three example binaries produce large synthetic datasets in the **KVBin** format for
-benchmarking the external sorter.  All are fully parallelised and produce deterministic
-output given the same `--seed`.
+Four example binaries produce synthetic datasets in the **KVBin** format for benchmarking
+the external sorter.  The first three are fully parallelised; `prefix_skew_heavy_payload`
+uses a deterministic streaming generator to preserve local heavy-group bursts.
 
 | Binary | Dataset name | Dup skew | Size skew | Isolates |
 |---|---|---|---|---|
 | `gen_freq_key_kvbin` | `freq_key` | Yes (50 % → one key) | No (uniform 512 B) | duplicate splitting only |
 | `gen_heavy_key_kvbin` | `heavy_key` | Yes (10 % → one key) | Yes (32 KiB vs 128 B) | dup + size skew combined |
 | `gen_heavy_range_kvbin` | `heavy_range` | No (rare dups) | Yes (32 KiB vs 128 B) | size skew only |
+| `gen_prefix_skew_heavy_payload_kvbin` | `prefix_skew_heavy_payload` | Yes (heavy dup + near-dup) | Yes (8 KiB-64 KiB heavy tail) | late key compares + dup boundaries + byte skew |
 
 ---
 
@@ -22,7 +23,8 @@ Every record is a simple length-prefixed key/value pair, all integers little-end
 └──────────┴─────────────┴──────────┴─────────────────┘
 ```
 
-Both generators always write an 8-byte `u64` key (`klen = 8`).
+The first three generators write an 8-byte `u64` key (`klen = 8`).
+`gen_prefix_skew_heavy_payload_kvbin` writes variable-length binary keys.
 
 ## Sparse index format (`.idx`)
 
@@ -40,18 +42,21 @@ allows O(1) random seeks without scanning the whole dataset.
 
 ### How the generators create the index
 
-Each generator uses a dedicated **writer thread** that receives `Block` structs (each ~4 MiB
-of serialised records) from the worker threads over a bounded channel.  For every block the
-writer receives it:
+All generators append one `.idx` offset per flushed data block.  In the three parallel
+generators, a dedicated writer thread receives `Block` structs (each ~4 MiB) from worker
+threads.  The streaming PrefixSkew generator performs the same offset/data append sequence
+in a single thread.
+
+For every flushed block:
 
 1. Appends the current cumulative byte offset (`bytes_written`) to the `.idx` file as a
    little-endian `u64`.
 2. Writes the block's raw bytes to the `.kvbin` file.
 3. Advances `bytes_written` by the block's length.
 
-Because each worker flushes its buffer whenever it reaches the `INDEX_STRIDE_BYTES` threshold
-(4 MiB), every index entry corresponds to roughly one 4 MiB block.  The index is written
-incrementally — no second pass over the data is needed.
+Because data buffers flush at the `INDEX_STRIDE_BYTES` threshold (4 MiB), every index entry
+corresponds to roughly one 4 MiB block.  The index is written incrementally — no second pass
+over the data is needed.
 
 > **Note:** Block boundaries do not necessarily align with record boundaries; a single record
 > is never split across blocks, but the last record in a block may push the block slightly
@@ -246,9 +251,57 @@ cargo run --release --example gen_heavy_range_kvbin -- \
 
 ---
 
+## `gen_prefix_skew_heavy_payload_kvbin` — PrefixSkew-HeavyPayload
+
+### Purpose
+
+Creates a duplicate-heavy, near-duplicate-heavy, byte-skewed dataset with long shared key
+prefixes to maximize expensive late key comparisons while also stressing merge balancing.
+
+### Skew model
+
+| Row category | Share of rows | Key model | Payload size |
+|---|---|---|---|
+| Heavy prefix groups | 60 % | 16 groups, each with a shared 200-byte prefix; 50 % exact duplicates per group, 50 % near-duplicates differing only in last 4-8 bytes | Uniform `8 KiB..65,316 B` (default sorter-safe cap) |
+| Medium prefix groups | 30 % | 1000 groups, each with a shared prefix of length `128..200` bytes | Uniform `256 B..2 KiB` |
+| Random keys | 10 % | Fully random 256-byte keys | Uniform `64 B..256 B` |
+
+Rows are globally shuffled by weighted sampling from remaining quotas, while short burst
+windows force alternating heavy-group emissions from multiple groups to keep adjacent keys
+prefix-similar but not equal.
+
+### CLI reference
+
+```
+cargo run --release --example gen_prefix_skew_heavy_payload_kvbin -- \
+  --out datasets/prefix_skew_heavy_payload.kvbin \
+  --idx datasets/prefix_skew_heavy_payload.kvbin.idx \
+  --sf 10 \
+  --gib-per-sf 1 \
+  --seed 1
+```
+
+| Flag | Default | Description |
+|---|---|---|
+| `--out` | *(required)* | Output `.kvbin` file path |
+| `--idx` | *(required)* | Output `.idx` file path |
+| `--sf` | `1.0` | Scale factor (used when `--rows` is omitted) |
+| `--gib-per-sf` | `1.0` | GiB represented by `SF=1` |
+| `--rows` | unset | Explicit row count override (takes precedence over `--sf`) |
+| `--heavy-payload-min` | `8192` | Heavy-group payload lower bound (bytes) |
+| `--heavy-payload-max` | `65316` | Heavy-group payload upper bound (bytes), capped for sorter compatibility |
+| `--burst-start-prob` | `0.28` | Probability of beginning a heavy-group burst at each row |
+| `--seed` | `1` | Deterministic generation seed |
+
+`--heavy-payload-max` intentionally defaults below 64 KiB because the current
+replacement-selection memory manager stores one record per 64 KiB extent and cannot
+admit larger key+value tuples.
+
+---
+
 ## Architecture
 
-Both generators share the same parallelism model:
+The first three generators share the same parallelism model:
 
 ```
 main thread
@@ -269,15 +322,19 @@ memory bounded.
 `unsafe set_len` before `fill_payload` overwrites every byte, avoiding the double-write
 that `Vec::resize` would cause at 32 KiB per hot record.
 
+`gen_prefix_skew_heavy_payload_kvbin` uses a single streaming loop (no worker pool) so it
+can enforce exact row quotas and burst-local ordering constraints.
+
 ---
 
 ## Dataset comparison
 
-| Property | `freq_key` | `heavy_key` | `heavy_range` |
-|---|---|---|---|
-| Key duplicates | Extreme (50 % → one key) | Extreme (10 % → one key) | Negligible (uniform in 65 k range) |
-| Size skew | None (uniform 512 B) | Yes (32 KiB vs 128 B) | Yes (32 KiB vs 128 B) |
-| Key-Only | FAIL (dup) | FAIL (dup + size) | FAIL (size) |
-| Count-Balanced | **WORKS** | FAIL (size) | FAIL (size) |
-| Byte-Balanced | **WORKS** | **WORKS** | **WORKS** |
-| Primary stress | Duplicate splitting only | Dup splitting + size skew | Range-partition byte imbalance |
+| Property | `freq_key` | `heavy_key` | `heavy_range` | `prefix_skew_heavy_payload` |
+|---|---|---|---|---|
+| Key duplicates | Extreme (50 % → one key) | Extreme (10 % → one key) | Negligible (uniform in 65 k range) | Extreme per heavy group (50 % exact dup + 50 % near-dup) |
+| Size skew | None (uniform 512 B) | Yes (32 KiB vs 128 B) | Yes (32 KiB vs 128 B) | Severe tiered skew (8 KiB..64 KiB vs 256 B..2 KiB vs 64 B..256 B) |
+| Late compare pressure | Low | Low | Low | Very high (long shared prefixes + near-dup tails) |
+| Key-Only | FAIL (dup) | FAIL (dup + size) | FAIL (size) | FAIL (dup + prefix skew + size) |
+| Count-Balanced | **WORKS** | FAIL (size) | FAIL (size) | FAIL (size skew dominates) |
+| Byte-Balanced | **WORKS** | **WORKS** | **WORKS** | **WORKS** |
+| Primary stress | Duplicate splitting only | Dup splitting + size skew | Range-partition byte imbalance | Run generation + merge byte skew + comparison acceleration |
